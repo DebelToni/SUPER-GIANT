@@ -10,7 +10,6 @@ drive.mount('/content/drive')
 import os, pathlib, tempfile
 SCRATCH = "/content/.hf_cache"          
 pathlib.Path(SCRATCH).mkdir(parents=True, exist_ok=True)
-
 os.environ["HF_HOME"]           = SCRATCH
 os.environ["HF_DATASETS_CACHE"] = f"{SCRATCH}/datasets"
 os.environ["HF_HUB_CACHE"]      = f"{SCRATCH}/hub"
@@ -18,5 +17,9 @@ os.environ["HF_HUB_CACHE"]      = f"{SCRATCH}/hub"
 print("HF caches →", SCRATCH)
 
 !git pull
+
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"   # on-demand alloc
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"   # keep 20 % slack
 
 !python Run_training.py

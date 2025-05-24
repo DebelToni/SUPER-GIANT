@@ -1,3 +1,7 @@
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"   # allocate on demand
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"   # or 0.9, any < 1.0
+
 # run_training.py
 import jax, jax.numpy as jnp, optax, Config
 from Transformer_block import TinyTransformerLM
@@ -36,6 +40,7 @@ def main():
     print(f"Training for {Config.num_epochs} epochs with {Config.batch_size} batch size")
     rng = jax.random.PRNGKey(0)
     for epoch in range(Config.num_epochs):
+        # half the batch size and iterate over to decreese memory usage
         for batch in data_loader(train_tokens, Config.batch_size):
             rng, dropout_rng = jax.random.split(rng)
             params, opt_state, loss = train_step(

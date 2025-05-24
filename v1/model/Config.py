@@ -1,4 +1,5 @@
 embedding_size  = 256
+dtype = "float32"  # JAX default dtype
 context_length  = 512
 num_heads       = 4
 num_layers      = 4
@@ -8,4 +9,5 @@ learning_rate   = 2e-4
 weight_decay    = 1e-2
 batch_size      = 64
 num_epochs      = 1
+use_remat       = False         # true means save memory
 

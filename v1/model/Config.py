@@ -15,3 +15,7 @@ batch_size      = 64
 num_epochs      = 1
 use_remat       = True         # true means save memory
 acc_steps = 2
+
+# DTYPE_ACT  = jnp.float16          
+# DTYPE_NORM = jnp.float32         
+

@@ -9,6 +9,7 @@ from prepare_dataset  import get_data
 import numpy as np, time, pathlib, pickle, functools
 
 def main():
+    print("Setting up JAX...")
     train_tokens, val_tokens, tokenizer = get_data()
     print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
 
@@ -22,6 +23,7 @@ def main():
     )
 
     # ----- initialise params & optimiser -----
+    print("Initialising model parameters and optimizer...")
     rng    = jax.random.PRNGKey(0)
     dummy  = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
     params = model.init(rng, dummy)["params"]
@@ -51,5 +53,6 @@ def main():
     print("✔ parameters & tokenizer saved")
 
 if __name__ == "__main__":
+    print("Starting training...")
     main()
 

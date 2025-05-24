@@ -27,8 +27,11 @@ def loss_fn(params, batch):
     loss = (loss * mask).sum() / mask.sum()  # average only over real tokens
     return loss
 
+# @jax.jit(static_argnames=['model', 'optimizer'])
+# def train_step(params, opt_state, batch, *, model, optimizer):
 @jax.jit(static_argnames=['model', 'optimizer'])
 def train_step(params, opt_state, batch, *, model, optimizer):
+
     def loss_fn(p):
         logits  = model.apply({"params": p}, batch["input"])
         loss    = optax.softmax_cross_entropy_with_integer_labels(

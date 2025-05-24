@@ -31,6 +31,7 @@ def main():
 
     # ----- training loop -----
     global_step = 0
+    print(f"Training for {Config.num_epochs} epochs with {Config.batch_size} batch size")
     for epoch in range(Config.num_epochs):
         for batch in data_loader(train_tokens, Config.batch_size):
             params, opt_state, loss = train_step(

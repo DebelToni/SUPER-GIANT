@@ -1,120 +1,79 @@
-# import Config as Config 
-# """"""
-# import jax.numpy as jnp
-# # import flax.linen as nn
-# # from functools import partial
-# # print ( nn.remat_policy )
-# # remat = partial(nn.remat, policy=nn.remat_policy.POLICY_CHECKPOINT)
-# # remat = partial(nn.remat, policy=nn.remat_policy.POLICY_CHECKPOINT)
-#
-# import flax.linen as nn
-# remat = nn.remat
-#
-#
-# class TinyTransformerBlock(nn.Module):
-#     d_model: int
-#     n_heads: int
-#     d_ff: int
-#
-#     @nn.compact
-#     def __call__(self, x, *, deterministic=False):
-#         # Self-attention sub-layer
-#         # attn = nn.SelfAttention(num_heads=self.n_heads, qkv_features=self.d_model,
-#         #                          use_bias=True, broadcast_dropout=False,
-#         #                          deterministic=deterministic,
-#         #                          dropout_rate=0.1)(x)   # shape: [batch, seq, d_model]
-#         attn = nn.SelfAttention(
-#                 num_heads=self.n_heads,
-#                 qkv_features=self.d_model,
-#                 use_bias=True,
-#                 deterministic=deterministic,
-#         )(x)
-#         attn = nn.Dropout(0.1, deterministic=deterministic)(attn)
-#         x = nn.LayerNorm()(x + attn)
-#         # Feed-forward sub-layer
-#         ff = nn.Dense(self.d_ff)(x)
-#         ff = nn.gelu(ff)                     # activation
-#         ff = nn.Dense(self.d_model)(ff)
-#         ff = nn.Dropout(0.1, deterministic=deterministic)(ff)
-#         x = nn.LayerNorm()(x + ff)
-#         return x
-#
-# class TinyTransformerLM(nn.Module):
-#     vocab_size: int
-#     max_len: int
-#     d_model: int
-#     n_heads: int
-#     d_ff: int
-#     n_layers: int
-#
-#     @nn.compact
-#     def __call__(self, token_ids, *, deterministic=False):
-#         # token_ids shape: [batch, seq_length]
-#         # 1. Embed tokens and positions
-#         tok_emb = nn.Embed(self.vocab_size, self.d_model)(token_ids)    # [batch, seq, d_model]
-#         pos_idx = jnp.arange(token_ids.shape[1])  # [seq]
-#         pos_emb = self.param('pos_embedding',  # learned positional emb
-#                               nn.initializers.normal(stddev=0.02),
-#                               (self.max_len, self.d_model))
-#         pos_emb = pos_emb[pos_idx]                       # [seq, d_model]
-#         x = tok_emb + pos_emb                           # [batch, seq, d_model]
-#         # 2. Transformer blocks
-#         # for _ in range(self.n_layers):
-#         #     if Config.use_remat:
-#         #         x = remat(TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff))(x, deterministic=deterministic)
-#         #         # x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
-#         #     else:
-#         #         x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
-#         for _ in range(self.n_layers):
-#             BlockClass = TinyTransformerBlock
-#             if Config.use_remat:
-#                 BlockClass = remat(BlockClass)        # wrap the *class*
-#
-#             x = BlockClass(                           # then instantiate
-#                     self.d_model,
-#                     self.n_heads,
-#                     self.d_ff
-#                 )(x, deterministic=deterministic)
-#         # 3. Output projection
-#         # logits = nn.Dense(self.vocab_size, use_bias=False)(x)  # [batch, seq, vocab_size]
-#         # return logits
-#         return nn.Dense(self.vocab_size, use_bias=False)(x)  # [batch, seq, vocab_size]
-#
-import jax
+"""
+Memory-efficient Transformer block using Flax + JAX remat (gradient checkpointing).
+
+Main tricks:
+1. Wrap *each residual branch* (Attention, MLP) in flax.linen.remat → saves activations.
+2. Keep the subbranches pure functions so remat works.
+3. Dropout is outside remat so rng is not recomputed during backward.
+4. Block remains compatible with earlier TinyTransformerLM class.
+
+If you need even more savings, wrap the for-loop of layers
+with linen.scan or remat_scan(). See README for details.
+"""
+
+from typing import Callable
 import jax.numpy as jnp
 import flax.linen as nn
-import Config
 
-# Memory-efficient transformer block with optional checkpointing
-# Each block's activations can be re-computed on the backward pass,
-# reducing peak memory by ~40-50%.
-# We mark `deterministic` as static so we avoid tracer-boolean errors.
-# remat = nn.remat
+remat = nn.remat   # alias
+
+class MLP(nn.Module):
+    d_model: int
+    d_ff: int
+    dropout: float = 0.1
+
+    @nn.compact
+    def __call__(self, x, deterministic: bool):
+        x = nn.Dense(self.d_ff)(x)
+        x = nn.gelu(x)
+        x = nn.Dropout(rate=self.dropout)(x, deterministic=deterministic)
+        x = nn.Dense(self.d_model)(x)
+        return x
+
 
 class TinyTransformerBlock(nn.Module):
+    """
+    One Transformer block with gradient-checkpointing on
+    (a) the Self-Attention branch  (b) the Feed-Forward branch.
+
+    Args:
+        d_model: model hidden size
+        n_heads: number of attention heads
+        d_ff: feed-forward expansion
+        dropout: dropout rate
+    """
     d_model: int
     n_heads: int
     d_ff: int
+    dropout: float = 0.1
 
     @nn.compact
-    def __call__(self, x, deterministic: bool = False):
-        # Multi-head self-attention
-        attn = nn.SelfAttention(
-            num_heads=self.n_heads,
-            qkv_features=self.d_model,
-            use_bias=True,
-            deterministic=deterministic,
-        )(x)
-        # Dropout + residual
-        attn = nn.Dropout(rate=0.1, deterministic=deterministic)(attn)
-        x = x + attn
-        # Feed-forward
-        ff = nn.Dense(self.d_ff)(x)
-        ff = nn.gelu(ff)
-        ff = nn.Dropout(rate=0.1, deterministic=deterministic)(ff)
-        ff = nn.Dense(self.d_model)(ff)
-        x = x + ff
+    def __call__(self, x, *, deterministic: bool = False):
+        # ---- Attention branch ----------
+        def attn_branch(y):
+            y = nn.LayerNorm()(y)
+            y = nn.SelfAttention(
+                num_heads=self.n_heads,
+                qkv_features=self.d_model,
+                use_bias=True,
+                deterministic=deterministic,
+            )(y)
+            return y
+
+        # remat = checkpoint
+        attn_out = remat(attn_branch)(x)
+        x = x + nn.Dropout(rate=self.dropout)(attn_out, deterministic=deterministic)
+
+        # ---- Feed-forward branch -------
+        def ffn_branch(y):
+            y = nn.LayerNorm()(y)
+            y = MLP(self.d_model, self.d_ff, self.dropout)(y, deterministic)
+            return y
+
+        ffn_out = remat(ffn_branch)(x)
+        x = x + nn.Dropout(rate=self.dropout)(ffn_out, deterministic=deterministic)
         return x
+
 
 class TinyTransformerLM(nn.Module):
     vocab_size: int
@@ -122,35 +81,23 @@ class TinyTransformerLM(nn.Module):
     d_model: int
     n_heads: int
     d_ff: int
-    n_layers: int = 4
+    n_layers: int
+    dropout: float = 0.1
 
     @nn.compact
-    def __call__(self, ids, deterministic: bool = False):
-        # Token + position embeddings
-        tok_emb = nn.Embed(self.vocab_size, self.d_model)(ids)
-        pos = jnp.arange(ids.shape[1])[None, :]
-        pos_emb = nn.Embed(self.max_len, self.d_model)(pos)
-        x = tok_emb + pos_emb
+    def __call__(self, x, *, deterministic: bool = False):
+        tok_emb = nn.Embed(self.vocab_size, self.d_model)(x)
+        pos_emb = nn.Embed(self.max_len, self.d_model)(jnp.arange(self.max_len))[None, :, :]
+        h = tok_emb + pos_emb[:, :x.shape[1], :]
+        h = nn.Dropout(rate=self.dropout)(h, deterministic=deterministic)
 
-        # Transformer layers
+        # Checkpoint each full layer; cheapest is to wrap entire loop with scan/remat_scan
         for _ in range(self.n_layers):
-            BlockClass = TinyTransformerBlock
-            # if Config.use_remat:
-            #     # Wrap the class, marking 'deterministic' as a static arg
-            #     # BlockClass = remat(BlockClass, static_argnames=('deterministic',))
-            #     BlockClass = remat(
-            #         TinyTransformerBlock,
-            #         static_argnums=(2,)           # mark 'deterministic' (arg index 2) static
-            #     )
-            # Instantiate and apply
-            x = BlockClass(
-                self.d_model,
-                self.n_heads,
-                self.d_ff,
-            )(x, deterministic=deterministic)
+            h = TinyTransformerBlock(
+                self.d_model, self.n_heads, self.d_ff, self.dropout
+            )(h, deterministic=deterministic)
 
-        # Final layer norm + classifier
-        x = nn.LayerNorm()(x)
-        logits = nn.Dense(self.vocab_size, use_bias=False)(x)
+        h = nn.LayerNorm()(h)
+        logits = nn.Dense(self.vocab_size)(h)
         return logits
 

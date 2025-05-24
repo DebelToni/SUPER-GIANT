@@ -11,10 +11,16 @@ class TinyTransformerBlock(nn.Module):
     @nn.compact
     def __call__(self, x, *, deterministic=False):
         # Self-attention sub-layer
-        attn = nn.SelfAttention(num_heads=self.n_heads, qkv_features=self.d_model,
-                                 use_bias=True, broadcast_dropout=False,
-                                 deterministic=deterministic,
-                                 dropout_rate=0.1)(x)   # shape: [batch, seq, d_model]
+        # attn = nn.SelfAttention(num_heads=self.n_heads, qkv_features=self.d_model,
+        #                          use_bias=True, broadcast_dropout=False,
+        #                          deterministic=deterministic,
+        #                          dropout_rate=0.1)(x)   # shape: [batch, seq, d_model]
+        attn = nn.SelfAttention(
+                num_heads=self.n_heads,
+                qkv_features=self.d_model,
+                use_bias=True,
+                deterministic=deterministic,
+        )(x)
         attn = nn.Dropout(0.1, deterministic=deterministic)(attn)
         x = nn.LayerNorm()(x + attn)
         # Feed-forward sub-layer
@@ -48,6 +54,7 @@ class TinyTransformerLM(nn.Module):
         for _ in range(self.n_layers):
             x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
         # 3. Output projection
-        logits = nn.Dense(self.vocab_size, use_bias=False)(x)  # [batch, seq, vocab_size]
-        return logits
+        # logits = nn.Dense(self.vocab_size, use_bias=False)(x)  # [batch, seq, vocab_size]
+        # return logits
+        return nn.Dense(self.vocab_size, use_bias=False)(x)  # [batch, seq, vocab_size]
 

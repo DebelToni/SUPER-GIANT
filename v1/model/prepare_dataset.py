@@ -14,6 +14,7 @@ def get_data():
     ctx = Config.context_length
     sequences = []
     for ex in dataset["text"]:
+        print(f"Encoding story: {ex[:50]}...")  # print first 50 chars for context
         ids = tokenizer.encode(ex, add_special_tokens=False)
         # pad or chunk to fixed length
         print(f"Encoding story of length {len(ids)} tokens")

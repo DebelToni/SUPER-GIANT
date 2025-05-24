@@ -147,7 +147,8 @@ class TinyTransformerBlock(nn.Module):
         )
         y = ln1(x)
         # SelfAttention signature: (inputs_q, inputs_kv=None, mask=None, deterministic=False)
-        attn_out = sa(y, y, None, deterministic)
+        # attn_out = sa(y, y, None, deterministic)
+        attn_out = sa(y, deterministic=deterministic)
         x = x + nn.Dropout(rate=self.dropout)(attn_out, deterministic=deterministic)
 
         # ---- Feed-forward branch (pre-LN -> rematted MLP -> dropout -> residual) ----

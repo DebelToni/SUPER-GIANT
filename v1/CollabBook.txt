@@ -1,0 +1,22 @@
+from google.colab import drive
+drive.mount('/content/drive')
+
+%cd drive/MyDrive/SUPER-GIANT/v1/model
+
+!pip install --upgrade "jax[cuda12]" flax
+
+!pip install -U "datasets>=2.19.1" "fsspec" --quiet
+
+import os, pathlib, tempfile
+SCRATCH = "/content/.hf_cache"          
+pathlib.Path(SCRATCH).mkdir(parents=True, exist_ok=True)
+
+os.environ["HF_HOME"]           = SCRATCH
+os.environ["HF_DATASETS_CACHE"] = f"{SCRATCH}/datasets"
+os.environ["HF_HUB_CACHE"]      = f"{SCRATCH}/hub"
+
+print("HF caches →", SCRATCH)
+
+!git pull
+
+!python Run_training.py

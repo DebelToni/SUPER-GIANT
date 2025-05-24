@@ -137,7 +137,11 @@ class TinyTransformerLM(nn.Module):
             BlockClass = TinyTransformerBlock
             if Config.use_remat:
                 # Wrap the class, marking 'deterministic' as a static arg
-                BlockClass = remat(BlockClass, static_argnames=('deterministic',))
+                # BlockClass = remat(BlockClass, static_argnames=('deterministic',))
+                BlockClass = remat(
+                    TinyTransformerBlock,
+                    static_argnums=(2,)           # mark 'deterministic' (arg index 2) static
+                )
             # Instantiate and apply
             x = BlockClass(
                 self.d_model,

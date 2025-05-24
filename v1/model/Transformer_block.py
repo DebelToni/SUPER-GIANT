@@ -2,8 +2,9 @@ import Config as Config
 """"""
 import jax.numpy as jnp
 import flax.linen as nn
-# from functools import partial
-# remat = partial(nn.remat, policy=nn.remat_policy.POLICY_CHECKPOINT)
+from functools import partial
+print ( nn.remat_policy )
+remat = partial(nn.remat, policy=nn.remat_policy.POLICY_CHECKPOINT)
 # remat = partial(nn.remat, policy=nn.remat_policy.POLICY_CHECKPOINT)
 
 class TinyTransformerBlock(nn.Module):
@@ -56,8 +57,8 @@ class TinyTransformerLM(nn.Module):
         # 2. Transformer blocks
         for _ in range(self.n_layers):
             if Config.use_remat:
-                # x = remat(TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff))(x, deterministic=deterministic)
-                x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
+                x = remat(TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff))(x, deterministic=deterministic)
+                # x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
             else:
                 x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
         # 3. Output projection

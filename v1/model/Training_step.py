@@ -30,7 +30,7 @@ def loss_fn(params, batch):
 
 # @jax.jit(static_argnames=['model', 'optimizer'])
 # def train_step(params, opt_state, batch, *, model, optimizer):
-@partial(jax.jit(static_argnames=['model', 'optimizer']))
+@partial(jax.jit,static_argnames=['model', 'optimizer'])
 def train_step(params, opt_state, batch, *, model, optimizer):
 
     def loss_fn(p):

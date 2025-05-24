@@ -89,7 +89,7 @@ import Config
 # Each block's activations can be re-computed on the backward pass,
 # reducing peak memory by ~40-50%.
 # We mark `deterministic` as static so we avoid tracer-boolean errors.
-remat = nn.remat
+# remat = nn.remat
 
 class TinyTransformerBlock(nn.Module):
     d_model: int
@@ -135,13 +135,13 @@ class TinyTransformerLM(nn.Module):
         # Transformer layers
         for _ in range(self.n_layers):
             BlockClass = TinyTransformerBlock
-            if Config.use_remat:
-                # Wrap the class, marking 'deterministic' as a static arg
-                # BlockClass = remat(BlockClass, static_argnames=('deterministic',))
-                BlockClass = remat(
-                    TinyTransformerBlock,
-                    static_argnums=(2,)           # mark 'deterministic' (arg index 2) static
-                )
+            # if Config.use_remat:
+            #     # Wrap the class, marking 'deterministic' as a static arg
+            #     # BlockClass = remat(BlockClass, static_argnames=('deterministic',))
+            #     BlockClass = remat(
+            #         TinyTransformerBlock,
+            #         static_argnums=(2,)           # mark 'deterministic' (arg index 2) static
+            #     )
             # Instantiate and apply
             x = BlockClass(
                 self.d_model,

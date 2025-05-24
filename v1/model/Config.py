@@ -1,6 +1,11 @@
-embedding_size = 256 # model dimension
-context_length = 512
-num_heads = 4
-num_layers = 4
+embedding_size  = 256
+context_length  = 512
+num_heads       = 4
+num_layers      = 4
 feed_forward_size = num_layers * embedding_size
-vocab_size = 50_000
+vocab_size      = 50_000        # GPT-Neo-125 M tokenizer
+learning_rate   = 2e-4
+weight_decay    = 1e-2
+batch_size      = 64
+num_epochs      = 1
+

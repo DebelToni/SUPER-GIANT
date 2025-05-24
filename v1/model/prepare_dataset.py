@@ -16,6 +16,7 @@ def get_data():
     for ex in dataset["text"]:
         ids = tokenizer.encode(ex, add_special_tokens=False)
         # pad or chunk to fixed length
+        print(f"Encoding story of length {len(ids)} tokens")
         for i in range(0, len(ids), ctx):
             chunk = ids[i:i+ctx]
             if len(chunk) < ctx:

@@ -81,6 +81,7 @@
 #         return nn.Dense(self.vocab_size, use_bias=False)(x)  # [batch, seq, vocab_size]
 #
 import jax
+import jax.numpy as jnp
 import flax.linen as nn
 import Config
 

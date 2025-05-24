@@ -17,6 +17,7 @@
 #
 # Training_step.py
 import jax, jax.numpy as jnp, optax
+from functools import partial
 
 def loss_fn(params, batch):
     logits = model.apply({'params': params}, batch['input'])  # forward pass

@@ -24,7 +24,7 @@ def main():
         n_heads    = Config.num_heads,
         d_ff       = Config.feed_forward_size,
         n_layers   = Config.num_layers,
-        dtype = getattr(jnp, Config.dtype), 
+        # dtype = getattr(jnp, Config.dtype), 
     )
 
     # ----- initialise params & optimiser -----

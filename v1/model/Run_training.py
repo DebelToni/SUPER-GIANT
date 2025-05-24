@@ -34,10 +34,19 @@ def main():
     # ----- training loop -----
     global_step = 0
     print(f"Training for {Config.num_epochs} epochs with {Config.batch_size} batch size")
+    rng = jax.random.PRNGKey(0)
     for epoch in range(Config.num_epochs):
         for batch in data_loader(train_tokens, Config.batch_size):
+            rng, dropout_rng = jax.random.split(rng)
             params, opt_state, loss = train_step(
-                params, opt_state, batch, model=model, optimizer=optimizer)
+                params, opt_state, batch,
+                model=model, optimizer=optimizer, dropout_rng=dropout_rng
+            )
+
+    # for epoch in range(Config.num_epochs):
+    #     for batch in data_loader(train_tokens, Config.batch_size):
+            # params, opt_state, loss = train_step(
+            #     params, opt_state, batch, model=model, optimizer=optimizer)
             global_step += 1
             if global_step % 200 == 0:
                 print(f"step {global_step:>7} | loss {loss:.4f}")

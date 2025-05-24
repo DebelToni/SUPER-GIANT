@@ -10,7 +10,7 @@ def get_data():
     dataset   = load_dataset("roneneldan/TinyStories", split="all")
     print(f"Loaded dataset with {len(dataset)} examples")
 
-    dataset = dataset.select(range(int(1 * len(dataset))))  # use only 10% for testing
+    dataset = dataset.select(range(int(0.1 * len(dataset))))  # use only 10% for testing
 
     # Encode every story, then chunk into context_length tokens
     ctx = Config.context_length

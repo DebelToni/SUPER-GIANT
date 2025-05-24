@@ -24,6 +24,7 @@ def main():
         n_heads    = Config.num_heads,
         d_ff       = Config.feed_forward_size,
         n_layers   = Config.num_layers,
+        dtype = getattr(jnp, Config.dtype), 
     )
 
     # ----- initialise params & optimiser -----
@@ -41,12 +42,23 @@ def main():
     rng = jax.random.PRNGKey(0)
     for epoch in range(Config.num_epochs):
         # half the batch size and iterate over to decreese memory usage
+        # grad_acc = None; step_in_acc = 0
         for batch in data_loader(train_tokens, Config.batch_size):
             rng, dropout_rng = jax.random.split(rng)
             params, opt_state, loss = train_step(
                 params, opt_state, batch,
                 model=model, optimizer=optimizer, dropout_rng=dropout_rng
             )
+
+            # grads = jax.grad(loss_fn)(params)
+            # grad_acc = jax.tree_util.tree_add(grad_acc, grads) if grad_acc else grads
+            # step_in_acc += 1
+            # if step_in_acc == Config.acc_steps:
+            #     updates, opt_state = optimizer.update(
+            #         jax.tree_util.tree_map(lambda g: g / Config.acc_steps, grad_acc),
+            #         opt_state, params)
+            #     params = optax.apply_updates(params, updates)
+            #     grad_acc = None; step_in_acc = 0
 
     # for epoch in range(Config.num_epochs):
     #     for batch in data_loader(train_tokens, Config.batch_size):

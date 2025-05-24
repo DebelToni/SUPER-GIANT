@@ -10,4 +10,4 @@ weight_decay    = 1e-2
 batch_size      = 64
 num_epochs      = 1
 use_remat       = True         # true means save memory
-
+acc_steps = 2

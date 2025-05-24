@@ -3,8 +3,8 @@ import Config as Config
 import jax.numpy as jnp
 import flax.linen as nn
 from functools import partial
-print ( nn.remat_policy )
-remat = partial(nn.remat, policy=nn.remat_policy.POLICY_CHECKPOINT)
+# print ( nn.remat_policy )
+# remat = partial(nn.remat, policy=nn.remat_policy.POLICY_CHECKPOINT)
 # remat = partial(nn.remat, policy=nn.remat_policy.POLICY_CHECKPOINT)
 
 class TinyTransformerBlock(nn.Module):

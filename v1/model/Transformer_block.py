@@ -59,12 +59,22 @@ class TinyTransformerLM(nn.Module):
         pos_emb = pos_emb[pos_idx]                       # [seq, d_model]
         x = tok_emb + pos_emb                           # [batch, seq, d_model]
         # 2. Transformer blocks
+        # for _ in range(self.n_layers):
+        #     if Config.use_remat:
+        #         x = remat(TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff))(x, deterministic=deterministic)
+        #         # x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
+        #     else:
+        #         x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
         for _ in range(self.n_layers):
+            BlockClass = TinyTransformerBlock
             if Config.use_remat:
-                x = remat(TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff))(x, deterministic=deterministic)
-                # x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
-            else:
-                x = TinyTransformerBlock(self.d_model, self.n_heads, self.d_ff)(x, deterministic=deterministic)
+                BlockClass = remat(BlockClass)        # wrap the *class*
+
+            x = BlockClass(                           # then instantiate
+                    self.d_model,
+                    self.n_heads,
+                    self.d_ff
+                )(x, deterministic=deterministic)
         # 3. Output projection
         # logits = nn.Dense(self.vocab_size, use_bias=False)(x)  # [batch, seq, vocab_size]
         # return logits

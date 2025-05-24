@@ -1,8 +1,12 @@
-embedding_size  = 256
 dtype = "float32"  # JAX default dtype
-context_length  = 512
-num_heads       = 4
-num_layers      = 4
+# context_length  = 512
+# num_heads       = 4
+# num_layers      = 4
+# embedding_size  = 256
+embedding_size  = 128 
+context_length  = 256
+num_heads       = 2 
+num_layers      = 2
 feed_forward_size = num_layers * embedding_size
 vocab_size      = 50_000        # GPT-Neo-125 M tokenizer
 learning_rate   = 2e-4

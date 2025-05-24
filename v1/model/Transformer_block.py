@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import flax.linen as nn
 remat = nn.remat
 
+
 class TinyTransformerBlock(nn.Module):
     d_model: int
     n_heads: int

@@ -9,7 +9,7 @@ os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   # activations in fp16
 
 # run_training.py
 import jax, jax.numpy as jnp, optax, Config
-from Transformer_block import TinyTransformerLM
+from Transformer_block import TinyTransformerBlock
 from Training_step    import train_step
 from Evaluate         import evaluate
 from Data_loader      import data_loader
@@ -22,7 +22,7 @@ def main():
     train_tokens, val_tokens, tokenizer = get_data()
     print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
 
-    model = TinyTransformerLM(
+    model = TinyTransformerBlock(
         vocab_size = Config.vocab_size,
         max_len    = Config.context_length,
         d_model    = Config.embedding_size,

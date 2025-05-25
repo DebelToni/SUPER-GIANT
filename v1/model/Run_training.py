@@ -3,7 +3,8 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"   # allocate on demand
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"   # or 0.9, any < 1.0
 
 # run before importing JAX
-os.environ["JAX_DEFAULT_DTYPE_BITS"] = "16"   # activations in fp16
+# os.environ["JAX_DEFAULT_DTYPE_BITS"] = "16"   # activations in fp16
+os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   # activations in fp16
 
 
 # run_training.py

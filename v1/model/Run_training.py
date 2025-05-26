@@ -25,7 +25,11 @@ def main():
 
 
     print("Setting up JAX...")
-    train_tokens, val_tokens, tokenizer = get_data()
+    # train_tokens, val_tokens, tokenizer = get_data()
+    train_tokens, val_tokens, tokenizer = get_data(
+        subset_pct = Config.dataset_percent
+        chunk_pct  = Config.chunk_percent,
+        context_length = Config.context_length)
     print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
     # print train_tokens' shape:
     print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")

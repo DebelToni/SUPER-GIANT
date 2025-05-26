@@ -1,3 +1,3 @@
 git pull
-chmod +x ../setup.sh
+chmod +x v1/setup.sh
 ../setup.sh

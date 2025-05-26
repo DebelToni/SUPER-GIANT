@@ -1,6 +1,7 @@
 import os
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"   # allocate on demand
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"   # or 0.9, any < 1.0
+os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"  # use platform allocator
 
 # run before importing JAX
 # os.environ["JAX_DEFAULT_DTYPE_BITS"] = "16"

@@ -14,7 +14,7 @@ vocab_size      = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-125M").vocab
 
 learning_rate   = 2e-4
 weight_decay    = 1e-2
-batch_size      = 64
+batch_size      = 8 
 num_epochs      = 1
 use_remat       = True         # true means save memory
 acc_steps = 2

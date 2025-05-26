@@ -25,5 +25,5 @@ dropout_rate    = 0.1
 # DTYPE_NORM = jnp.float32         
 
 # dataset_percent = 30
-dataset_percent = 1
+dataset_percent = 100
 chunk_percent = 10 # how much to save on disk

@@ -255,8 +255,13 @@ class CuDNNFlashSelfAttention(nn.Module):
         self.k_proj = nn.Dense(self.qkv_features, use_bias=False, name="k_proj")
         self.v_proj = nn.Dense(self.qkv_features, use_bias=False, name="v_proj")
         self.o_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj")
+        # self.dropout = nn.Dropout(
+        #     rate=self.dropout_rate, broadcast_dropout=self.broadcast_dropout
+        # )
+        dims = (0,1) if self.broadcast_dropout else ()
+
         self.dropout = nn.Dropout(
-            rate=self.dropout_rate, broadcast_dropout=self.broadcast_dropout
+            rate=self.dropout_rate, broadcast_dims=dims
         )
 
     def __call__(

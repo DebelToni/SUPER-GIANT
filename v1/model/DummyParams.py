@@ -55,36 +55,6 @@ def main():
     params = model.init(rng, dummy)["params"]
     save_params(params, "initial_params.pkl")
 
-    optimizer = optax.adamw(Config.learning_rate, weight_decay=Config.weight_decay)
-    opt_state = optimizer.init(params)
-
-    # ----- training loop -----
-    global_step = 0
-    print(f"Training for {Config.num_epochs} epochs with {Config.batch_size} batch size")
-    rng = jax.random.PRNGKey(0)
-    for epoch in range(Config.num_epochs):
-        for batch in data_loader(train_tokens, Config.batch_size):
-            rng, dropout_rng = jax.random.split(rng)
-            params, opt_state, loss = train_step(
-                params, opt_state, batch,
-                model=model, optimizer=optimizer, dropout_rng=dropout_rng
-            )
-
-            global_step += 1
-            if global_step % 200 == 0:
-                # print(f"step {global_step:>7} | loss {loss:.4f}")
-                print(f"step {global_step:>7} out of {Config.num_epochs * len(train_tokens) // Config.batch_size:>7} | loss {loss:.4f}  ppl {np.exp(loss):.2f}")
-
-        # --- evaluate ---
-        val_loss = evaluate(params, model, val_tokens)
-        print(f"✓ Epoch {epoch+1} done – val loss {val_loss:.4f}  ppl {np.exp(val_loss):.2f}")
-
-    # save everything
-    save_params(params)
-    with open("tokenizer.pkl", "wb") as f:
-        pickle.dump(tokenizer, f)
-    print("✔ parameters & tokenizer saved")
-
 if __name__ == "__main__":
     print("Starting training...")
     main()

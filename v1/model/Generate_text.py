@@ -8,6 +8,8 @@ Usage (sample 20 tokens with temperature):
     python generate_text.py --prompt "Once upon a time" --steps 20 --temperature 0.8 --top_k 40
 """
 
+import numpy as np
+
 import argparse
 import pickle
 from pathlib import Path
@@ -82,6 +84,10 @@ def generate(model, params, tokenizer, prompt: str, steps: int = 1,
             rng, sub = jax.random.split(rng)
             next_id = int(_select_logits_sampling(last_logits, sub,
                                                   temperature, top_k))
+
+        top_vals, top_ids = jax.lax.top_k(last_logits, 10)
+        print("top-10 ids", np.array(top_ids), "logits", np.array(top_vals))
+
 
         ids.append(next_id)
 

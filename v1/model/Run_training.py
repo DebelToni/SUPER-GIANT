@@ -45,9 +45,10 @@ def main():
     rng    = jax.random.PRNGKey(0)
     dummy  = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
     print("dummy:", dummy.shape, "d_model:", model.d_model)
-    cpu = jax.devices("cpu")[0]
-    with jax.default_device(cpu):
-        params = model.init(rng, dummy)["params"]
+    # cpu = jax.devices("cpu")[0]
+    # with jax.default_device(cpu):
+        # params = model.init(rng, dummy)["params"]
+    params = model.init(rng, dummy)["params"]
     save_params(params, "initial_params.pkl")
 
     optimizer = optax.adamw(Config.learning_rate, weight_decay=Config.weight_decay)

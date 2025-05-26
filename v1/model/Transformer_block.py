@@ -146,7 +146,13 @@ class FlashSelfAttention(nn.Module):
                 # broadcast mask to [b, h, l, k]
                 attn_scores = jnp.where(mask, attn_scores, jnp.full_like(attn_scores, -1e9))
             attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+            # y = jnp.einsum("bhlk,bkhd->blhd", attn_weights, v)
+            # attn_weights = jax.nn.softmax(attn_scores, axis=-1)
             y = jnp.einsum("bhlk,bkhd->blhd", attn_weights, v)
+            attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+            v2 = v.transpose(0, 2, 1, 3)       # now [b, H, K, D]
+            y = jnp.einsum("bhlk,bhkd->blhd", attn_weights, v2)
+
 
         # Merge heads & final projection --------------------------------------
         y = y.reshape(b, l, -1)          # [b, l, h*d] = [b, l, d_model]

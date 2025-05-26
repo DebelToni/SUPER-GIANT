@@ -9,7 +9,8 @@ os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"
 
 # run_training.py
 import jax, jax.numpy as jnp, optax, Config
-from Transformer_block import TinyTransformerBlock
+# from Transformer_block import TinyTransformerBlock
+from GiantGPT import GiantGPT
 from Training_step    import train_step
 from Evaluate         import evaluate
 from Data_loader      import data_loader
@@ -29,13 +30,15 @@ def main():
     # print train_tokens' shape:
     print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")
 
-    model = TinyTransformerBlock(
-        # vocab_size = Config.vocab_size,
-        # max_len    = Config.context_length,
+    # model = TinyTransformerBlock(
+    model = GiantGPT(
+        vocab_size = Config.vocab_size,
+        context_length    = Config.context_length,
         d_model    = Config.embedding_size,
         n_heads    = Config.num_heads,
         d_ff       = Config.feed_forward_size,
-        # n_layers   = Config.num_layers,
+        n_layers   = Config.num_layers,
+        dropout_rate = Config.dropout_rate,
         # dtype = getattr(jnp, Config.dtype), 
     )
 

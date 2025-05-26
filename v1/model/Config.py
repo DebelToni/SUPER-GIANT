@@ -16,6 +16,8 @@ num_epochs      = 1
 use_remat       = True         # true means save memory
 acc_steps = 2
 
+dropout_rate    = 0.1
+
 # DTYPE_ACT  = jnp.float16          
 # DTYPE_NORM = jnp.float32         
 

@@ -1,16 +1,13 @@
 import os
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"   # allocate on demand
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"   # or 0.9, any < 1.0
-os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"  # use platform allocator
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"   
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"  
+os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
-# run before importing JAX
-# os.environ["JAX_DEFAULT_DTYPE_BITS"] = "16"
 os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   
 
 
-# run_training.py
 import jax, jax.numpy as jnp, optax, Config
-# from Transformer_block import TinyTransformerBlock
+
 from GiantGPT import GiantGPT
 from Training_step    import train_step
 from Evaluate         import evaluate
@@ -26,17 +23,14 @@ def main():
 
 
     print("Setting up JAX...")
-    # train_tokens, val_tokens, tokenizer = get_data()
     train_tokens, val_tokens, tokenizer = get_data(
         subset_pct = Config.dataset_percent,
         chunk_pct  = Config.chunk_percent,
         context_length = Config.context_length)
     print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
-    # print train_tokens' shape:
     print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")
     print(Config.num_epochs * len(train_tokens) // Config.batch_size, "total steps")
 
-    # model = TinyTransformerBlock(
     model = GiantGPT(
         vocab_size = Config.vocab_size,
         context_length    = Config.context_length,
@@ -45,10 +39,8 @@ def main():
         d_ff       = Config.feed_forward_size,
         n_layers   = Config.num_layers,
         dropout_rate = Config.dropout_rate,
-        # dtype = getattr(jnp, Config.dtype), 
     )
 
-    # ----- initialise params & optimiser -----
     print("Initialising model parameters and optimizer...")
     rng    = jax.random.PRNGKey(0)
     dummy  = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
@@ -59,7 +51,6 @@ def main():
     optimizer = optax.adamw(Config.learning_rate, weight_decay=Config.weight_decay)
     opt_state = optimizer.init(params)
 
-    # ----- training loop -----
     global_step = 0
     print(f"Training for {Config.num_epochs} epochs with {Config.batch_size} batch size")
     rng = jax.random.PRNGKey(0)
@@ -73,14 +64,11 @@ def main():
 
             global_step += 1
             if global_step % 200 == 0:
-                # print(f"step {global_step:>7} | loss {loss:.4f}")
                 print(f"step {global_step:>7} out of {Config.num_epochs * len(train_tokens) // Config.batch_size:>7} | loss {loss:.4f}  ppl {np.exp(loss):.2f}")
 
-        # --- evaluate ---
         val_loss = evaluate(params, model, val_tokens)
         print(f"✓ Epoch {epoch+1} done – val loss {val_loss:.4f}  ppl {np.exp(val_loss):.2f}")
 
-    # save everything
     save_params(params)
     with open("tokenizer.pkl", "wb") as f:
         pickle.dump(tokenizer, f)

@@ -32,45 +32,56 @@ class TinyTransformerBlock(nn.Module):
     d_ff: int
     dropout_rate: float = 0.1
 
+    # @nn.compact
+    # def __call__(self, x: jnp.ndarray, *, deterministic: bool = False) -> jnp.ndarray:
+    #     @nn.remat  # ↔ gradient‑checkpoint the whole block to save GPU memory
+    #     def _block(h: jnp.ndarray) -> jnp.ndarray:
+    #         # ─── Multi‑head self‑attention ────────────────────────────────────
+    #         residual = h
+    #         h = nn.LayerNorm()(h)
+    #         h = nn.SelfAttention(
+    #             num_heads=self.n_heads,
+    #             qkv_features=self.d_model,
+    #             dropout_rate=self.dropout_rate,
+    #             deterministic=deterministic,
+    #             broadcast_dropout=False,
+    #         )(h)
+    #         h = residual + h
+    #
+    #         # ─── Position‑wise MLP ───────────────────────────────────────────
+    #         residual = h
+    #         h = nn.LayerNorm()(h)
+    #         h = nn.Dense(self.d_ff)(h)
+    #         h = nn.gelu(h, approximate=False)
+    #         h = nn.Dense(self.d_model)(h)
+    #         h = nn.Dropout(rate=self.dropout_rate)(h, deterministic=deterministic)
+    #         return residual + h
+    #
+    #     return _block(x)
+    #
     @nn.compact
-    def __call__(self, x: jnp.ndarray, *, deterministic: bool = False) -> jnp.ndarray:
-        """Run the transformer block.
-
-        Parameters
-        ----------
-        x : jnp.ndarray
-            Hidden states of shape ``(batch, seq_len, d_model)``.
-        deterministic : bool, optional
-            If ``True``, disables dropout (use for evaluation / generation).
-
-        Returns
-        -------
-        jnp.ndarray
-            Output hidden states, same shape as *x*.
-        """
-
-        @nn.remat  # ↔ gradient‑checkpoint the whole block to save GPU memory
-        def _block(h: jnp.ndarray) -> jnp.ndarray:
-            # ─── Multi‑head self‑attention ────────────────────────────────────
+    def __call__(self, x, *, deterministic: bool = False):
+        @nn.remat                           # checkpoint the whole block
+        def _block(module, h):              # ① module first!
             residual = h
             h = nn.LayerNorm()(h)
             h = nn.SelfAttention(
-                num_heads=self.n_heads,
-                qkv_features=self.d_model,
-                dropout_rate=self.dropout_rate,
+                num_heads   = module.n_heads,
+                qkv_features= module.d_model,
+                dropout_rate= module.dropout_rate,
                 deterministic=deterministic,
                 broadcast_dropout=False,
             )(h)
             h = residual + h
 
-            # ─── Position‑wise MLP ───────────────────────────────────────────
             residual = h
             h = nn.LayerNorm()(h)
-            h = nn.Dense(self.d_ff)(h)
+            h = nn.Dense(module.d_ff)(h)
             h = nn.gelu(h, approximate=False)
-            h = nn.Dense(self.d_model)(h)
-            h = nn.Dropout(rate=self.dropout_rate)(h, deterministic=deterministic)
+            h = nn.Dense(module.d_model)(h)
+            h = nn.Dropout(rate=module.dropout_rate)(h,
+                                                     deterministic=deterministic)
             return residual + h
 
-        return _block(x)
+        return _block(self, x)              # ② pass *self* explicitly
 

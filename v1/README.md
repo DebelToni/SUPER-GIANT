@@ -8,7 +8,8 @@ Setup:
 - JAX
 - TinyStories
 - gpt-neo-125M tokenizer 
-- 512 tokens context length
+<!-- - 512 tokens context length -->
+config
 
 ---
 

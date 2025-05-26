@@ -10,6 +10,7 @@ from typing import Any
 
 import jax.numpy as jnp
 from flax import linen as nn
+from flax.linen import make_causal_mask
 
 
 class TinyTransformerBlock(nn.Module):
@@ -25,13 +26,14 @@ class TinyTransformerBlock(nn.Module):
         def _block(module, h):              # ① module first!
             residual = h
             h = nn.LayerNorm()(h)
+            causal_mask = make_causal_mask(x)
             h = nn.SelfAttention(
                 num_heads   = module.n_heads,
                 qkv_features= module.d_model,
                 dropout_rate= module.dropout_rate,
                 deterministic=deterministic,
                 broadcast_dropout=False,
-            )(h)
+            )(h, mask=causal_mask)
             h = residual + h
 
             residual = h

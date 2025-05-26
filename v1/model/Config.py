@@ -8,7 +8,10 @@ context_length  = 256
 num_heads       = 2 
 num_layers      = 2
 feed_forward_size = num_layers * embedding_size
-vocab_size      = 50_000        # GPT-Neo-125 M tokenizer
+
+from transformers import AutoTokenizer
+vocab_size      = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-125M").vocab_size
+
 learning_rate   = 2e-4
 weight_decay    = 1e-2
 batch_size      = 64
@@ -21,5 +24,6 @@ dropout_rate    = 0.1
 # DTYPE_ACT  = jnp.float16          
 # DTYPE_NORM = jnp.float32         
 
-dataset_percent = 1 
+# dataset_percent = 30
+dataset_percent = 1
 chunk_percent = 10 # how much to save on disk

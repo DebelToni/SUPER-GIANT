@@ -33,6 +33,7 @@ def main():
     print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
     # print train_tokens' shape:
     print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")
+    print(Config.num_epochs * len(train_tokens) // Config.batch_size, "total steps")
 
     # model = TinyTransformerBlock(
     model = GiantGPT(
@@ -70,7 +71,8 @@ def main():
 
             global_step += 1
             if global_step % 200 == 0:
-                print(f"step {global_step:>7} | loss {loss:.4f}")
+                # print(f"step {global_step:>7} | loss {loss:.4f}")
+                print(f"step {global_step:>7} out of {Config.num_epochs * len(train_tokens) // Config.batch_size:>7} | loss {loss:.4f}  ppl {np.exp(loss):.2f}")
 
         # --- evaluate ---
         val_loss = evaluate(params, model, val_tokens)

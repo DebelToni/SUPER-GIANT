@@ -245,16 +245,18 @@ class CuDNNFlashSelfAttention(nn.Module):
     dropout_rate: float = 0.0
     broadcast_dropout: bool = False
 
+    dtype: jnp.dtype = jnp.float16
+
     def setup(self):
         assert (
             self.qkv_features % self.num_heads == 0
         ), "qkv_features must be divisible by num_heads"
         self.head_dim = self.qkv_features // self.num_heads
 
-        self.q_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj")
-        self.k_proj = nn.Dense(self.qkv_features, use_bias=False, name="k_proj")
-        self.v_proj = nn.Dense(self.qkv_features, use_bias=False, name="v_proj")
-        self.o_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj")
+        self.q_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj", dtype=self.dtype)
+        self.k_proj = nn.Dense(self.qkv_features, use_bias=False, name="k_proj", dtype=self.dtype)
+        self.v_proj = nn.Dense(self.qkv_features, use_bias=False, name="v_proj", dtype=self.dtype)
+        self.o_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj", dtype=self.dtype)
         # self.dropout = nn.Dropout(
         #     rate=self.dropout_rate, broadcast_dropout=self.broadcast_dropout
         # )
@@ -264,36 +266,60 @@ class CuDNNFlashSelfAttention(nn.Module):
             rate=self.dropout_rate, broadcast_dims=dims
         )
 
-    def __call__(
-        self,
-        x: jnp.ndarray,
-        *,
-        deterministic: bool,
-        mask: Optional[jnp.ndarray] = None,
-    ) -> jnp.ndarray:
-        b, l, _ = x.shape
+    def __call__(self, x: jnp.ndarray, *, deterministic: bool, mask: Optional[jnp.ndarray] = None) -> jnp.ndarray:
+        # cast inputs from float32 → float16
+        x_fp16 = x.astype(self.dtype)
 
-        # Project to Q‑K‑V and reshape to (B, T, H, D)
-        q = self.q_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-        k = self.k_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-        v = self.v_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+        b, l, _ = x_fp16.shape
+        q = self.q_proj(x_fp16).reshape(b, l, self.num_heads, self.head_dim)
+        k = self.k_proj(x_fp16).reshape(b, l, self.num_heads, self.head_dim)
+        v = self.v_proj(x_fp16).reshape(b, l, self.num_heads, self.head_dim)
 
-        # Call JAX’s attention fn with explicit cuDNN request; it will silently
-        # fall back to XLA if shapes or dtypes are not supported by FMHA.
+        # run FlashAttention in fp16
         y = jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            mask=mask,
+            q, k, v,
             is_causal=True,
-            implementation="cudnn",  # request flash‑attention path
+            implementation="cudnn",
+            dtype=self.dtype,    # optional in recent JAX; ensures outputs are fp16
         )
 
-        # Merge heads and apply output projection
-        y = y.reshape(b, l, -1)
+        # back to fp32 for the rest of your model (if desired)
+        y = y.astype(x.dtype)
+
         y = self.o_proj(y)
         y = self.dropout(y, deterministic=deterministic)
         return y
+
+    # def __call__(
+    #     self,
+    #     x: jnp.ndarray,
+    #     *,
+    #     deterministic: bool,
+    #     mask: Optional[jnp.ndarray] = None,
+    # ) -> jnp.ndarray:
+    #     b, l, _ = x.shape
+    #
+    #     # Project to Q‑K‑V and reshape to (B, T, H, D)
+    #     q = self.q_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+    #     k = self.k_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+    #     v = self.v_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+    #
+    #     # Call JAX’s attention fn with explicit cuDNN request; it will silently
+    #     # fall back to XLA if shapes or dtypes are not supported by FMHA.
+    #     y = jax.nn.dot_product_attention(
+    #         q,
+    #         k,
+    #         v,
+    #         mask=mask,
+    #         is_causal=True,
+    #         implementation="cudnn",  # request flash‑attention path
+    #     )
+    #
+    #     # Merge heads and apply output projection
+    #     y = y.reshape(b, l, -1)
+    #     y = self.o_proj(y)
+    #     y = self.dropout(y, deterministic=deterministic)
+    #     return y
 
 
 class TinyTransformerBlock(nn.Module):

@@ -1,232 +1,3 @@
-# # """
-# # Transformer_block.py
-# #
-# # A single Transformer encoder/GPT block with memory‑efficient remat (gradient
-# # checkpointing) for Flax/JAX.  Designed for small‑footprint training on
-# # free‑tier GPUs.
-# # """
-# #
-# # from typing import Any
-# #
-# # import jax.numpy as jnp
-# # from flax import linen as nn
-# # from flax.linen import make_causal_mask
-# #
-# #
-# # class TinyTransformerBlock(nn.Module):
-# #
-# #     d_model: int
-# #     n_heads: int
-# #     d_ff: int
-# #     dropout_rate: float = 0.1
-# #
-# #     @nn.compact
-# #     def __call__(self, x, *, deterministic: bool = False):
-# #         @nn.remat                           # checkpoint the whole block
-# #         def _block(module, h):              # ① module first!
-# #             residual = h
-# #             h = nn.LayerNorm()(h)
-# #             causal_mask = make_causal_mask(x)
-# #             h = nn.SelfAttention(
-# #                 num_heads   = module.n_heads,
-# #                 qkv_features= module.d_model,
-# #                 dropout_rate= module.dropout_rate,
-# #                 deterministic=deterministic,
-# #                 broadcast_dropout=False,
-# #             )(h, mask=causal_mask)
-# #             h = residual + h
-# #
-# #             residual = h
-# #             h = nn.LayerNorm()(h)
-# #             h = nn.Dense(module.d_ff)(h)
-# #             h = nn.gelu(h, approximate=False)
-# #             h = nn.Dense(module.d_model)(h)
-# #             h = nn.Dropout(rate=module.dropout_rate)(h,
-# #                                                      deterministic=deterministic)
-# #             return residual + h
-# #
-# #         return _block(self, x)              # ② pass *self* explicitly
-# #
-# # Transformer_block.py
-# """
-# Transformer_block.py – upgraded with Flash Attention v2 (JAX bindings)
-#
-# This drops the vanilla Flax `SelfAttention` in favour of a *much* more
-# memory‑friendly implementation that calls the CUDA kernel from the
-# `flash_attn_jax` project when it is available (works on Ampere, Ada & Hopper
-# GPUs, incl. your RTX A4500).  At run‑time we silently fall back to the classic
-# attention path if the package is not installed or if the mask is not supported
-# (e.g. non‑causal masks).  Nothing else in your model / training script needs
-# changing.
-#
-# Installation (choose **one**):
-#     pip install flash-attn-jax               # pre‑built wheels (CUDA 12.3)
-#     pip install flash-attn-jax-cu118         # if you are still on CUDA 11.8
-#     # OR build from source (see project README)
-#
-# Requirements: JAX ≥ 0.4.24, jaxlib compiled against the same CUDA version that
-# Flash‑Attention was built for.
-# """
-#
-# from __future__ import annotations
-#
-# from typing import Any, Optional
-#
-# import jax
-# import jax.numpy as jnp
-# from flax import linen as nn
-# from flax.linen import make_causal_mask
-#
-# # -----------------------------------------------------------------------------
-# # Try to enable Flash Attention v2 (JAX bindings) if the user has it installed.
-# # -----------------------------------------------------------------------------
-# try:
-#     from flash_attn_jax import flash_mha  # type: ignore
-#
-#     _FLASH_AVAILABLE = True
-# except ImportError:                       # pragma: no cover – fallback path
-#     _FLASH_AVAILABLE = False
-#
-#
-# class FlashSelfAttention(nn.Module):
-#     """Memory‑efficient multi‑head self‑attention using Flash Attention v2.
-#
-#     Parameters
-#     ----------
-#     num_heads : int
-#         Number of attention heads.
-#     qkv_features : int
-#         Dimension of the *concatenated* Q/K/V projection. Normally equal to
-#         `d_model`.
-#     dropout_rate : float, default 0.0
-#         Dropout applied to the attention output.
-#     """
-#
-#     num_heads: int
-#     qkv_features: int
-#     dropout_rate: float = 0.0
-#     broadcast_dropout: bool = False  # we keep per‑example dropout by default
-#
-#     def setup(self):
-#         assert (
-#             self.qkv_features % self.num_heads == 0
-#         ), "qkv_features must be divisible by num_heads"
-#         self.head_dim = self.qkv_features // self.num_heads
-#
-#         # Projections – *no* bias for a perfect match with Flash‑Attention.
-#         self.q_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj")
-#         self.k_proj = nn.Dense(self.qkv_features, use_bias=False, name="k_proj")
-#         self.v_proj = nn.Dense(self.qkv_features, use_bias=False, name="v_proj")
-#         self.o_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj")
-#
-#     def __call__(
-#         self,
-#         x: jnp.ndarray,
-#         *,
-#         deterministic: bool,
-#         mask: Optional[jnp.ndarray] = None,
-#     ) -> jnp.ndarray:
-#         b, l, _ = x.shape
-#
-#         # Q‑K‑V projections ----------------------------------------------------
-#         q = self.q_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-#         k = self.k_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-#         v = self.v_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-#
-#         # Flash path ----------------------------------------------------------
-#         if _FLASH_AVAILABLE and mask is None:
-#             # flash_mha expects [b, l, h, d] and returns the same shape.
-#             y = flash_mha(q, k, v, is_causal=True)
-#         else:
-#             # Fallback – standard scaled dot‑product attention in pure JAX.
-#             # Shapes: q/k/v -> [b, l, h, d]  →  attn_scores [b, h, l, l]
-#             scale = 1.0 / jnp.sqrt(self.head_dim)
-#             attn_scores = jnp.einsum("blhd,bkhd->bhlk", q, k) * scale
-#             if mask is not None:
-#                 # broadcast mask to [b, h, l, k]
-#                 attn_scores = jnp.where(mask, attn_scores, jnp.full_like(attn_scores, -1e9))
-#             attn_weights = jax.nn.softmax(attn_scores, axis=-1)
-#             # y = jnp.einsum("bhlk,bkhd->blhd", attn_weights, v)
-#             # attn_weights = jax.nn.softmax(attn_scores, axis=-1)
-#             y = jnp.einsum("bhlk,bkhd->blhd", attn_weights, v)
-#             attn_weights = jax.nn.softmax(attn_scores, axis=-1)
-#             v2 = v.transpose(0, 2, 1, 3)       # now [b, H, K, D]
-#             y = jnp.einsum("bhlk,bhkd->blhd", attn_weights, v2)
-#
-#
-#         # Merge heads & final projection --------------------------------------
-#         y = y.reshape(b, l, -1)          # [b, l, h*d] = [b, l, d_model]
-#         y = self.o_proj(y)
-#         y = nn.Dropout(
-#             rate=self.dropout_rate, broadcast_dropout=self.broadcast_dropout
-#         )(y, deterministic=deterministic)
-#         return y
-#
-#
-# class TinyTransformerBlock(nn.Module):
-#     """A single decoder (GPT‑style) transformer block with checkpointing."""
-#
-#     d_model: int
-#     n_heads: int
-#     d_ff: int
-#     dropout_rate: float = 0.1
-#
-#     @nn.compact
-#     def __call__(self, x: jnp.ndarray, *, deterministic: bool = False):
-#         # The entire block is rematerialised during backward for memory saving.
-#         @nn.remat
-#         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
-#             # --- Multi‑head Self‑Attention + residual ------------------------
-#             residual = h
-#             h = nn.LayerNorm(name="ln1")(h)
-#             causal_mask = make_causal_mask(h)
-#             h = FlashSelfAttention(
-#                 num_heads=module.n_heads,
-#                 qkv_features=module.d_model,
-#                 dropout_rate=module.dropout_rate,
-#             )(h, deterministic=deterministic, mask=causal_mask)
-#             h = residual + h
-#
-#             # --- MLP block + residual ---------------------------------------
-#             residual = h
-#             h = nn.LayerNorm(name="ln2")(h)
-#             h = nn.Dense(module.d_ff, name="fc1")(h)
-#             h = nn.gelu(h, approximate=False)
-#             h = nn.Dense(module.d_model, name="fc2")(h)
-#             h = nn.Dropout(rate=module.dropout_rate)(h, deterministic=deterministic)
-#             return residual + h
-#
-#         # remat requires closing over *self* explicitly
-#         return _block(self, x)
-#
-"""
-Transformer_block.py – cuDNN Flash‑Attention path for JAX 0.6+
-================================================================
-
-JAX ≥ 0.6.0 exposes a *built‑in* flash‑attention kernel via cuDNN 9 (the
-``cudnn`` backend of ``jax.nn.dot_product_attention``).  This gives the same
-“FlashAttention‑2” memory footprint and speed‑ups on Ampere GPUs without any
-extra wheels to compile.  The module below swaps the previous third‑party code
-for this native backend while preserving the residual‑norm‑MLP structure you
-already had.  If the cuDNN kernel can’t be used (CPU run, unsupported shapes
-or dtypes), JAX automatically falls back to its XLA reference implementation,
-so the code is still portable.
-
-No additional pip installs are required **unless** you want even more advanced
-features (ring/context parallelism, doc‑masks, etc.), in which case look at
-*K‑vax* (https://github.com/nebius-ai/kvax) or the experimental
-``jax‑flash‑attn3`` bindings.
-
-Environment hints
------------------
-* Make sure you run **jaxlib ≥ 0.6.0** that was compiled against **CUDA 12 + cuDNN 9**.
-* The flag ``--xla_gpu_enable_cudnn_fmha=true`` is **ON by default** from
-  jaxlib 0.5.7, but you can still set
-  ``XLA_FLAGS=--xla_gpu_enable_cudnn_fmha=true`` to be explicit.
-
-That’s it – just import and train.
-"""
-
 from __future__ import annotations
 
 from typing import Optional
@@ -237,97 +8,157 @@ from flax import linen as nn
 from flax.linen import make_causal_mask
 
 
-class CuDNNFlashSelfAttention(nn.Module):
-    """Multi‑head self‑attention that leverages cuDNN Flash‑Attention if possible."""
-
+class NativeJaxSelfAttention(nn.Module):
+    """
+    Multi-head self-attention using jax.nn.dot_product_attention
+    with the 'cudnn' backend request for potential Flash Attention optimization.
+    """
     num_heads: int
-    qkv_features: int
+    qkv_features: int  # Dimension of the model, d_model
     dropout_rate: float = 0.0
-    broadcast_dropout: bool = False
+    # For broadcast_dropout behavior, nn.Dropout's broadcast_dims can be used.
+    # If broadcast_dropout=False (user's original preference), it means dropout mask
+    # is different per example. Flax's nn.Dropout default usually handles this well
+    # by applying dropout on the feature dimension.
 
     def setup(self):
-        assert (
-            self.qkv_features % self.num_heads == 0
-        ), "qkv_features must be divisible by num_heads"
+        assert self.qkv_features % self.num_heads == 0, \
+            "qkv_features (d_model) must be divisible by num_heads"
         self.head_dim = self.qkv_features // self.num_heads
 
-        self.q_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj")
-        self.k_proj = nn.Dense(self.qkv_features, use_bias=False, name="k_proj")
-        self.v_proj = nn.Dense(self.qkv_features, use_bias=False, name="v_proj")
-        self.o_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj")
-        # self.dropout = nn.Dropout(
-        #     rate=self.dropout_rate, broadcast_dropout=self.broadcast_dropout
-        # )
-        dims = (0,1) if self.broadcast_dropout else ()
+        # Projections for Q, K, V
+        self.query_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj")
+        self.key_proj = nn.Dense(self.qkv_features, use_bias=False, name="k_proj")
+        self.value_proj = nn.Dense(self.qkv_features, use_bias=False, name="v_proj")
+        self.out_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj")
 
-        self.dropout = nn.Dropout(
-            rate=self.dropout_rate, broadcast_dims=dims
+        self.dropout_layer = nn.Dropout(rate=self.dropout_rate)
+
+    def __call__(self, x: jnp.ndarray, *, mask: Optional[jnp.ndarray], deterministic: bool) -> jnp.ndarray:
+        batch_size, seq_len, _ = x.shape
+
+        # Q, K, V projections
+        query = self.query_proj(x)  # (batch_size, seq_len, qkv_features)
+        key = self.key_proj(x)
+        value = self.value_proj(x)
+
+        # Reshape for multi-head attention: (batch_size, seq_len, num_heads, head_dim)
+        query = query.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        key = key.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        value = value.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+
+        # Transpose Q, K, V to (batch_size, num_heads, seq_len, head_dim)
+        # as jax.nn.dot_product_attention often expects this layout or can adapt.
+        # Let's keep it (B, T, N, H) and let JAX handle it, or adjust if errors occur.
+        # The documentation for jax.nn.dot_product_attention implies it can handle various
+        # dimension orders as long as they are consistent.
+        # For clarity, (B, N, T, H) is a common convention for raw attention functions.
+        # query = jnp.transpose(query, (0, 2, 1, 3)) # (B, N, T, H)
+        # key = jnp.transpose(key, (0, 2, 1, 3))   # (B, N, T, H)
+        # value = jnp.transpose(value, (0, 2, 1, 3)) # (B, N, T, H)
+        # The `mask` from `make_causal_mask` is (B, 1, T, T). This should broadcast to (B, N, T, T).
+
+        # Apply scaled dot-product attention using JAX's native function
+        # `is_causal=True` enables causal masking.
+        # The `mask` argument can take the boolean mask from `make_causal_mask`.
+        # If `is_causal=True`, the explicit `mask` is combined (ANDed).
+        # For pure causal attention, `is_causal=True` is the main driver for cuDNN.
+        # If `mask` is purely for causality, `is_causal=True` is preferred and `mask` can be None
+        # or the causal mask itself. If `mask` includes padding, it should be passed.
+        # The `bias` argument is for additive masks.
+        attention_output = jax.nn.dot_product_attention(
+            query, # (B, T, N, H)
+            key,   # (B, T, N, H)
+            value, # (B, T, N, H)
+            mask=mask, # Boolean mask (B, 1, T, T) from make_causal_mask
+            is_causal=True, # Indicates causal attention for potential cuDNN optimization
+            dropout_rate=self.dropout_rate if not deterministic else 0.0, # Pass dropout here
+            deterministic=deterministic,
+            implementation="cudnn" # Request cuDNN backend
         )
+        # Output shape: (batch_size, seq_len, num_heads, head_dim) if inputs were (B,T,N,H)
+        # Or (batch_size, num_heads, seq_len, head_dim) if inputs were (B,N,T,H)
+        # Assuming output is (B, T, N, H) matching input Q shape convention
 
-    def __call__(
-        self,
-        x: jnp.ndarray,
-        *,
-        deterministic: bool,
-        mask: Optional[jnp.ndarray] = None,
-    ) -> jnp.ndarray:
-        b, l, _ = x.shape
+        # If transposed earlier, transpose back:
+        # attention_output = jnp.transpose(attention_output, (0, 2, 1, 3)) # (B, T, N, H)
 
-        # Project to Q‑K‑V and reshape to (B, T, H, D)
-        q = self.q_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-        k = self.k_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-        v = self.v_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+        # Merge heads: (batch_size, seq_len, qkv_features)
+        attention_output_merged = attention_output.reshape(batch_size, seq_len, -1)
 
-        # Call JAX’s attention fn with explicit cuDNN request; it will silently
-        # fall back to XLA if shapes or dtypes are not supported by FMHA.
-        y = jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            mask=mask,
-            is_causal=True,
-            implementation="cudnn",  # request flash‑attention path
-        )
+        # Final output projection
+        # Dropout is handled by dot_product_attention, so not applying self.dropout_layer here
+        output = self.out_proj(attention_output_merged)
+        # If dot_product_attention's internal dropout is not preferred,
+        # set dropout_rate=0.0 there and apply self.dropout_layer here.
+        # For simplicity, using its internal dropout.
 
-        # Merge heads and apply output projection
-        y = y.reshape(b, l, -1)
-        y = self.o_proj(y)
-        y = self.dropout(y, deterministic=deterministic)
-        return y
+        return output
 
 
 class TinyTransformerBlock(nn.Module):
-    """Decoder‑style transformer block (GPT) with checkpointing."""
-
+    """A single decoder (GPT-style) transformer block with checkpointing."""
     d_model: int
     n_heads: int
     d_ff: int
     dropout_rate: float = 0.1
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray, *, deterministic: bool = False):
-        # Rematerialise whole block to reduce activation memory.
+    def __call__(self, x: jnp.ndarray, *, deterministic: bool = False) -> jnp.ndarray:
         @nn.remat
-        def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
-            # --- Self‑Attention --------------------------------------------------
-            residual = h
-            h = nn.LayerNorm(name="ln1")(h)
-            causal_mask = make_causal_mask(h)
-            h = CuDNNFlashSelfAttention(
+        def _block(module: TinyTransformerBlock, current_x: jnp.ndarray) -> jnp.ndarray:
+            # --- Multi-head Self-Attention + residual ------------------------
+            residual = current_x
+            h = nn.LayerNorm(name="ln1")(current_x)
+            
+            causal_mask = make_causal_mask(h) # Shape: (batch, 1, seq_len, seq_len)
+
+            h = NativeJaxSelfAttention(
                 num_heads=module.n_heads,
                 qkv_features=module.d_model,
                 dropout_rate=module.dropout_rate,
-            )(h, deterministic=deterministic, mask=causal_mask)
+                name="native_jax_self_attention"
+            )(h, mask=causal_mask, deterministic=deterministic)
             h = residual + h
 
-            # --- Feed‑forward ----------------------------------------------------
+            # --- MLP block + residual ---------------------------------------
             residual = h
-            h = nn.LayerNorm(name="ln2")(h)
-            h = nn.Dense(module.d_ff, name="fc1")(h)
-            h = nn.gelu(h, approximate=False)
-            h = nn.Dense(module.d_model, name="fc2")(h)
-            h = nn.Dropout(rate=module.dropout_rate)(h, deterministic=deterministic)
-            return residual + h
+            h_mlp = nn.LayerNorm(name="ln2")(h)
+            h_mlp = nn.Dense(module.d_ff, name="fc1")(h_mlp)
+            h_mlp = nn.gelu(h_mlp, approximate=False)
+            h_mlp = nn.Dense(module.d_model, name="fc2")(h_mlp)
+            h_mlp = nn.Dropout(rate=module.dropout_rate)(h_mlp, deterministic=deterministic)
+            h = residual + h_mlp
+            
+            return h
 
         return _block(self, x)
 
+# Example Usage (Conceptual)
+# if __name__ == '__main__':
+#     key = jax.random.PRNGKey(0)
+#     batch_size, seq_len, d_model = 4, 64, 256
+#     n_heads, d_ff = 4, 512
+#     dropout_rate = 0.1
+#
+#     dummy_input = jnp.ones((batch_size, seq_len, d_model))
+#
+#     transformer_block = TinyTransformerBlock(
+#         d_model=d_model,
+#         n_heads=n_heads,
+#         d_ff=d_ff,
+#         dropout_rate=dropout_rate
+#     )
+#
+#     # Check XLA flags for cuDNN FMHA if needed
+#     # import os
+#     # os.environ = os.environ.get('XLA_FLAGS', '') + ' --xla_gpu_enable_cudnn_fmha=true'
+#     # Note: Default for xla_gpu_enable_cudnn_fmha is false.
+#     # NVIDIA sometimes recommends false if not using Transformer Engine. Test carefully.
+#
+#     variables = transformer_block.init(key, dummy_input, deterministic=True)
+#     output = transformer_block.apply(variables, dummy_input, deterministic=True)
+#
+#     print("Input shape:", dummy_input.shape)
+#     print("Output shape:", output.shape)
+#     print("Using native JAX dot_product_attention (requested cuDNN backend).")

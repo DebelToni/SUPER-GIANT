@@ -26,5 +26,5 @@ acc_steps = 2
 
 # Other Settings
 use_remat = True
-dataset_percent = 100
+dataset_percent = 10
 chunk_percent = 10

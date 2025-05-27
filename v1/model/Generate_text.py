@@ -183,6 +183,7 @@ def main():
                     top_k=(None if args.top_k in (0, None) else args.top_k),
                     greedy=args.greedy)
     
+    print("\n Original prompt:", args.prompt)
     print("\n" + "="*20 + " RESULT " + "="*20)
     print(text)
     print("="*48)

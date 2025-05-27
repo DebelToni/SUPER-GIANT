@@ -1,4 +1,4 @@
 model/model_params_*.*
 .DS_Store
-tiny_cached/
+# tiny_cached/
 prompts/

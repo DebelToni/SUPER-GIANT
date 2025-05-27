@@ -3,7 +3,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"  
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
-os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   
+# os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   
 
 
 import jax, jax.numpy as jnp, optax, Config

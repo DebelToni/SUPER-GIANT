@@ -13,6 +13,7 @@ class GiantGPT(nn.Module):
     d_ff:           int
     n_layers:       int
     dropout_rate:   float = 0.1
+    cpu:            bool = False  # If True, use CPU for inference
 
     @nn.compact
     def __call__(self, tokens: jnp.ndarray, *, deterministic: bool = False):
@@ -40,6 +41,7 @@ class GiantGPT(nn.Module):
                     d_ff=self.d_ff,
                     dropout_rate=self.dropout_rate,
                     dtype=Config.compute_dtype, # Ensure blocks use bf16
+                    cpu=self.cpu  # Pass CPU flag if needed
             )(x, deterministic=deterministic)
         
         # --- IMPORTANT ---

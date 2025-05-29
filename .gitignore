@@ -1,4 +1,8 @@
 *.zip
 *.pkl
 model/model_params_*.*
-*/.DS_Store
+.DS_Store
+model/model_params_*.*
+tiny_cached/
+prompts/
+__pycache__

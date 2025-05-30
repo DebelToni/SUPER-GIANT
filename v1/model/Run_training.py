@@ -32,23 +32,32 @@ def main():
     print(Config.num_epochs * len(train_tokens) // Config.batch_size, "total steps")
 
     model = GiantGPT(
-        vocab_size = Config.vocab_size,
-        context_length    = Config.context_length,
-        d_model    = Config.embedding_size,
-        n_heads    = Config.num_heads,
-        d_ff       = Config.feed_forward_size,
-        n_layers   = Config.num_layers,
-        dropout_rate = Config.dropout_rate,
+        # vocab_size = Config.vocab_size,
+        # context_length    = Config.context_length,
+        # d_model    = Config.embedding_size,
+        # n_heads    = Config.num_heads,
+        # d_ff       = Config.feed_forward_size,
+        # n_layers   = Config.num_layers,
+        # dropout_rate = Config.dropout_rate,
     )
 
     print("Initialising model parameters and optimizer...")
     rng    = jax.random.PRNGKey(0)
     dummy  = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
+    dummy_cache = model.init_cache(batch_size=1, max_length=Config.context_length, dtype=Config.compute_dtype)
+    variables = model.init(
+            rng,
+            dummy,
+            cache=dummy_cache,
+            deterministic=True,
+    )
     print("dummy:", dummy.shape, "d_model:", model.d_model)
     # cpu = jax.devices("cpu")[0]
     # with jax.default_device(cpu):
         # params = model.init(rng, dummy)["params"]
-    params = model.init(rng, dummy)["params"]
+
+    # params = model.init(rng, dummy)["params"]
+    params = variables["params"]
     save_params(params, "initial_params.pkl")
 
     optimizer = optax.adamw(Config.learning_rate, weight_decay=Config.weight_decay)

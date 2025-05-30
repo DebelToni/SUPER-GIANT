@@ -14,17 +14,16 @@ from typing import Optional, Tuple
 import jax, jax.numpy as jnp
 from flax import linen as nn
 import Config
-import functools
 
 def _split_heads(x: jnp.ndarray, num_heads: int) -> jnp.ndarray:
     b, s, d = x.shape
-    h        = num_heads
-    head_dim = d // h
-    return x.reshape(b, s, h, head_dim).transpose(0, 2, 1, 3)   # (b, h, s, d/h)
+    head_dim = d // num_heads
+    return x.reshape(b, s, num_heads, head_dim).transpose(0, 2, 1, 3)
 
 def _merge_heads(x: jnp.ndarray) -> jnp.ndarray:
     b, h, s, d = x.shape
     return x.transpose(0, 2, 1, 3).reshape(b, s, h * d)
+
 
 class NativeJaxSelfAttention(nn.Module):
     num_heads: int
@@ -33,7 +32,20 @@ class NativeJaxSelfAttention(nn.Module):
     dtype: jnp.dtype    = Config.compute_dtype
     use_cache: bool     = False
 
-    @nn.compact
+    def setup(self):
+        # register your projections once
+        kwargs = dict(
+            features=self.qkv_features,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=Config.param_dtype,
+            kernel_init=nn.initializers.normal(stddev=0.02),
+        )
+        self.q_proj = nn.Dense(name="q_proj", **kwargs)
+        self.k_proj = nn.Dense(name="k_proj", **kwargs)
+        self.v_proj = nn.Dense(name="v_proj", **kwargs)
+        self.o_proj = nn.Dense(name="o_proj", **kwargs)
+
     def __call__(self,
                  x: jnp.ndarray,
                  *,
@@ -42,57 +54,30 @@ class NativeJaxSelfAttention(nn.Module):
         b, s, _ = x.shape
         head_dim = self.qkv_features // self.num_heads
 
-        # Project inputs to query, key, and value
-        q = nn.Dense(
-            features=self.qkv_features,
-            use_bias=False,
-            dtype=self.dtype,
-            param_dtype=Config.param_dtype,
-            kernel_init=nn.initializers.normal(stddev=0.02),
-            name="q_proj"
-        )(x)
-        k = nn.Dense(
-            features=self.qkv_features,
-            use_bias=False,
-            dtype=self.dtype,
-            param_dtype=Config.param_dtype,
-            kernel_init=nn.initializers.normal(stddev=0.02),
-            name="k_proj"
-        )(x)
-        v = nn.Dense(
-            features=self.qkv_features,
-            use_bias=False,
-            dtype=self.dtype,
-            param_dtype=Config.param_dtype,
-            kernel_init=nn.initializers.normal(stddev=0.02),
-            name="v_proj"
-        )(x)
+        # project
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
 
-        # Reshape for multi-head attention
+        # multi-head reshape
         q = _split_heads(q, self.num_heads)
         k = _split_heads(k, self.num_heads)
         v = _split_heads(v, self.num_heads)
 
-        # -------- KV cache ----------------------------------------------------
+        # KV cache logic
         if self.use_cache:
-            # create or fetch the cache variables
             cache_k = self.variable("cache", "k",
                                     lambda: jnp.zeros((b, self.num_heads, 0, head_dim),
                                                       self.dtype))
             cache_v = self.variable("cache", "v",
                                     lambda: jnp.zeros((b, self.num_heads, 0, head_dim),
                                                       self.dtype))
-
             k = jnp.concatenate([cache_k.value, k], axis=2)
             v = jnp.concatenate([cache_v.value, v], axis=2)
-
-            # write updated tensors back
             cache_k.value = k
             cache_v.value = v
 
-        # -------- Flash Attention via cuDNN -----------------------------------
-        # NB: `jax.nn.attention` transparently calls the cuDNN flash-Attn kernel
-        # when the shapes are supported (sm80+, bf16/fp16).
+        # flash attention
         attn_out = jax.nn.attention.dot_product_attention(
             query=q, key=k, value=v,
             dropout_rate=self.dropout_rate,
@@ -100,17 +85,11 @@ class NativeJaxSelfAttention(nn.Module):
             dtype=self.dtype,
         )
 
-        # Merge heads and project output
-        attn_out = _merge_heads(attn_out)                                  # (b, s, d)
-        attn_out = nn.Dense(
-            features=self.qkv_features,
-            use_bias=False,
-            dtype=self.dtype,
-            param_dtype=Config.param_dtype,
-            name="o_proj"
-        )(attn_out)
-
+        # merge heads + output projection
+        attn_out = _merge_heads(attn_out)
+        attn_out = self.o_proj(attn_out)
         return attn_out.astype(self.dtype)
+
 
 class TinyTransformerBlock(nn.Module):
     d_model: int
@@ -122,7 +101,7 @@ class TinyTransformerBlock(nn.Module):
 
     @nn.compact
     def __call__(self, x: jnp.ndarray, *, deterministic: bool = False) -> jnp.ndarray:
-        # LayerNorm (f32)
+        # Self‐attention block
         residual = x
         h = nn.LayerNorm(dtype=jnp.float32, name="ln1")(x)
         h = NativeJaxSelfAttention(
@@ -134,22 +113,12 @@ class TinyTransformerBlock(nn.Module):
                 name="mha")(h, deterministic=deterministic)
         h = residual + h
 
-        # Feed-forward
+        # Feed-forward block
         residual = h
         h = nn.LayerNorm(dtype=jnp.float32, name="ln2")(h)
-        h = nn.Dense(
-            features=self.d_ff,
-            dtype=self.dtype,
-            param_dtype=Config.param_dtype,
-            name="fc1"
-        )(h)
+        h = nn.Dense(self.d_ff, dtype=self.dtype, param_dtype=Config.param_dtype, name="fc1")(h)
         h = nn.gelu(h, approximate=False)
-        h = nn.Dense(
-            features=self.d_model,
-            dtype=self.dtype,
-            param_dtype=Config.param_dtype,
-            name="fc2"
-        )(h)
+        h = nn.Dense(self.d_model, dtype=self.dtype, param_dtype=Config.param_dtype, name="fc2")(h)
         h = nn.Dropout(rate=self.dropout_rate)(h, deterministic=deterministic)
         return residual + h
 

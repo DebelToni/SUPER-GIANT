@@ -56,21 +56,23 @@ class NativeJaxSelfAttention(nn.Module):
         # k = dense(name="k_proj")(x)
         # v = dense(name="v_proj")(x)
         q = nn.Dense(self.qkv_features,
-                     use_bias=False,
-                     dtype=self.dtype,
-                     param_dtype=Config.param_dtype,
-                     name="q_proj")
+                    use_bias=False,
+                    dtype=self.dtype,
+                    param_dtype=Config.param_dtype,
+                    name="q_proj",
+                    kernel_init=nn.initializers.normal(stddev=0.02))(x)
         k = nn.Dense(self.qkv_features,
-                        use_bias=False,
-                        dtype=self.dtype,
-                        param_dtype=Config.param_dtype,
-                        name="k_proj",
-                        kernel_init=nn.initializers.normal(stddev=0.02))
+                    use_bias=False,
+                    dtype=self.dtype,
+                    param_dtype=Config.param_dtype,
+                    name="k_proj",
+                    kernel_init=nn.initializers.normal(stddev=0.02))(x)
         v = nn.Dense(self.qkv_features,
-                        use_bias=False,
-                        dtype=self.dtype,
-                        param_dtype=Config.param_dtype,
-                        name="v_proj")
+                    use_bias=False,
+                    dtype=self.dtype,
+                    param_dtype=Config.param_dtype,
+                    name="v_proj",
+                    kernel_init=nn.initializers.normal(stddev=0.02))(x)
 
         q = _split_heads(q, self.num_heads)
         k = _split_heads(k, self.num_heads)

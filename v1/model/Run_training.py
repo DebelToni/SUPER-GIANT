@@ -7,7 +7,7 @@ os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
 
 import jax, jax.numpy as jnp
-jax_config.update("jax_default_matmul_precision", "bfloat16")
+jax.config.update("jax_default_matmul_precision", "bfloat16")
 
 import optax, Config
 

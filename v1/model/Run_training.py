@@ -70,7 +70,7 @@ def main():
             rng, dropout_rng = jax.random.split(rng)
             params, opt_state, loss = train_step(
                 params, opt_state, batch,
-                model=model, optimizer=optimizer, dropout_rng=dropout_rng
+                model=model, optimizer=optimizer, dropout_rng=dropout_rng,
                 cache=None,
             )
 

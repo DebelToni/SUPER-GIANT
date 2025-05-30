@@ -74,12 +74,16 @@ class TransformerBlock(nn.Module):
     @nn.compact
     def __call__(
         self,
-        x: jnp.ndarray,                      
+        x: jnp.ndarray,                      # [B, T, D]  (T=1 in inference)
         *,
-        cache: Dict[str, jnp.ndarray],       
+        cache: Dict[str, jnp.ndarray] | None = None,
         deterministic: bool = True
-    ) -> Tuple[jnp.ndarray, Dict[str, Any]]:
-        B, T_new, _ = x.shape               
+    ) -> Tuple[jnp.ndarray, Dict[str, Any] | None]:
+        """
+        • Training (`cache is None`):  full-sequence flash-attention.
+        • Inference (dict):            KV-cached, one-token step.
+        """
+        B, T_new, _ = x.shape
 
         h = nn.LayerNorm(dtype=cfg.compute_dtype)(x)
 
@@ -87,19 +91,21 @@ class TransformerBlock(nn.Module):
                        use_bias=False,
                        dtype=cfg.compute_dtype,
                        name="qkv")(h)
-
-        q, k, v = jnp.split(qkv, 3, axis=-1)      
-        q = self._split_heads(q)                  
+        q, k, v = jnp.split(qkv, 3, axis=-1)      # each [B, T, D]
+        q = self._split_heads(q)                  # [B, H, T, Dh]
         k = self._split_heads(k)
         v = self._split_heads(v)
 
-        idx = cache["idx"]
-        cache["k"] = cache["k"].at[:, :, idx, :].set(k.squeeze(2))
-        cache["v"] = cache["v"].at[:, :, idx, :].set(v.squeeze(2))
-        cache["idx"] = idx + 1
+        if cache is None:                       # ─── training path ───
+            k_full, v_full = k, v               # whole sequence
+        else:                                   # ─── inference path ─
+            idx = cache["idx"]
+            cache["k"] = cache["k"].at[:, :, idx, :].set(k.squeeze(2))
+            cache["v"] = cache["v"].at[:, :, idx, :].set(v.squeeze(2))
+            cache["idx"] = idx + 1
 
-        k_full = cache["k"][:, :, : idx + 1, :]
-        v_full = cache["v"][:, :, : idx + 1, :]
+            k_full = cache["k"][:, :, : idx + 1, :]
+            v_full = cache["v"][:, :, : idx + 1, :]
 
         q = q.astype(cfg.compute_dtype)
         k_full = k_full.astype(cfg.compute_dtype)
@@ -121,3 +127,4 @@ class TransformerBlock(nn.Module):
                                             deterministic=deterministic)
         y = x + h_ff
         return y, cache
+

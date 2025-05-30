@@ -66,13 +66,13 @@ class NativeJaxSelfAttention(nn.Module):
                     dtype=self.dtype,
                     param_dtype=Config.param_dtype,
                     name="k_proj",
-                    kernel_init=nn.initializers.normal(stddev=0.02))(x)
+                    kernel_init=nn.initializers.normal(stddev=0.02))
         v = nn.Dense(self.qkv_features,
                     use_bias=False,
                     dtype=self.dtype,
                     param_dtype=Config.param_dtype,
                     name="v_proj",
-                    kernel_init=nn.initializers.normal(stddev=0.02))(x)
+                    kernel_init=nn.initializers.normal(stddev=0.02))
 
         q = _split_heads(q, self.num_heads)
         k = _split_heads(k, self.num_heads)

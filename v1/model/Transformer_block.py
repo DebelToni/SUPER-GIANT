@@ -130,4 +130,3 @@ class TinyTransformerBlock(nn.Module):
                      name="fc2")(h)
         h = nn.Dropout(rate=self.dropout_rate)(h, deterministic=deterministic)
         return residual + h
-       return _block(self, x)

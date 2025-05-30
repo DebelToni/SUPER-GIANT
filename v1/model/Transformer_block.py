@@ -60,7 +60,7 @@ class NativeJaxSelfAttention(nn.Module):
                     dtype=self.dtype,
                     param_dtype=Config.param_dtype,
                     name="q_proj",
-                    kernel_init=nn.initializers.normal(stddev=0.02))(x)
+                    kernel_init=nn.initializers.normal(stddev=0.02))
         k = nn.Dense(self.qkv_features,
                     use_bias=False,
                     dtype=self.dtype,

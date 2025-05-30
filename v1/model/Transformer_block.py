@@ -1,8 +1,8 @@
 """
-Self‑contained TinyTransformerBlock **with KV cache support**.
+Self-contained TinyTransformerBlock **with KV cache support**.
 
 We use Flax’s `cache` collection: during the first forward pass the cache is
-created with length 0; every subsequent token concatenates to the existing
+created with length 0; every subsequent token concatenates to the existing
 keys/values and writes them back.
 
 Nothing outside the module needs to know about the implementation details.
@@ -42,19 +42,33 @@ class NativeJaxSelfAttention(nn.Module):
         b, s, _ = x.shape
         head_dim = self.qkv_features // self.num_heads
 
-        dense = functools.partial(
-            nn.Dense,
+        # Project inputs to query, key, and value
+        q = nn.Dense(
             features=self.qkv_features,
             use_bias=False,
             dtype=self.dtype,
             param_dtype=Config.param_dtype,
             kernel_init=nn.initializers.normal(stddev=0.02),
-        )
+            name="q_proj"
+        )(x)
+        k = nn.Dense(
+            features=self.qkv_features,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=Config.param_dtype,
+            kernel_init=nn.initializers.normal(stddev=0.02),
+            name="k_proj"
+        )(x)
+        v = nn.Dense(
+            features=self.qkv_features,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=Config.param_dtype,
+            kernel_init=nn.initializers.normal(stddev=0.02),
+            name="v_proj"
+        )(x)
 
-        q = dense(name="q_proj")(x)
-        k = dense(name="k_proj")(x)
-        v = dense(name="v_proj")(x)
-
+        # Reshape for multi-head attention
         q = _split_heads(q, self.num_heads)
         k = _split_heads(k, self.num_heads)
         v = _split_heads(v, self.num_heads)
@@ -77,7 +91,7 @@ class NativeJaxSelfAttention(nn.Module):
             cache_v.value = v
 
         # -------- Flash Attention via cuDNN -----------------------------------
-        # NB: `jax.nn.attention` transparently calls the cuDNN flash‑Attn kernel
+        # NB: `jax.nn.attention` transparently calls the cuDNN flash-Attn kernel
         # when the shapes are supported (sm80+, bf16/fp16).
         attn_out = jax.nn.attention.dot_product_attention(
             query=q, key=k, value=v,
@@ -85,12 +99,17 @@ class NativeJaxSelfAttention(nn.Module):
             deterministic=deterministic,
             dtype=self.dtype,
         )
+
+        # Merge heads and project output
         attn_out = _merge_heads(attn_out)                                  # (b, s, d)
-        attn_out = nn.Dense(self.qkv_features,
-                            use_bias=False,
-                            dtype=self.dtype,
-                            param_dtype=Config.param_dtype,
-                            name="o_proj")(attn_out)
+        attn_out = nn.Dense(
+            features=self.qkv_features,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=Config.param_dtype,
+            name="o_proj"
+        )(attn_out)
+
         return attn_out.astype(self.dtype)
 
 class TinyTransformerBlock(nn.Module):
@@ -115,17 +134,22 @@ class TinyTransformerBlock(nn.Module):
                 name="mha")(h, deterministic=deterministic)
         h = residual + h
 
-        # Feed‑forward
+        # Feed-forward
         residual = h
         h = nn.LayerNorm(dtype=jnp.float32, name="ln2")(h)
-        h = nn.Dense(self.d_ff,
-                     dtype=self.dtype,
-                     param_dtype=Config.param_dtype,
-                     name="fc1")(h)
+        h = nn.Dense(
+            features=self.d_ff,
+            dtype=self.dtype,
+            param_dtype=Config.param_dtype,
+            name="fc1"
+        )(h)
         h = nn.gelu(h, approximate=False)
-        h = nn.Dense(self.d_model,
-                     dtype=self.dtype,
-                     param_dtype=Config.param_dtype,
-                     name="fc2")(h)
+        h = nn.Dense(
+            features=self.d_model,
+            dtype=self.dtype,
+            param_dtype=Config.param_dtype,
+            name="fc2"
+        )(h)
         h = nn.Dropout(rate=self.dropout_rate)(h, deterministic=deterministic)
         return residual + h
+

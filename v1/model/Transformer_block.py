@@ -43,18 +43,33 @@ class NativeJaxSelfAttention(nn.Module):
         b, s, _ = x.shape
         head_dim = self.qkv_features // self.num_heads
 
-        dense = functools.partial(
-            nn.Dense,
-            features=self.qkv_features,
-            use_bias=False,
-            dtype=self.dtype,
-            param_dtype=Config.param_dtype,
-            kernel_init=nn.initializers.normal(stddev=0.02),
-        )
-
-        q = dense(name="q_proj")(x)
-        k = dense(name="k_proj")(x)
-        v = dense(name="v_proj")(x)
+        # dense = functools.partial(
+        #     nn.Dense,
+        #     features=self.qkv_features,
+        #     use_bias=False,
+        #     dtype=self.dtype,
+        #     param_dtype=Config.param_dtype,
+        #     kernel_init=nn.initializers.normal(stddev=0.02),
+        # )
+        #
+        # q = dense(name="q_proj")(x)
+        # k = dense(name="k_proj")(x)
+        # v = dense(name="v_proj")(x)
+        q = nn.Dense(self.qkv_features,
+                     use_bias=False,
+                     dtype=self.dtype,
+                     param_dtype=Config.param_dtype,
+                     name="q_proj")
+        k = nn.Dense(self.qkv_features,
+                        use_bias=False,
+                        dtype=self.dtype,
+                        param_dtype=Config.param_dtype,
+                        name="k_proj")
+        v = nn.Dense(self.qkv_features,
+                        use_bias=False,
+                        dtype=self.dtype,
+                        param_dtype=Config.param_dtype,
+                        name="v_proj")
 
         q = _split_heads(q, self.num_heads)
         k = _split_heads(k, self.num_heads)

@@ -43,15 +43,14 @@ def main():
 
     print("Initialising model parameters and optimizer...")
     rng    = jax.random.PRNGKey(0)
-    dummy  = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
+    dummy_input  = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
     dummy_cache = model.init_cache(batch_size=1, max_length=Config.context_length, dtype=Config.compute_dtype)
     variables = model.init(
             rng,
-            dummy,
-            cache=dummy_cache,
+            dummy_input,
+            # cache=dummy_cache,
             deterministic=True,
     )
-    print("dummy:", dummy.shape, "d_model:", model.d_model)
     # cpu = jax.devices("cpu")[0]
     # with jax.default_device(cpu):
         # params = model.init(rng, dummy)["params"]

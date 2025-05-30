@@ -70,7 +70,7 @@ class GiantGPT(nn.Module):
         self,
         x: jnp.ndarray,                       
         *,
-        cache: Dict[str, jnp.ndarray],
+        cache: Dict[str, jnp.ndarray] | None = None,
         deterministic: bool = True
     ) -> Tuple[jnp.ndarray, Dict]:
         """
@@ -83,14 +83,17 @@ class GiantGPT(nn.Module):
         assert T == 1, "GiantGPT expects one token per forward pass."
 
         h = self.token_emb(x).astype(cfg.compute_dtype)         
-        idx = cache["idx"]
+        idx = cache["idx"] if cache is not None else 0
         h = h + self.pos_emb[:, idx : idx + 1, :]
 
         for i in range(self.n_layers):
-            h, cache_layer = self.blocks[i](h,
-                                            cache=cache[f"layer{i}"],
-                                            deterministic=deterministic)
-            cache[f"layer{i}"] = cache_layer
+            h, cache_i = self.blocks[i](
+                h,
+                cache=None if cache is None else cache[f"layer{i}"],
+                deterministic=deterministic,
+            )
+            if cache is not None:
+                cache[f"layer{i}"] = cache_i
 
         h = self.final_ln(h)
         logits = self.lm_head(h.astype(jnp.float32))            
@@ -108,3 +111,4 @@ class GiantGPT(nn.Module):
             v = jnp.zeros_like(k)
             layer_cache[f"layer{i}"] = {"k": k, "v": v, "idx": jnp.array(0, jnp.int32)}
         return layer_cache
+

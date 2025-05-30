@@ -44,11 +44,11 @@ def main():
     print("Initialising model parameters and optimizer...")
     rng    = jax.random.PRNGKey(0)
     dummy_input  = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
-    dummy_cache = model.init_cache(batch_size=1, max_length=Config.context_length, dtype=Config.compute_dtype)
+    dummy_cache = None
     variables = model.init(
             rng,
             dummy_input,
-            # cache=dummy_cache,
+            cache=dummy_cache,
             deterministic=True,
     )
     # cpu = jax.devices("cpu")[0]
@@ -71,6 +71,7 @@ def main():
             params, opt_state, loss = train_step(
                 params, opt_state, batch,
                 model=model, optimizer=optimizer, dropout_rng=dropout_rng
+                cache=None,
             )
 
             global_step += 1

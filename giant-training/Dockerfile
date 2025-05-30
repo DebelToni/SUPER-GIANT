@@ -27,18 +27,15 @@ ENV VENV_DIR=/opt/venv
 RUN python3.12 -m venv ${VENV_DIR} && \
     ${VENV_DIR}/bin/pip install --upgrade pip && \
     ${VENV_DIR}/bin/pip install --no-cache-dir \
-        "jax[cuda12]" jaxlib flax transformers databases         # tweak versions if you wish
+        "jax[cuda12]" jaxlib flax transformers databases datasets
 
 ENV VIRTUAL_ENV=${VENV_DIR}
 ENV PATH="${VENV_DIR}/bin:${PATH}"
 
-# --- 4. Pull your code every time the container starts ------------------------
-ARG REPO_URL=https://github.com/your-org/your-repo.git
-ENV PROJECT_DIR=/workspace/app
-RUN mkdir -p ${PROJECT_DIR}
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# --- 4. Prepare a workspace for manual git clones ---------------------------
+WORKDIR /workspace/app
+RUN mkdir -p /workspace/app
 
-WORKDIR ${PROJECT_DIR}
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["bash"]      # drop into a shell after repo sync
+# By default, drop you into a bash shell in /workspace/app
+# CMD ["bash"]
+CMD ["tail", "-f", "/dev/null"]

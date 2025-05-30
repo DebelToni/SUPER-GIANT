@@ -4,7 +4,12 @@ from functools import partial
 @partial(jax.jit,static_argnames=['model', 'optimizer'])
 def train_step(params, opt_state, batch, *, model, optimizer, dropout_rng):
     def loss_fn(p):
-        logits = model.apply({"params": p}, batch["input"], rngs={"dropout": dropout_rng})
+        logits = model.apply(
+            {"params": p},
+            batch["input"],
+            rngs={"dropout": dropout_rng},
+            deterministic=False,
+        )
         loss = optax.softmax_cross_entropy_with_integer_labels(
             logits, batch["target"])
         loss = (loss * batch["mask"]).sum() / batch["mask"].sum()

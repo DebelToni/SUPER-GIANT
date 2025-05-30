@@ -3,8 +3,9 @@
 import jax.numpy as jnp
 from transformers import AutoTokenizer
 
-# --- Mixed Precision Setup ---
-compute_dtype = jnp.bfloat16
+# -----------------------------
+dtype = jnp.bfloat16
+compute_dtype = dtype
 param_dtype = jnp.float32
 # -----------------------------
 
@@ -28,3 +29,5 @@ acc_steps = 2
 use_remat = True
 dataset_percent = 10
 chunk_percent = 10
+
+deafult_device = "cuda"

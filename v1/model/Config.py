@@ -5,9 +5,8 @@ from transformers import AutoTokenizer
 
 # -----------------------------
 dtype = jnp.bfloat16
-compute_dtype = dtype
-# param_dtype = jnp.float32
-param_dtype = dtype
+compute_dtype = jnp.bfloat16
+param_dtype = jnp.float32
 # -----------------------------
 
 # Model Hyperparameters

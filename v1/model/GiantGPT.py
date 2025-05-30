@@ -26,6 +26,7 @@ class GiantGPT(nn.Module):
             self.vocab_size,
             self.d_model,
             dtype=cfg.compute_dtype,
+            param_dtype=cfg.param_dtype,
         )
         self.pos_emb = self.param(
             "pos_emb",
@@ -52,7 +53,8 @@ class GiantGPT(nn.Module):
         self.final_ln = nn.LayerNorm(dtype=cfg.compute_dtype)
 
         self.lm_head = nn.Dense(
-            self.vocab_size, use_bias=False, dtype=jnp.float32, name="lm_head"
+            self.vocab_size, use_bias=False, dtype=jnp.float32, name="lm_head",
+            param_dtype=cfg.param_dtype,  
         )
 
     def init_cache(

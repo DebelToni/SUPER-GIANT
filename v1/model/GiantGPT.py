@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import flax.linen as nn
 
 import Config
-from Transformer_block import TransformerBlock
+from Transformer_block import TransformerBlock, sinusoid_position_encoding
 
 cfg = Config                                 
 

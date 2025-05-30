@@ -6,7 +6,10 @@ os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 # os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   
 
 
-import jax, jax.numpy as jnp, optax, Config
+import jax, jax.numpy as jnp
+jax_config.update("jax_default_matmul_precision", "bfloat16")
+
+import optax, Config
 
 from GiantGPT import GiantGPT
 from Training_step    import train_step

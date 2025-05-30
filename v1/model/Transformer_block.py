@@ -22,8 +22,12 @@ class FeedForward(nn.Module):
 
     @nn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        h = nn.gelu(nn.Dense(self.d_ff, dtype=cfg.compute_dtype)(x))
-        h = nn.Dense(x.shape[-1], dtype=cfg.compute_dtype)(h)
+        h = nn.gelu(nn.Dense(self.d_ff, dtype=cfg.compute_dtype,
+                                param_dtype=cfg.param_dtype,#name="ffn_dense"   
+                             )(x))
+        h = nn.Dense(x.shape[-1], dtype=cfg.compute_dtype
+                                , param_dtype=cfg.param_dtype, #name="ffn_proj" 
+                     )(h)
         return h
 
 class TransformerBlock(nn.Module):
@@ -62,14 +66,18 @@ class TransformerBlock(nn.Module):
         and silently falls back to the dense softmax path when unavailable.
         """
         try:
-            import jax.experimental.cuda
-            return jax.experimental.cuda.flash_attention(q, k, v)
-        except (ImportError, AttributeError):
-
-            scale = 1.0 / jnp.sqrt(q.shape[-1]).astype(q.dtype)
-            attn = jnp.einsum("...qhd,...khd->...hqk", q, k) * scale
-            attn = jax.nn.softmax(attn, axis=-1)
-            return jnp.einsum("...hqk,...khd->...qhd", attn, v)
+            # import jax.experimental.cuda
+            # return jax.experimental.cuda.flash_attention(q, k, v)
+            from jax.lax import flash_attention
+            return flash_attention(q, k, v, dropout_rate=0.0)
+        except (ImportError):
+            from jax.experimental.cuda import flash_attention
+        # except (ImportError, AttributeError):
+        #
+        #     scale = 1.0 / jnp.sqrt(q.shape[-1]).astype(q.dtype)
+        #     attn = jnp.einsum("...qhd,...khd->...hqk", q, k) * scale
+        #     attn = jax.nn.softmax(attn, axis=-1)
+        #     return jnp.einsum("...hqk,...khd->...qhd", attn, v)
 
     @nn.compact
     def __call__(
@@ -90,6 +98,7 @@ class TransformerBlock(nn.Module):
         qkv = nn.Dense(3 * self.d_model,
                        use_bias=False,
                        dtype=cfg.compute_dtype,
+                       param_dtype=cfg.param_dtype,
                        name="qkv")(h)
         q, k, v = jnp.split(qkv, 3, axis=-1)      # each [B, T, D]
         q = self._split_heads(q)                  # [B, H, T, Dh]
@@ -114,7 +123,8 @@ class TransformerBlock(nn.Module):
         attn_out = self._flash_attention(q, k_full, v_full)     
         attn_out = self._merge_heads(attn_out)                  
 
-        out = nn.Dense(self.d_model, dtype=cfg.compute_dtype,
+        out = nn.Dense(self.d_model, dtype=cfg.compute_dtype, 
+                        param_dtype=cfg.param_dtype,
                        name="proj")(attn_out)
         if not deterministic and self.dropout > 0.0:
             out = nn.Dropout(self.dropout)(out, deterministic=deterministic)

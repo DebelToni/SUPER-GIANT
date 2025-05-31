@@ -10,6 +10,8 @@ import jax.numpy as jnp
 import numpy as np
 from transformers import AutoTokenizer
 
+import jax.lax as lax
+
 from functools import partial
 
 import Config
@@ -141,18 +143,29 @@ def generate(
     def generation_body(state, _):
         tokens_buf, cache, rng, idx = state
         rng, step_rng = jax.random.split(rng)
-        prev_token = tokens_buf[:, idx-1:idx]  
-        next_token, cache = step_fn(params, cache, prev_token, idx-1, step_rng)
-        tokens_buf = tokens_buf.at[:, idx].set(next_token.squeeze(1))
-        return (tokens_buf, cache, rng, idx+1), None
 
-    init_state = (tokens, cache, rng, tokens.shape[1] - pad_len + 1)
+        # prev_token = tokens_buf[:, idx-1:idx]  
+        prev_token = lax.dynamic_slice_in_dim(tokens_buf, idx - 1, 1, axis=1)  # (1,1)
+
+        # next_token, cache = step_fn(params, cache, prev_token, idx-1, step_rng)
+        next_token, cache = step_fn(params, cache, prev_token, idx - 1, step_rng)  # (1,1)
+
+        # tokens_buf = tokens_buf.at[:, idx].set(next_token.squeeze(1))
+        tokens_buf = lax.dynamic_update_slice(tokens_buf, next_token, (0, idx))
+
+        return (tokens_buf, cache, rng, idx + 1), None
+
+    start_idx = jnp.array(tokens.shape[1] - pad_len + 1, dtype=jnp.int32)
+
+    # init_state = (tokens, cache, rng, tokens.shape[1] - pad_len + 1)
+    init_state = (tokens, cache, rng, start_idx)
     (tokens, _, _, _), _ = jax.lax.scan(
         generation_body,
         init_state,
         None,
         length=max_new_tokens,
     )
+
     return tokenizer.decode(tokens[0, :tokens.shape[1]-pad_len + max_new_tokens], skip_special_tokens=True)
 
 def main():

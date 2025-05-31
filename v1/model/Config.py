@@ -11,7 +11,7 @@ param_dtype = jnp.float32
 
 # Model Hyperparameters
 embedding_size = 256
-context_length = 256
+context_length = 257
 num_heads = 2
 num_layers = 2
 feed_forward_size = num_layers * embedding_size

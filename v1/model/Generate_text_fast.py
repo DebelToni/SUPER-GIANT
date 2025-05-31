@@ -1,12 +1,27 @@
+# Generate_text_fast.py – KV-cached, fully‑JIT text generation for GiantGPT
+# ------------------------------------------------------------------------
+"""Drop‑in replacement for the old `Generate_text.py` that
+  • JIT‑compiles the whole autoregressive loop (no Python per‑token step)
+  • Stores/updates KV caches in Flax’s \"cache\" collection on device
+  • Supports greedy, temperature and top‑k sampling
+
+▪ **2025‑05‑31 update** – more robust checkpoint loader
+  The script now accepts Pickle/NPZ/Numpy checkpoints without assuming
+  `numpy.load(...).item()`.  This fixes the `AttributeError: 'dict' object …`
+  you hit when the checkpoint is already a Python dict.  See `load_checkpoint()`
+  below.
+"""
 
 from __future__ import annotations
 
 import argparse
+import pickle
 from pathlib import Path
 from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from transformers import AutoTokenizer
 
 import Config
@@ -28,6 +43,29 @@ def build_model() -> GiantGPT:
     )
 
 # ---------------------------------------------------------------------------
+# Robust checkpoint loader (handles .pkl, .npz, .npy)
+# ---------------------------------------------------------------------------
+
+def _numpy_or_jax_array(x):
+    """Ensure leaves are JAX arrays – helpful if checkpoint stored NumPy."""
+    return jnp.asarray(x) if not isinstance(x, jax.Array) else x
+
+
+def load_checkpoint(path: Path):
+    """Return a PyTree of JAX arrays living on *CPU* (device_put later)."""
+    ext = path.suffix.lower()
+    if ext in {".pkl", ".pickle"}:
+        with path.open("rb") as f:
+            params = pickle.load(f)
+    elif ext == ".npz":
+        params = dict(np.load(path, allow_pickle=True))
+    else:  # .npy OR anything saved with np.save / jnp.save
+        arr = np.load(path, allow_pickle=True)
+        params = arr.item() if hasattr(arr, "item") else arr
+    return jax.tree_util.tree_map(_numpy_or_jax_array, params)
+
+
+# ---------------------------------------------------------------------------
 # JIT‑compiled generation with KV caching
 # ---------------------------------------------------------------------------
 
@@ -41,7 +79,7 @@ def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
         decode=True,
         cur_index=jnp.array(0, jnp.int32),
     )
-    return variables.pop("params")  # -> (cache,)
+    return variables.pop("params")  # -> cache dict
 
 
 def preprocess_prompt(tokenizer, prompt: str, max_len: int):
@@ -56,7 +94,7 @@ def preprocess_prompt(tokenizer, prompt: str, max_len: int):
 def make_step_fn(model: GiantGPT, temperature: float, top_k: Optional[int]):
     """Returns a *pure* JIT‑able step function closed over params/constants."""
 
-    @jax.jit
+    @jax.jit(donate_argnums=(1,))  # donate cache to avoid copies
     def step_fn(
         params: dict,
         cache: dict,
@@ -64,7 +102,7 @@ def make_step_fn(model: GiantGPT, temperature: float, top_k: Optional[int]):
         cur_index: jnp.ndarray,   # () scalar int32
         rng: jax.random.KeyArray,
     ):
-        # Apply model, *updating* the KV cache inside the mutable collection.
+        # Apply model, updating KV cache inside the mutable collection.
         logits, new_vars = model.apply(
             {"params": params, "cache": cache},
             prev_token,
@@ -102,6 +140,9 @@ def generate(
     temperature: float,
     top_k: Optional[int],
 ):
+    device = jax.devices("gpu")[0] if jax.devices("gpu") else jax.devices()[0]
+    params = jax.tree_util.tree_map(lambda x: jax.device_put(x, device), params)
+
     # Build empty caches & prime them with the prompt -----------------------
     cache = init_caches(model, params)
 
@@ -112,13 +153,13 @@ def generate(
     step_fn = make_step_fn(model, temperature, top_k)
 
     # Feed the prompt tokens except the last one to build up the cache ------
-    def warm_body(state, token_and_idx):
-        cache, _ = state
-        tok, idx = token_and_idx  # scalar token, scalar idx
-        _, cache = step_fn(params, cache, tok[None, None], idx, rng)
-        return (cache, None), None
-
     if tokens.shape[1] > 1:
+        def warm_body(state, token_and_idx):
+            cache, _ = state
+            tok, idx = token_and_idx  # scalar token, scalar idx
+            _, cache = step_fn(params, cache, tok[None, None], idx, rng)
+            return (cache, None), None
+
         idxs = jnp.arange(tokens.shape[1]-1, dtype=jnp.int32)
         toks = tokens[:, :-1].squeeze(0)
         (cache, _), _ = jax.lax.scan(
@@ -167,10 +208,7 @@ def main():
     temperature = 0.0 if args.greedy else args.temperature
 
     print("\nLoading checkpoint…")
-    params = jax.tree_util.tree_map(
-        lambda x: jax.device_put(x, jax.devices("gpu")[0]),
-        jnp.load(args.checkpoint, allow_pickle=True).item(),
-    )
+    params_cpu = load_checkpoint(args.checkpoint)
 
     print("Building model…")
     model = build_model()
@@ -178,9 +216,9 @@ def main():
 
     prompt_ids = preprocess_prompt(tokenizer, args.prompt, Config.context_length)
 
-    print("Generating… (this is a single compiled call)")
+    print("Generating… (first call will JIT‑compile)")
     text = generate(
-        params,
+        params_cpu,
         model,
         tokenizer,
         prompt_ids,
@@ -196,3 +234,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

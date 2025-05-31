@@ -5,8 +5,16 @@ os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
 # os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   
 
+try:
+    import jax
+except ImportError:
+    print("JAX is not installed. Installing JAX...")
+    os.system("pip install jax[cuda12] transformers datasets flax")
+    import jax
 
-import jax, jax.numpy as jnp, optax, Config
+import optax
+import Config
+import jax.numpy as jnp
 
 from GiantGPT import GiantGPT
 from Training_step    import train_step

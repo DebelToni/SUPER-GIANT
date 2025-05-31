@@ -1,4 +1,5 @@
 FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
+# py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 

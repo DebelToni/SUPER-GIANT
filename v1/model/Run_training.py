@@ -6,10 +6,7 @@ os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 # os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   
 
 
-import jax, jax.numpy as jnp
-jax.config.update("jax_default_matmul_precision", "bfloat16")
-
-import optax, Config
+import jax, jax.numpy as jnp, optax, Config
 
 from GiantGPT import GiantGPT
 from Training_step    import train_step
@@ -35,31 +32,23 @@ def main():
     print(Config.num_epochs * len(train_tokens) // Config.batch_size, "total steps")
 
     model = GiantGPT(
-        # vocab_size = Config.vocab_size,
-        # context_length    = Config.context_length,
-        # d_model    = Config.embedding_size,
-        # n_heads    = Config.num_heads,
-        # d_ff       = Config.feed_forward_size,
-        # n_layers   = Config.num_layers,
-        # dropout_rate = Config.dropout_rate,
+        vocab_size = Config.vocab_size,
+        context_length    = Config.context_length,
+        d_model    = Config.embedding_size,
+        n_heads    = Config.num_heads,
+        d_ff       = Config.feed_forward_size,
+        n_layers   = Config.num_layers,
+        dropout_rate = Config.dropout_rate,
     )
 
     print("Initialising model parameters and optimizer...")
     rng    = jax.random.PRNGKey(0)
-    dummy_input  = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
-    dummy_cache = None
-    variables = model.init(
-            rng,
-            dummy_input,
-            cache=dummy_cache,
-            deterministic=True,
-    )
+    dummy  = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
+    print("dummy:", dummy.shape, "d_model:", model.d_model)
     # cpu = jax.devices("cpu")[0]
     # with jax.default_device(cpu):
         # params = model.init(rng, dummy)["params"]
-
-    # params = model.init(rng, dummy)["params"]
-    params = variables["params"]
+    params = model.init(rng, dummy)["params"]
     save_params(params, "initial_params.pkl")
 
     optimizer = optax.adamw(Config.learning_rate, weight_decay=Config.weight_decay)
@@ -73,10 +62,7 @@ def main():
             rng, dropout_rng = jax.random.split(rng)
             params, opt_state, loss = train_step(
                 params, opt_state, batch,
-                model=model,
-                optimizer=optimizer,
-                dropout_rng=dropout_rng,
-                # cache=None,
+                model=model, optimizer=optimizer, dropout_rng=dropout_rng
             )
 
             global_step += 1
@@ -94,4 +80,3 @@ def main():
 if __name__ == "__main__":
     print("Starting training...")
     main()
-

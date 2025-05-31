@@ -8,7 +8,9 @@ from transformers import AutoTokenizer
 from tqdm.auto import tqdm
 
 # ── tweakables ────────────────────────────────────────────────────────────────
-DATASET_NAME   = "roneneldan/TinyStories"
+# DATASET_NAME   = "roneneldan/TinyStories"
+DATASET_NAME = "wikitext-103-v1"
+# DATASET_NAME = "OpenWebText"
 TOKENIZER_NAME = "EleutherAI/gpt-neo-125M"
 CACHE_DIR      = Path("tiny_cached")          # kept on the Colab VM disk
 VAL_SPLIT_PCT  = 3.0                          # 97 / 3 train-val split

@@ -69,7 +69,8 @@ def load_checkpoint(path: Path):
 # JIT‑compiled generation with KV caching
 # ---------------------------------------------------------------------------
 
-def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
+# def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
+def init_caches(model: GiantGPT, batch_size: int = 1):
     """Initialise empty `cache` collection with correct shapes on device."""
     dummy_token = jnp.ones((batch_size, 1), jnp.int32)
     variables = model.init(
@@ -79,7 +80,8 @@ def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
         decode=True,
         cur_index=jnp.array(0, jnp.int32),
     )
-    return variables.pop("params")  # -> cache dict
+    # return variables.pop("params")  # -> cache dict
+    return variables["cache"]  # -> cache dict
 
 
 def preprocess_prompt(tokenizer, prompt: str, max_len: int):
@@ -94,13 +96,14 @@ def preprocess_prompt(tokenizer, prompt: str, max_len: int):
 def make_step_fn(model: GiantGPT, temperature: float, top_k: Optional[int]):
     """Returns a *pure* JIT‑able step function closed over params/constants."""
 
-    # @jax.jit(donate_argnums=(1,))  # donate cache to avoid copies
+    @jax.jit(donate_argnums=(1,))  # donate cache to avoid copies
     def step_fn(
         params: dict,
         cache: dict,
         prev_token: jnp.ndarray,  # (B, 1)
         cur_index: jnp.ndarray,   # () scalar int32
-        rng: jax.random.KeyArray,
+        # rng: jax.random.KeyArray,
+        rng: jax.Array,  # JAX PRNG key
     ):
         # Apply model, updating KV cache inside the mutable collection.
         logits, new_vars = model.apply(
@@ -144,7 +147,8 @@ def generate(
     params = jax.tree_util.tree_map(lambda x: jax.device_put(x, device), params)
 
     # Build empty caches & prime them with the prompt -----------------------
-    cache = init_caches(model, params)
+    # cache = init_caches(model, params)
+    cache = init_caches(model)  # no params needed, just batch size
 
     # Broadcast prompt into batch dim 1
     tokens = prompt_ids[None, :]  # (1, P)

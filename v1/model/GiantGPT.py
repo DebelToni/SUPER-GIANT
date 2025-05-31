@@ -1,5 +1,6 @@
 # GiantGPT.py
 
+from typing import Optional
 import jax.numpy as jnp
 from flax import linen as nn
 from Transformer_block import TinyTransformerBlock

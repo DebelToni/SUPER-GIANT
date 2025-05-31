@@ -19,6 +19,8 @@ tokenizer_name = "EleutherAI/gpt-neo-125M"
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 dropout_rate = 0.1
 
+vocab_size = tokenizer.vocab_size
+
 # Training Hyperparameters
 learning_rate = 2e-4
 weight_decay = 1e-2

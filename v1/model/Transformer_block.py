@@ -33,6 +33,7 @@ class NativeJaxSelfAttention(nn.Module):
         
         self.dropout = nn.Dropout(rate=self.dropout_rate)
 
+    @nn.compact
     def __call__(self, x, *, deterministic: bool, decode: bool = False, cur_index: Optional[int] = None):
         b, l, _ = x.shape
         head_dim = self.qkv_features // self.num_heads

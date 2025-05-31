@@ -15,7 +15,8 @@ context_length = 257
 num_heads = 2
 num_layers = 2
 feed_forward_size = num_layers * embedding_size
-vocab_size = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-125M").vocab_size
+tokenizer_name = "EleutherAI/gpt-neo-125M"
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 dropout_rate = 0.1
 
 # Training Hyperparameters

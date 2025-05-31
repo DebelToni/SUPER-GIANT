@@ -1,4 +1,4 @@
-# Generate_text_fast.py – KV-cached, fully‑JIT text generation for GiantGPT
+#t Generate_text_fast.py – KV-cached, fully‑JIT text generation for GiantGPT
 # ------------------------------------------------------------------------
 """Drop‑in replacement for the old `Generate_text.py` that
   • JIT‑compiles the whole autoregressive loop (no Python per‑token step)
@@ -37,7 +37,7 @@ def build_model() -> GiantGPT:
         context_length=Config.context_length,
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
-        d_ff=Config.ffn_size,
+        d_ff=Config.feed_forward_size,
         n_layers=Config.num_layers,
         dropout_rate=0.0,  # dropout disabled for inference
     )

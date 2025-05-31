@@ -94,7 +94,7 @@ def preprocess_prompt(tokenizer, prompt: str, max_len: int):
 def make_step_fn(model: GiantGPT, temperature: float, top_k: Optional[int]):
     """Returns a *pure* JIT‑able step function closed over params/constants."""
 
-    @jax.jit(donate_argnums=(1,))  # donate cache to avoid copies
+    # @jax.jit(donate_argnums=(1,))  # donate cache to avoid copies
     def step_fn(
         params: dict,
         cache: dict,

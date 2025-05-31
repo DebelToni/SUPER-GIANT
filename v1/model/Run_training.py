@@ -59,7 +59,24 @@ def main():
     params = model.init(rng, dummy)["params"]
     save_params(params, "initial_params.pkl")
 
-    optimizer = optax.adamw(Config.learning_rate, weight_decay=Config.weight_decay)
+    # optimizer = optax.adamw(Config.learning_rate, weight_decay=Config.weight_decay)
+    tokens_per_epoch = train_tokens.shape[0] // Config.batch_size
+    total_steps      = Config.num_epochs * tokens_per_epoch
+
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,          # start at 0
+        peak_value=Config.learning_rate,
+        warmup_steps=500,
+        decay_steps=total_steps - 500,
+    )
+
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),        # ≤ 1.0 prevents fp16 blow-ups
+        optax.adamw(
+            learning_rate=schedule,
+            b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1,
+        ),
+    )
     opt_state = optimizer.init(params)
 
     global_step = 0

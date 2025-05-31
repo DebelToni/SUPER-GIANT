@@ -20,23 +20,33 @@ class GiantGPT(nn.Module):
     def __call__(self, tokens, *, deterministic: bool = False, decode: bool = False, cur_index: Optional[int] = None):
         # x = embed(tokens)
         # Embed and cast to compute_dtype (bf16)
-        x = nn.Embed(num_embeddings=self.vocab_size,
-                     features=self.d_model,
-                     embedding_init=nn.initializers.normal(stddev=0.02),
-                     dtype=Config.compute_dtype, # Output bf16
-                     param_dtype=Config.param_dtype)(tokens)
+        # x = nn.Embed(num_embeddings=self.vocab_size,
+        #              features=self.d_model,
+        #              embedding_init=nn.initializers.normal(stddev=0.02),
+        #              dtype=Config.compute_dtype, # Output bf16
+        #              param_dtype=Config.param_dtype)(tokens)
+        embed = nn.Embed(
+            num_embeddings=self.vocab_size,
+            features=self.d_model,
+            embedding_init=nn.initializers.normal(stddev=0.02),
+            dtype=Config.compute_dtype,  # Output bf16
+            param_dtype=Config.param_dtype,  # Store in f32
+        )
+        x = embed(tokens)
 
         # Positional embeddings should also be bf16
-        pos_emb = self.param("pos_emb",
-                             nn.initializers.normal(stddev=0.02),
-                             (self.context_length, self.d_model),
-                             Config.param_dtype) # Store in f32
-        # x = x + pos_emb[:x.shape[1]].astype(Config.compute_dtype) # Add as bf16
-        if decode:
-            x = x + pos_emb[cur_index][None, None, :].astype(Config.compute_dtype)
-        else:
-            x = x + pos_emb[: x.shape[1]].astype(Config.compute_dtype)
-
+        # pos_emb = self.param("pos_emb",
+        #                      nn.initializers.normal(stddev=0.02),
+        #                      (self.context_length, self.d_model),
+        #                      Config.param_dtype) # Store in f32
+        # # x = x + pos_emb[:x.shape[1]].astype(Config.compute_dtype) # Add as bf16
+        # if decode:
+        #     x = x + pos_emb[cur_index][None, None, :].astype(Config.compute_dtype)
+        # else:
+        #     x = x + pos_emb[: x.shape[1]].astype(Config.compute_dtype)
+        #
+        # x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
+        # No learned positional table – we rely on RoPE inside each block
         x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
 
         # Transformer blocks operate in bf16
@@ -58,9 +68,11 @@ class GiantGPT(nn.Module):
         
         # Final Dense layer for logits - should output float32 for stability
         # with the loss function.
-        logits = nn.Dense(self.vocab_size,
-                          kernel_init=nn.initializers.normal(stddev=0.02),
-                          dtype=jnp.float32, # Output float32
-                          param_dtype=Config.param_dtype)(x.astype(jnp.float32)) # Input must be float32
-                          
+        # logits = nn.Dense(self.vocab_size,
+        #                   kernel_init=nn.initializers.normal(stddev=0.02),
+        #                   dtype=jnp.float32, # Output float32
+        #                   param_dtype=Config.param_dtype)(x.astype(jnp.float32)) # Input must be float32
+        logits = jnp.einsum("bld,vd->blv",
+                            x.astype(jnp.float32),
+                            embed.embedding)
         return logits

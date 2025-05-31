@@ -33,35 +33,68 @@ class NativeJaxSelfAttention(nn.Module):
         
         self.dropout = nn.Dropout(rate=self.dropout_rate)
 
-    def __call__(
-        self,
-        x: jnp.ndarray, # Expects x to be in compute_dtype (bf16)
-        *,
-        deterministic: bool,
-    ) -> jnp.ndarray:
+    def __call__(self, x, *, deterministic: bool, decode: bool = False, cur_index: Optional[int] = None):
         b, l, _ = x.shape
+        head_dim = self.qkv_features // self.num_heads
 
-        # Project to Q‑K‑V and reshape to (B, T, H, D)
-        # Inputs are bf16, projections compute in bf16, outputs are bf16.
-        q = self.q_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-        k = self.k_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-        v = self.v_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+        q = self.q_proj(x).reshape(b, l, self.num_heads, head_dim)
+        k = self.k_proj(x).reshape(b, l, self.num_heads, head_dim)
+        v = self.v_proj(x).reshape(b, l, self.num_heads, head_dim)
 
-        # q, k, v are now bf16, satisfying the cuDNN requirement.
-        y = jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            bias=None,
-            is_causal=True,
-            implementation="cudnn",
-        )
+        if decode:
+            assert cur_index is not None, "Need cur_index when decode=True"
+            cached_k = self.variable(
+                "cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype
+            )
+            cached_v = self.variable(
+                "cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype
+            )
+            cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k.squeeze(1))
+            cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v.squeeze(1))
+            k = cached_k.value[:, :, : cur_index + 1, :]
+            v = cached_v.value[:, :, : cur_index + 1, :]
+            q = q / jnp.sqrt(head_dim)
+            q = q.transpose(0, 2, 1, 3)
+            y = jax.nn.dot_product_attention(q, k, v, is_causal=False, implementation="cudnn")
+            y = y.transpose(0, 2, 1, 3).reshape(b, 1, self.qkv_features)
+        else:
+            # Training path (unchanged)
+            q = q / jnp.sqrt(head_dim)
+            y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
+            y = y.reshape(b, l, self.qkv_features)
 
-        # Merge heads and apply output projection (still in bf16)
-        y = y.reshape(b, l, -1)
         y = self.o_proj(y)
         y = self.dropout(y, deterministic=deterministic)
         return y
+    # def __call__(
+    #     self,
+    #     x: jnp.ndarray, # Expects x to be in compute_dtype (bf16)
+    #     *,
+    #     deterministic: bool,
+    # ) -> jnp.ndarray:
+    #     b, l, _ = x.shape
+    #
+    #     # Project to Q‑K‑V and reshape to (B, T, H, D)
+    #     # Inputs are bf16, projections compute in bf16, outputs are bf16.
+    #     q = self.q_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+    #     k = self.k_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+    #     v = self.v_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+    #
+    #     # q, k, v are now bf16, satisfying the cuDNN requirement.
+    #     y = jax.nn.dot_product_attention(
+    #         q,
+    #         k,
+    #         v,
+    #         bias=None,
+    #         is_causal=True,
+    #         implementation="cudnn",
+    #     )
+    #
+    #     # Merge heads and apply output projection (still in bf16)
+    #     y = y.reshape(b, l, -1)
+    #     y = self.o_proj(y)
+    #     y = self.dropout(y, deterministic=deterministic)
+    #     return y
 
 
 class TinyTransformerBlock(nn.Module):
@@ -74,7 +107,8 @@ class TinyTransformerBlock(nn.Module):
     dtype: jnp.dtype = Config.compute_dtype # Use compute_dtype
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray, *, deterministic: bool = False):
+    # def __call__(self, x: jnp.ndarray, *, deterministic: bool = False):
+    def __call__(self, x, *, deterministic: bool, decode: bool = False, cur_index: Optional[int] = None):
         # x is expected to be bf16
         @nn.remat
         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
@@ -82,12 +116,18 @@ class TinyTransformerBlock(nn.Module):
             residual = h # bf16
             # LayerNorm computes in f32, casts back to bf16
             h_norm = nn.LayerNorm(name="ln1", dtype=jnp.float32)(h) 
+            # h_attn = NativeJaxSelfAttention(
+            #     num_heads=module.n_heads,
+            #     qkv_features=module.d_model,
+            #     dropout_rate=module.dropout_rate,
+            #     dtype=module.dtype, # Pass bf16
+            # )(h_norm, deterministic=deterministic)
             h_attn = NativeJaxSelfAttention(
                 num_heads=module.n_heads,
                 qkv_features=module.d_model,
                 dropout_rate=module.dropout_rate,
-                dtype=module.dtype, # Pass bf16
-            )(h_norm, deterministic=deterministic)
+                dtype=module.dtype,
+            )(h_norm, deterministic=deterministic, decode=decode, cur_index=cur_index)
             h = residual + h_attn # bf16
 
             # --- Feed‑forward ----------------------------------------------------

@@ -1,15 +1,4 @@
 # generate_text.py
-"""Generate text from a GiantGPT checkpoint saved with `save_params`.
-
-This version is updated to work with the mixed-precision (bfloat16/float32)
-model and respects the context length adjustments made during training.
-
-Usage (greedy one‑token demo):
-    python generate_text.py --prompt "The quick brown fox jumped over the lazy" --steps 1
-
-Usage (sample 20 tokens with temperature):
-    python generate_text.py --prompt "Once upon a time" --steps 20 --temperature 0.8 --top_k 40
-"""
 
 import numpy as np
 import argparse
@@ -21,14 +10,8 @@ import jax
 import jax.numpy as jnp
 from transformers import AutoTokenizer
 
-# -------- project‑local imports ------------------------------------------------
-import Config  # Import the (updated) hyper-parameters
-from GiantGPT import GiantGPT  # The wrapper we built earlier
-
-# -----------------------------------------------------------------------------
-# Utility functions
-# -----------------------------------------------------------------------------
-
+import Config  
+from GiantGPT import GiantGPT  
 
 def load_params(path: Path):
     """Load Flax params dict pickled by `save_params`."""
@@ -48,25 +31,23 @@ def build_model():
     """
     return GiantGPT(
         vocab_size=Config.vocab_size,
-        context_length=Config.context_length, # Uses the (likely 257) value
+        context_length=Config.context_length, 
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
         d_ff=Config.feed_forward_size,
         n_layers=Config.num_layers,
-        dropout_rate=0.0,  # No dropout at inference
+        dropout_rate=0.0, 
     )
 
 
 def _select_logits_sampling(logits: jnp.ndarray, rng: jax.random.PRNGKey,
                             temperature: float = 1.0, top_k: Optional[int] = None):
     """Sample one token from the distribution at `logits`."""
-    # Ensure logits are float32 for sampling stability
     logits = logits.astype(jnp.float32)
     
     logits = logits / jnp.maximum(1e-8, temperature)
 
     if top_k is not None:
-        # keep only the largest k probs
         top_vals = jnp.sort(logits)[-top_k]
         logits = jnp.where(logits < top_vals, -jnp.inf, logits)
 
@@ -90,49 +71,35 @@ def generate(model, params, tokenizer, prompt: str, steps: int = 1,
     ids: List[int] = tokenizer.encode(prompt, add_special_tokens=False)
     print(f"Input IDs: {ids}")
 
-    # --- JIT compile the model apply function ---
     apply_fn = jax.jit(lambda p, i: model.apply({"params": p}, i, deterministic=True))
 
     for i in range(steps):
         print(f"\n--- Step {i+1}/{steps} ---")
         
-        # --- Adjust slicing ---
-        # We need to feed the model a sequence of length up to the *training*
-        # input length, which was Config.context_length - 1 (e.g., 256).
         effective_context_length = Config.context_length - 1
         ctx = ids[-effective_context_length:]
         print(f"Context (last {len(ctx)} tokens): {ctx}")
 
-        # Create input array (1, seq_len)
         x = jnp.asarray(ctx, dtype=jnp.int32)[None, :]
         print(f"Model input shape: {x.shape}")
 
-        # Apply the model (JIT compiled)
-        logits = apply_fn(params, x) # model.apply({"params": params}, x, deterministic=True)
+        logits = apply_fn(params, x) 
         print(f"Logits shape: {logits.shape}, dtype: {logits.dtype}")
 
-        # Get logits for the *last* token
         last_logits = logits[:, -1, :]  # (1, vocab)
         last_logits = jnp.squeeze(last_logits, axis=0)  # (vocab,)
         print(f"Last logits shape: {last_logits.shape}")
 
-        # Select the next token
         if greedy:
-            next_id = int(jnp.argmax(last_logits.astype(jnp.float32))) # Argmax on f32
+            next_id = int(jnp.argmax(last_logits.astype(jnp.float32))) 
         else:
             rng, sub = jax.random.split(rng)
             next_id = int(_select_logits_sampling(last_logits, sub,
                                                 temperature, top_k))
         
-        # Optional: Print top-k predictions for debugging/interest
-        # top_vals, top_ids = jax.lax.top_k(last_logits.astype(jnp.float32), 10)
-        # top_tokens = tokenizer.convert_ids_to_tokens(np.array(top_ids))
-        # print("Top-10 preds:", list(zip(top_tokens, np.array(top_vals))))
-
         print(f"Selected token ID: {next_id} ('{tokenizer.decode([next_id])}')")
         ids.append(next_id)
 
-        # Optional early-stop on EOS token
         if tokenizer.eos_token_id is not None and next_id == tokenizer.eos_token_id:
             print("EOS token reached. Stopping generation.")
             break
@@ -141,9 +108,6 @@ def generate(model, params, tokenizer, prompt: str, steps: int = 1,
     return tokenizer.decode(ids, clean_up_tokenization_spaces=True)
 
 
-# -----------------------------------------------------------------------------
-# CLI wrapper
-# -----------------------------------------------------------------------------
 
 def main():
     cli = argparse.ArgumentParser(description="Generate text using a trained GiantGPT model.")
@@ -165,7 +129,6 @@ def main():
     print(f"Using JAX device: {jax.default_backend()} ({jax.devices()})")
     print(f"Loading tokenizer (EleutherAI/gpt-neo-125M) …", flush=True)
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-125M")
-    # Ensure PAD token if needed (though not used in this basic script)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

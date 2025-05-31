@@ -52,12 +52,34 @@ class NativeJaxSelfAttention(nn.Module):
             )
             cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k.squeeze(1))
             cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v.squeeze(1))
-            k = cached_k.value[:, :, : cur_index + 1, :]
-            v = cached_v.value[:, :, : cur_index + 1, :]
+            # --- after you write k/v into the cache -------------------------------
+            k = cached_k.value                      # (B, H, T, D)
+            v = cached_v.value                      # (B, H, T, D)
+
             q = q / jnp.sqrt(head_dim)
-            q = q.transpose(0, 2, 1, 3)
-            y = jax.nn.dot_product_attention(q, k, v, is_causal=False, implementation="cudnn")
+            q = q.transpose(0, 2, 1, 3)             # (B, H, 1, D)
+
+            # Build an additive bias: 0 for valid keys, –1e10 for padding keys
+            key_len   = k.shape[2]                  # == Config.context_length (static)
+            valid     = jnp.arange(key_len) <= cur_index       # (T,) dynamic mask
+            attn_bias = jnp.where(valid, 0.0, -1e10)
+            attn_bias = attn_bias[None, None, None, :]          # (1,1,1,T)
+
+            y = jax.nn.dot_product_attention(
+                    q, k, v,
+                    bias=attn_bias,                 # <— mask future/padded positions
+                    is_causal=False,
+                    implementation="cudnn",
+            )
+
             y = y.transpose(0, 2, 1, 3).reshape(b, 1, self.qkv_features)
+
+            # k = cached_k.value[:, :, : cur_index + 1, :]
+            # v = cached_v.value[:, :, : cur_index + 1, :]
+            # q = q / jnp.sqrt(head_dim)
+            # q = q.transpose(0, 2, 1, 3)
+            # y = jax.nn.dot_product_attention(q, k, v, is_causal=False, implementation="cudnn")
+            # y = y.transpose(0, 2, 1, 3).reshape(b, 1, self.qkv_features)
         else:
             # Training path (unchanged)
             q = q / jnp.sqrt(head_dim)

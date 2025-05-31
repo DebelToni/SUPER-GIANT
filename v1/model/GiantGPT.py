@@ -15,7 +15,9 @@ class GiantGPT(nn.Module):
     dropout_rate:   float = 0.1
 
     @nn.compact
-    def __call__(self, tokens: jnp.ndarray, *, deterministic: bool = False):
+    # def __call__(self, tokens: jnp.ndarray, *, deterministic: bool = False):
+    def __call__(self, tokens, *, deterministic: bool = False, decode: bool = False, cur_index: Optional[int] = None):
+        # x = embed(tokens)
         # Embed and cast to compute_dtype (bf16)
         x = nn.Embed(num_embeddings=self.vocab_size,
                      features=self.d_model,
@@ -28,7 +30,11 @@ class GiantGPT(nn.Module):
                              nn.initializers.normal(stddev=0.02),
                              (self.context_length, self.d_model),
                              Config.param_dtype) # Store in f32
-        x = x + pos_emb[:x.shape[1]].astype(Config.compute_dtype) # Add as bf16
+        # x = x + pos_emb[:x.shape[1]].astype(Config.compute_dtype) # Add as bf16
+        if decode:
+            x = x + pos_emb[cur_index][None, None, :].astype(Config.compute_dtype)
+        else:
+            x = x + pos_emb[: x.shape[1]].astype(Config.compute_dtype)
 
         x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
 
@@ -40,7 +46,7 @@ class GiantGPT(nn.Module):
                     d_ff=self.d_ff,
                     dropout_rate=self.dropout_rate,
                     dtype=Config.compute_dtype, # Ensure blocks use bf16
-            )(x, deterministic=deterministic)
+            )(x, deterministic=deterministic, decode=decode, cur_index=cur_index)
         
         # --- IMPORTANT ---
         # Before the final Dense layer, it's good practice to have a final

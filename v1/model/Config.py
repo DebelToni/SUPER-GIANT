@@ -27,7 +27,7 @@ acc_steps = 2
 
 # Other Settings
 use_remat = True
-dataset_percent = 10
+dataset_percent = 1
 chunk_percent = 10
 
 deafult_device = "cuda"

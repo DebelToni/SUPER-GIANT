@@ -25,10 +25,11 @@ ENV XLA_FLAGS="--xla_gpu_enable_cublaslt=false"
 # ─── 4. Python deps (single jax install) ─────────────────────────────
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir \
-      "jax[cuda12]>=0.4.17" \
+      "jax[cuda12]" \
       flax \
       transformers \
-      datasets
+      datasets \
+	  optax
 
 # ─── 5. Workspace & default CMD ─────────────────────────────────────
 WORKDIR /workspace/app

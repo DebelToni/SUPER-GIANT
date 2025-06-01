@@ -2,23 +2,30 @@
 # DATASET_NAME   = "roneneldan/TinyStories"
 
 """
-prepare_dataset.py – **stream‑packing** variant
-============================================
-A robust data‑prep helper that turns WikiText‑103 (or any other text‑line
-corpus) into fixed‑length windows without drowning everything in padding.
+prepare_dataset.py – streaming packer with **chunk_pct** alias
+=============================================================
+This version packs a line‑based corpus (e.g. WikiText‑103) into fixed‑
+length token windows while:
 
-Major differences vs. v2
-────────────────────────
-1. **Streaming packer** – short lines are concatenated into one rolling
-   buffer so we never throw away usable tokens. Windows are emitted with
-   a fixed *stride* (default 50 % overlap).
-2. **Constant‑size shards** – each shard holds `SHARD_ROWS` windows,
-   making memory use predictable.
-3. **Simpler bookkeeping** – no more mixing “examples” (docs) with
-   “windows” when sizing memmaps.
-4. **Pad token sanity check** retained.
+* preserving virtually every token – short paragraphs are concatenated
+  instead of padded out or dropped,
+* writing predictable, constant‑size shards (10 000 windows each), and
+* guaranteeing <5 % pad tokens in the final arrays.
 
-Usage stays the same for `Run_training.py`.
+**New / restored CLI flags**
+────────────────────────────
+* ``--subset_pct`` *(float)* – percent of the corpus to read (default 100).
+* ``--chunk_pct`` *(float)* – **alias** of `subset_pct` kept for backward
+  compatibility with older `Run_training.py` files. If both are given we
+  favour `chunk_pct` and print a warning.
+
+So the old call
+```python
+get_data(subset_pct=Config.dataset_percent,
+         chunk_pct =Config.chunk_percent,
+         context_length=Config.context_length)
+```
+still works.
 """
 import os
 import math
@@ -31,7 +38,7 @@ from transformers import AutoTokenizer
 from tqdm.auto import tqdm
 
 # ────────────────────────────────
-# Configuration
+# Configuration constants
 # ────────────────────────────────
 DATASET_NAME   = "wikitext-103-v1"
 DATASET_VENDOR = "wikitext"
@@ -40,14 +47,14 @@ TOKENIZER_NAME = "EleutherAI/gpt-neo-125M"
 CACHE_DIR      = Path("tiny_cached")
 
 VAL_EVERY_N_WIN = 33          # deterministic interleaving train/val
-STRIDE_FRAC     = 0.5         # 50 % overlap between windows
-SHARD_ROWS      = 10_000      # windows per .npz file
-DTYPE           = np.uint16   # works for vocab < 65 535
+STRIDE_FRAC     = 0.5         # 50 % overlap between successive windows
+SHARD_ROWS      = 10_000      # windows per compressed shard
+DTYPE           = np.uint16   # enough for vocab < 65 535
 PAD_FRAC_LIMIT  = 0.05        # sanity‑check threshold
 
 
 # ────────────────────────────────
-# Tokeniser & pad token handling
+# Tokeniser & pad‑token handling
 # ────────────────────────────────
 print("▶ Loading tokenizer …")
 _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
@@ -57,16 +64,11 @@ PAD_TOKEN_ID = _tokenizer.pad_token_id
 
 
 # ────────────────────────────────
-# Helper – rolling buffer windowiser
+# Rolling‑buffer windowiser
 # ────────────────────────────────
 
 def _iter_windows(ds, ctx: int, stride: int):
-    """Yield fixed‑length windows from a line corpus.
-
-    Concatenates successive non‑empty lines into a buffer. Whenever the
-    buffer has `ctx` tokens or more, we pop the first `ctx` tokens as a
-    window and advance the buffer by `stride` tokens.
-    """
+    """Yield fixed‑length windows with overlap from a line corpus."""
     buf: List[int] = []
     for rec in ds:
         text = rec["text"].strip()
@@ -80,66 +82,61 @@ def _iter_windows(ds, ctx: int, stride: int):
 
 
 # ────────────────────────────────
-# Core encoding/sharding routine
+# Encoding & sharding
 # ────────────────────────────────
 
 def _encode_stream(ctx: int, subset_pct: float) -> Tuple[List[Path], List[Path]]:
     ds = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train")
     stride = max(1, int(ctx * STRIDE_FRAC))
 
-    # Restrict dataset size if requested
+    # optional subset
     if subset_pct < 100.0:
         subset_size = math.ceil(len(ds) * subset_pct / 100)
         ds = ds.select(range(subset_size))
+        print(f"▶ Using {subset_pct:.1f}% → {subset_size:,} lines from dataset")
 
-    train_files, val_files = [], []
-
-    def _new_memmap(prefix: str, shard_idx: int):
+    def _new_mm(prefix: str, shard_idx: int):
         path = CACHE_DIR / f"{prefix}_{shard_idx:03d}.npy"
         mm   = np.memmap(path, dtype=DTYPE, mode="w+", shape=(SHARD_ROWS, ctx))
         return path, mm
 
+    train_files, val_files = [], []
     shard = 0
-    train_path, train_mm = _new_memmap("train_tokens", shard)
-    val_path,   val_mm   = _new_memmap("val_tokens",   shard)
+    train_path, train_mm = _new_mm("train_tokens", shard)
+    val_path,   val_mm   = _new_mm("val_tokens",   shard)
     train_pos = val_pos = 0
+    win_cnt = 0
 
     pbar = tqdm(total=len(ds), desc="packing", unit="line")
-    win_cnt = 0
     for window in _iter_windows(ds, ctx, stride):
         target_mm, target_pos = (
             (val_mm, val_pos) if (win_cnt % VAL_EVERY_N_WIN == 0)
             else (train_mm, train_pos)
         )
         target_mm[target_pos] = window
-
         if target_mm is train_mm:
             train_pos += 1
         else:
             val_pos += 1
         win_cnt += 1
 
-        # rollover when shard full
+        # roll over to next shard when either split is full
         if train_pos >= SHARD_ROWS or val_pos >= SHARD_ROWS:
             train_mm.flush(); val_mm.flush()
-
-            # compress and close shard
             for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
                 if rows:
                     tmp = np.memmap(path, dtype=DTYPE, mode="r", shape=(SHARD_ROWS, ctx))[:rows]
                     np.savez_compressed(path.with_suffix(".npz"), data=tmp)
                     os.remove(path)
-
             train_files.append(train_path.with_suffix(".npz"))
             val_files.append(val_path.with_suffix(".npz"))
-
             shard += 1
-            train_path, train_mm = _new_memmap("train_tokens", shard)
-            val_path,   val_mm   = _new_memmap("val_tokens",   shard)
+            train_path, train_mm = _new_mm("train_tokens", shard)
+            val_path,   val_mm   = _new_mm("val_tokens",   shard)
             train_pos = val_pos = 0
-        pbar.update(0)  # keep tqdm alive (we’re iterating our own gen)
+        pbar.update(0)
 
-    # final flush
+    # flush last shard
     train_mm.flush(); val_mm.flush()
     for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
         if rows:
@@ -155,7 +152,7 @@ def _encode_stream(ctx: int, subset_pct: float) -> Tuple[List[Path], List[Path]]
 
 
 # ────────────────────────────────
-# Utilities
+# Concatenate shards and sanity check
 # ────────────────────────────────
 
 def _concat(shards):
@@ -169,18 +166,37 @@ def _concat(shards):
 def _sanity_check(arr: np.ndarray):
     pad_frac = (arr == PAD_TOKEN_ID).mean()
     if pad_frac > PAD_FRAC_LIMIT:
-        raise RuntimeError(
-            f"Dataset contains {pad_frac:.2%} pad tokens – preprocessing error.")
+        raise RuntimeError(f"Dataset contains {pad_frac:.2%} pad tokens – preprocessing error.")
 
 
 # ────────────────────────────────
 # Public API
 # ────────────────────────────────
 
-def get_data(*, subset_pct: float = 100.0, context_length: int = 256):
-    """Return (train_tokens, val_tokens, tokenizer)."""
-    CACHE_DIR.mkdir(exist_ok=True)
+def get_data(*, subset_pct: float | None = None, chunk_pct: float | None = None,
+             context_length: int = 256):
+    """Return `(train_tokens, val_tokens, tokenizer)`.
 
+    Parameters
+    ----------
+    subset_pct : float | None
+        Percent of dataset lines to read. Ignored if ``chunk_pct`` is
+        given.
+    chunk_pct  : float | None
+        *Alias* of ``subset_pct`` kept for backward compatibility. If both
+        are provided the alias wins.
+    context_length : int
+        Token window length (``ctx`` in the code).
+    """
+    # resolve aliasing
+    if chunk_pct is not None:
+        if subset_pct is not None and subset_pct != 100.0:
+            print("⚠ Both subset_pct and chunk_pct provided – using chunk_pct")
+        subset_pct = chunk_pct
+    if subset_pct is None:
+        subset_pct = 100.0
+
+    CACHE_DIR.mkdir(exist_ok=True)
     train_shards = sorted(CACHE_DIR.glob("train_tokens_*.npz"))
     val_shards   = sorted(CACHE_DIR.glob("val_tokens_*.npz"))
     if train_shards and val_shards:
@@ -201,11 +217,17 @@ def get_data(*, subset_pct: float = 100.0, context_length: int = 256):
 # ────────────────────────────────
 if __name__ == "__main__":
     import argparse
-    cli = argparse.ArgumentParser("Prepare dataset")
-    cli.add_argument("--subset_pct", type=float, default=100)
-    cli.add_argument("--ctx", type=int, default=256)
+    cli = argparse.ArgumentParser("prepare_dataset packing util")
+    cli.add_argument("--subset_pct", type=float, default=100,
+                     help="Percent of corpus to encode [0‑100]")
+    cli.add_argument("--chunk_pct" , type=float,
+                     help="Alias of --subset_pct (older scripts)")
+    cli.add_argument("--ctx", type=int, default=256,
+                     help="Token window length")
     args = cli.parse_args()
 
-    tr, va, _ = get_data(subset_pct=args.subset_pct, context_length=args.ctx)
+    tr, va, _ = get_data(subset_pct=args.subset_pct,
+                         chunk_pct=args.chunk_pct,
+                         context_length=args.ctx)
     print("train_tokens", tr.shape, "val_tokens", va.shape)
 

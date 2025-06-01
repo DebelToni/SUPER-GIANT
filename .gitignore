@@ -6,3 +6,5 @@ model/model_params_*.*
 tiny_cached/
 prompts/
 __pycache__
+testing/
+logs/

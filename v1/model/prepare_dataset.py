@@ -22,7 +22,9 @@ DTYPE          = np.uint16                    # 65 535 > 50 000-token vocab
 # ── constants ────────────────────────────────────────────────────────────────
 STRIDE_FRAC     = 0.5        # 0.5 ⇒ 50 % overlap. Set 1.0 for no overlap.
 VAL_EVERY_N_WIN = 33         # deterministic ~3 % val split
-PAD_TOKEN_ID    = 0          # GPT-Neo uses 50256 (= eod), change if needed
+PAD_TOKEN_ID    = AutoTokenizer.from_pretrained(TOKENIZER_NAME).pad_token_id
+if PAD_TOKEN_ID is None:
+    PAD_TOKEN_ID = AutoTokenizer.from_pretrained(TOKENIZER_NAME).eos_token_id
 FLUSH_EVERY     = 4_096      # write to disk after this many windows
 
 # ── chunker ──────────────────────────────────────────────────────────────────

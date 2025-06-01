@@ -54,35 +54,73 @@ def _flush(buf: List[List[int]], path: Path):
     np.save(path, np.asarray(buf, dtype=DTYPE))
     buf.clear()
 
+# ── streaming encoder that writes .npy shards ────────────────────────────────
 def _encode_stream(
     tokenizer,
     ctx: int,
     subset_pct: float,
     chunk_pct: float,
 ) -> Tuple[List[Path], List[Path]]:
-    ds     = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train",) # streaming=True)
+    """Tokenise the training split and save fixed-length windows to .npy shards.
+
+    The scratch work is done in .mmap files; when a shard is complete it is
+    trimmed to the actual number of rows and rewritten as train_tokens_###.npy /
+    val_tokens_###.npy.  Only those .npy files are returned and later consumed
+    by `_concat`.
+    """
+    # 1) dataset ----------------------------------------------------------------
+    ds = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train")     # ← no `streaming=`
     stride = max(1, int(ctx * STRIDE_FRAC))
 
-    # Compute quotas
-    # total_examples  = ds.info.dataset_size  # works in streaming mode
-    total_examples  = len(ds)  
+    total_examples  = len(ds)                                          # real doc count
     limit_examples  = math.ceil(total_examples * subset_pct / 100)
     per_shard_input = max(1, math.floor(limit_examples * chunk_pct / 100))
+    mem_capacity    = per_shard_input * 10                             # head-room
 
-    # Shard bookkeeping
-    shard, win_cnt = 0, 0
+    # 2) helpers ---------------------------------------------------------------
+    def _new_memmap(prefix: str, shard_idx: int):
+        """Open a scratch memmap large enough for the next shard."""
+        scratch_path = CACHE_DIR / f"{prefix}_{shard_idx:03d}.mmap"
+        mm = np.memmap(
+            scratch_path, dtype=DTYPE, mode="w+",
+            shape=(mem_capacity, ctx)
+        )
+        return scratch_path, mm
+
+    def _finalise_shard(
+        scratch_path: Path,
+        mm: np.memmap,
+        rows: int,
+        out_paths: List[Path],
+    ):
+        """Trim memmap → .npy, close & delete scratch file, append final path."""
+        if rows == 0:
+            mm._mmap.close()
+            scratch_path.unlink(missing_ok=True)
+            return
+
+        mm.flush()
+        trimmed = np.asarray(mm[:rows])        # copy rows into RAM (≤ a few MB)
+        mm._mmap.close()
+        scratch_path.unlink()                  # remove the oversize scratch file
+
+        out_path = scratch_path.with_suffix(".npy").with_name(
+            scratch_path.stem.replace(".mmap", "") + ".npy"
+        )
+        np.save(out_path, trimmed)
+        out_paths.append(out_path)
+
+    # 3) book-keeping -----------------------------------------------------------
+    shard = 0
     train_files, val_files = [], []
 
-    # Open two memmaps for the first shard
-    def _new_memmap(prefix: str):
-        path = CACHE_DIR / f"{prefix}_{shard:03d}.npy"
-        mm   = np.memmap(path, dtype=DTYPE, mode="w+", shape=(per_shard_input * 10, ctx))
-        return path, mm
+    train_path, train_mm = _new_memmap("train_tokens", shard)
+    val_path,   val_mm   = _new_memmap("val_tokens",   shard)
+    train_pos   = 0
+    val_pos     = 0
+    win_cnt     = 0
 
-    train_path, train_mm = _new_memmap("train_tokens")
-    val_path,   val_mm   = _new_memmap("val_tokens")
-    train_pos, val_pos   = 0, 0
-
+    # 4) main loop --------------------------------------------------------------
     pbar = tqdm(total=limit_examples, desc="tokenising", unit="doc")
     for i, rec in enumerate(ds):
         if i >= limit_examples:
@@ -95,49 +133,121 @@ def _encode_stream(
         )
 
         for w in windows:
-            target_mm, target_pos = (val_mm, val_pos) if (win_cnt % VAL_EVERY_N_WIN == 0) else (train_mm, train_pos)
-            target_mm[target_pos] = w
-            if target_mm is train_mm:
-                train_pos += 1
-            else:
+            # deterministic train/val split
+            if win_cnt % VAL_EVERY_N_WIN == 0:
+                val_mm[val_pos] = w
                 val_pos += 1
+            else:
+                train_mm[train_pos] = w
+                train_pos += 1
             win_cnt += 1
 
-            # Flush memmap if necessary
+            # flush occasionally so the scratch files are actually written
             if win_cnt % FLUSH_EVERY == 0:
-                train_mm.flush(); val_mm.flush()
+                train_mm.flush();  val_mm.flush()
 
-            # Rotate shard when we reach the quota
-            if (train_pos >= per_shard_input) or (val_pos >= per_shard_input):
-                train_mm.flush(); val_mm.flush()
-                # Trim unused rows and compress
-                for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
-                    if rows:
-                        tmp = np.memmap(path, dtype=DTYPE, mode="r", shape=(per_shard_input * 10, ctx))[:rows]
-                        np.savez_compressed(path.with_suffix(".npz"), tmp)
-                        os.remove(path)  # remove the raw memmap
-                train_files.append(train_path.with_suffix(".npz"))
-                val_files.append(val_path.with_suffix(".npz"))
+            # rotate shard if either bucket hit its quota
+            if train_pos >= per_shard_input or val_pos >= per_shard_input:
+                _finalise_shard(train_path, train_mm, train_pos, train_files)
+                _finalise_shard(val_path,   val_mm,   val_pos,   val_files)
 
-                # Start new shard
                 shard += 1
-                train_path, train_mm = _new_memmap("train_tokens")
-                val_path,   val_mm   = _new_memmap("val_tokens")
-                train_pos, val_pos   = 0, 0
+                train_path, train_mm = _new_memmap("train_tokens", shard)
+                val_path,   val_mm   = _new_memmap("val_tokens",   shard)
+                train_pos = val_pos = 0
 
-    # Final shard cleanup (same logic as above)
-    train_mm.flush(); val_mm.flush()
-    for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
-        if rows:
-            tmp = np.memmap(path, dtype=DTYPE, mode="r", shape=(per_shard_input * 10, ctx))[:rows]
-            np.savez_compressed(path.with_suffix(".npz"), tmp)
-            os.remove(path)
-    if train_pos:
-        train_files.append(train_path.with_suffix(".npz"))
-    if val_pos:
-        val_files.append(val_path.with_suffix(".npz"))
+    # 5) final shard cleanup ----------------------------------------------------
+    _finalise_shard(train_path, train_mm, train_pos, train_files)
+    _finalise_shard(val_path,   val_mm,   val_pos,   val_files)
     pbar.close()
+
     return train_files, val_files
+
+
+# def _encode_stream(
+#     tokenizer,
+#     ctx: int,
+#     subset_pct: float,
+#     chunk_pct: float,
+# ) -> Tuple[List[Path], List[Path]]:
+#     ds     = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train",) # streaming=True)
+#     stride = max(1, int(ctx * STRIDE_FRAC))
+#
+#     # Compute quotas
+#     # total_examples  = ds.info.dataset_size  # works in streaming mode
+#     total_examples  = len(ds)  
+#     limit_examples  = math.ceil(total_examples * subset_pct / 100)
+#     per_shard_input = max(1, math.floor(limit_examples * chunk_pct / 100))
+#
+#     # Shard bookkeeping
+#     shard, win_cnt = 0, 0
+#     train_files, val_files = [], []
+#
+#     # Open two memmaps for the first shard
+#     def _new_memmap(prefix: str):
+#         path = CACHE_DIR / f"{prefix}_{shard:03d}.npy"
+#         mm   = np.memmap(path, dtype=DTYPE, mode="w+", shape=(per_shard_input * 10, ctx))
+#         return path, mm
+#
+#     train_path, train_mm = _new_memmap("train_tokens")
+#     val_path,   val_mm   = _new_memmap("val_tokens")
+#     train_pos, val_pos   = 0, 0
+#
+#     pbar = tqdm(total=limit_examples, desc="tokenising", unit="doc")
+#     for i, rec in enumerate(ds):
+#         if i >= limit_examples:
+#             break
+#         pbar.update()
+#
+#         windows = _chunk(
+#             tokenizer.encode(rec["text"], add_special_tokens=False),
+#             ctx, stride,
+#         )
+#
+#         for w in windows:
+#             target_mm, target_pos = (val_mm, val_pos) if (win_cnt % VAL_EVERY_N_WIN == 0) else (train_mm, train_pos)
+#             target_mm[target_pos] = w
+#             if target_mm is train_mm:
+#                 train_pos += 1
+#             else:
+#                 val_pos += 1
+#             win_cnt += 1
+#
+#             # Flush memmap if necessary
+#             if win_cnt % FLUSH_EVERY == 0:
+#                 train_mm.flush(); val_mm.flush()
+#
+#             # Rotate shard when we reach the quota
+#             if (train_pos >= per_shard_input) or (val_pos >= per_shard_input):
+#                 train_mm.flush(); val_mm.flush()
+#                 # Trim unused rows and compress
+#                 for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
+#                     if rows:
+#                         tmp = np.memmap(path, dtype=DTYPE, mode="r", shape=(per_shard_input * 10, ctx))[:rows]
+#                         np.savez_compressed(path.with_suffix(".npz"), tmp)
+#                         os.remove(path)  # remove the raw memmap
+#                 train_files.append(train_path.with_suffix(".npz"))
+#                 val_files.append(val_path.with_suffix(".npz"))
+#
+#                 # Start new shard
+#                 shard += 1
+#                 train_path, train_mm = _new_memmap("train_tokens")
+#                 val_path,   val_mm   = _new_memmap("val_tokens")
+#                 train_pos, val_pos   = 0, 0
+#
+#     # Final shard cleanup (same logic as above)
+#     train_mm.flush(); val_mm.flush()
+#     for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
+#         if rows:
+#             tmp = np.memmap(path, dtype=DTYPE, mode="r", shape=(per_shard_input * 10, ctx))[:rows]
+#             np.savez_compressed(path.with_suffix(".npz"), tmp)
+#             os.remove(path)
+#     if train_pos:
+#         train_files.append(train_path.with_suffix(".npz"))
+#     if val_pos:
+#         val_files.append(val_path.with_suffix(".npz"))
+#     pbar.close()
+#     return train_files, val_files
 
 
 # def _encode_stream(tokenizer, ctx: int,

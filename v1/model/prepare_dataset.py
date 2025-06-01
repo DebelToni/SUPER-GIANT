@@ -8,8 +8,10 @@ from transformers import AutoTokenizer
 from tqdm.auto import tqdm
 
 # ── tweakables ────────────────────────────────────────────────────────────────
-# DATASET_NAME   = "roneneldan/TinyStories"
+# DATASET_NAME   = "TinyStories"
+# DATASET_VENDOR = "roneneldan"
 DATASET_NAME = "wikitext-103-v1"
+DATASET_VENDOR = "wikitext"  
 # DATASET_NAME = "OpenWebText"
 TOKENIZER_NAME = "EleutherAI/gpt-neo-125M"
 CACHE_DIR      = Path("tiny_cached")          # kept on the Colab VM disk
@@ -58,11 +60,12 @@ def _encode_stream(
     subset_pct: float,
     chunk_pct: float,
 ) -> Tuple[List[Path], List[Path]]:
-    ds     = load_dataset(DATASET_NAME, split="train", streaming=True)
+    ds     = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train",) # streaming=True)
     stride = max(1, int(ctx * STRIDE_FRAC))
 
     # Compute quotas
-    total_examples  = ds.info.dataset_size  # works in streaming mode
+    # total_examples  = ds.info.dataset_size  # works in streaming mode
+    total_examples  = len(ds)  
     limit_examples  = math.ceil(total_examples * subset_pct / 100)
     per_shard_input = max(1, math.floor(limit_examples * chunk_pct / 100))
 

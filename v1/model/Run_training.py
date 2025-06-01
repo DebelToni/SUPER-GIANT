@@ -34,7 +34,7 @@ def main():
     print("Setting up JAX...")
     train_tokens, val_tokens, tokenizer = get_data(
         subset_pct = Config.dataset_percent,
-        chunk_pct  = Config.chunk_percent,
+        # chunk_pct  = Config.chunk_percent,
         context_length = Config.context_length)
 
     Config.vocab_size = len(tokenizer)

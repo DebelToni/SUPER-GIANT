@@ -111,11 +111,22 @@ def _encode_stream(
             if (train_pos >= per_shard_input) or (val_pos >= per_shard_input):
                 train_mm.flush(); val_mm.flush()
                 # Trim unused rows and compress
+                # for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
+                #     if rows:
+                #         tmp = np.memmap(path, dtype=DTYPE, mode="r", shape=(per_shard_input * 10, ctx))[:rows]
+                #         # np.savez_compressed(path.with_suffix(".npz"), tmp)
+                #         np.savez_compressed(path.with_suffix(".npz"), data=tmp)
+                #         os.remove(path)  # remove the raw memmap
+                # # train_files.append(train_path.with_suffix(".npz"))
+                # train_files.append(path.with_suffix(".npz"))
+                # val_files.append(val_path.with_suffix(".npz"))
                 for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
                     if rows:
                         tmp = np.memmap(path, dtype=DTYPE, mode="r", shape=(per_shard_input * 10, ctx))[:rows]
-                        np.savez_compressed(path.with_suffix(".npz"), tmp)
-                        os.remove(path)  # remove the raw memmap
+                        np.savez_compressed(path.with_suffix(".npz"), data=tmp)
+                        os.remove(path)
+
+                # Append each shard explicitly (do not reuse the loop variable `path`)
                 train_files.append(train_path.with_suffix(".npz"))
                 val_files.append(val_path.with_suffix(".npz"))
 
@@ -130,9 +141,11 @@ def _encode_stream(
     for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
         if rows:
             tmp = np.memmap(path, dtype=DTYPE, mode="r", shape=(per_shard_input * 10, ctx))[:rows]
-            np.savez_compressed(path.with_suffix(".npz"), tmp)
+            # np.savez_compressed(path.with_suffix(".npz"), tmp)
+            np.savez_compressed(path.with_suffix(".npz"), data=tmp)
             os.remove(path)
     if train_pos:
+        # train_files.append(train_path.with_suffix(".npz"))
         train_files.append(train_path.with_suffix(".npz"))
     if val_pos:
         val_files.append(val_path.with_suffix(".npz"))
@@ -233,8 +246,20 @@ def _encode_stream(
 #     return train_files, val_files
 
 
+# def _concat(shards):
+#     return np.concatenate([np.load(p, mmap_mode="r") for p in shards], axis=0)
 def _concat(shards):
-    return np.concatenate([np.load(p, mmap_mode="r") for p in shards], axis=0)
+    """Load a list of .npy / .npz shards and return one big (N, ctx) array."""
+    arrays = []
+    for p in shards:
+        if p.suffix == ".npz":
+            with np.load(p, mmap_mode="r") as z:
+                # by construction each shard contains one array named "data"
+                arrays.append(z["data"])
+        else:  # .npy – the legacy uncompressed format
+            arrays.append(np.load(p, mmap_mode="r"))
+    return np.concatenate(arrays, axis=0)
+
 
 
 def get_data(*, subset_pct: float = 100.0, chunk_pct: float = 10.0,
@@ -243,8 +268,10 @@ def get_data(*, subset_pct: float = 100.0, chunk_pct: float = 10.0,
     CACHE_DIR.mkdir(exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
-    train_shards = sorted(CACHE_DIR.glob("train_tokens_*.npy"))
-    val_shards   = sorted(CACHE_DIR.glob("val_tokens_*.npy"))
+    # train_shards = sorted(CACHE_DIR.glob("train_tokens_*.npy"))
+    # val_shards   = sorted(CACHE_DIR.glob("val_tokens_*.npy"))
+    train_shards = sorted(CACHE_DIR.glob("train_tokens_*.npz"))
+    val_shards   = sorted(CACHE_DIR.glob("val_tokens_*.npz"))
     if train_shards:
         print("▶ Using cached shards found in", CACHE_DIR)
         return _concat(train_shards), _concat(val_shards), tokenizer

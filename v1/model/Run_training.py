@@ -22,7 +22,8 @@ from Evaluate         import evaluate
 from Data_loader      import data_loader
 from Save_params      import save_params
 from prepare_dataset  import get_data
-import numpy as np, time, pathlib, pickle, functools
+import numpy as np, time, pathlib, pickle, functools, math
+
 
 def main():
     for k, v in Config.__dict__.items():
@@ -59,19 +60,42 @@ def main():
     params = model.init(rng, dummy)["params"]
     save_params(params, "initial_params.pkl")
 
-    # optimizer = optax.adamw(Config.learning_rate, weight_decay=Config.weight_decay)
-    tokens_per_epoch = train_tokens.shape[0] // Config.batch_size
-    total_steps      = Config.num_epochs * tokens_per_epoch
+    ### optimizer = optax.adamw(Config.learning_rate, weight_decay=Config.weight_decay)
 
+    # tokens_per_epoch = train_tokens.shape[0] // Config.batch_size
+    # total_steps      = Config.num_epochs * tokens_per_epoch
+
+    # schedule = optax.warmup_cosine_decay_schedule(
+    #     init_value=0.0,          
+    #     peak_value=Config.learning_rate,
+    #     warmup_steps=500,
+    #     decay_steps=total_steps - 500,
+    # )
+
+    # examples_per_epoch   = Config.train_tokens // Config.seq_len
+    examples_per_epoch   = train_tokens.size // Config.batch_size
+    steps_per_epoch      = math.ceil(examples_per_epoch / Config.batch_size)
+    total_steps          = steps_per_epoch * Config.num_epochs
+
+    assert total_steps > 0, "total_steps must be positive"
+    assert total_steps > 500, (
+        f"warmup ({500}) >= total_steps ({total_steps}); "
+        "shorten warmup_steps or train longer."
+    )
+
+    # ----------------------------------------------------------
+    # 2. Build the schedule
+    # ----------------------------------------------------------
     schedule = optax.warmup_cosine_decay_schedule(
-        init_value=0.0,          # start at 0
+        init_value=0.0,
         peak_value=Config.learning_rate,
         warmup_steps=500,
         decay_steps=total_steps - 500,
+        end_value=Config.learning_rate * 0.1,   # optional but recommended
     )
 
     optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),        # ≤ 1.0 prevents fp16 blow-ups
+        optax.clip_by_global_norm(1.0),        
         optax.adamw(
             learning_rate=schedule,
             b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1,

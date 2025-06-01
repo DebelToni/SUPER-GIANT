@@ -204,8 +204,21 @@ class TinyTransformerBlock(nn.Module):
             h_norm = RMSNorm(name="rms2", dtype=self.dtype)(h)
             # h_ffn = nn.Dense(module.d_ff, name="fc1", dtype=module.dtype, param_dtype=Config.param_dtype)(h_norm)
             # h_ffn = nn.gelu(h_ffn, approximate=False)
-            h_ffn = nn.Dense( module.d_ff * 2 // 3, name="fc1", dtype=module.dtype, param_dtype=Config.param_dtype)(h_norm)
-            h_ffn = nn.silu(h_ffn[:, :, :-module.d_ff//3]) * h_ffn[:, :, -module.d_ff//3:]
+            # h_ffn = nn.Dense( module.d_ff * 2 // 3, name="fc1", dtype=module.dtype, param_dtype=Config.param_dtype)(h_norm)
+            # h_ffn = nn.silu(h_ffn[:, :, :-module.d_ff//3]) * h_ffn[:, :, -module.d_ff//3:]
+
+            gate_dim = module.d_ff // 3          # «⅓·d_ff» (rounded down)
+            proj_dim = gate_dim * 2              # Always even ⇒ easier split
+
+            h_proj = nn.Dense(
+                proj_dim,
+                name="fc1",
+                dtype=module.dtype,
+                param_dtype=Config.param_dtype,
+            )(h_norm)                            # shape: (..., 2·gate_dim)
+
+            u, v = jnp.split(h_proj, 2, axis=-1) # each (..., gate_dim)
+            h_ffn = nn.silu(u) * v               # shapes now match
 
             h_ffn = nn.Dense(module.d_model, name="fc2", dtype=module.dtype, param_dtype=Config.param_dtype)(h_ffn)
             h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)

@@ -96,7 +96,7 @@ def make_step_fn(model: GiantGPT, temperature: float, top_k: Optional[int]):
             # if top_k is not None and top_k > 0:
             #     kth = jnp.sort(logits, axis=-1)[:, -top_k][:, None]
             #     logits = jnp.where(logits < kth, -jnp.inf, logits)
-            if top_k and top_k > 0::
+            if top_k and top_k > 0:
                 values, _ = jax.lax.top_k(logits, top_k)
                 kth = values[:, -1][:, None]
                 logits = jnp.where(logits < kth, -jnp.inf, logits)

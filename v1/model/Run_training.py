@@ -36,6 +36,9 @@ def main():
         subset_pct = Config.dataset_percent,
         chunk_pct  = Config.chunk_percent,
         context_length = Config.context_length)
+
+    Config.vocab_size = len(tokenizer)
+
     print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
     print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")
     print(Config.num_epochs * len(train_tokens) // Config.batch_size, "total steps")

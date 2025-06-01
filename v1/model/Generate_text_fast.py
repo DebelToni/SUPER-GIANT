@@ -188,6 +188,8 @@ def main():
     params_cpu = load_checkpoint(args.checkpoint)
 
     print("Building model…")
+    Config.vocab_size = params_cpu["token_embedding"]["embedding"].shape[0]
+    print("Vocab size:", Config.vocab_size)
     model = build_model()
     tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 

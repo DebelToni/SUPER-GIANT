@@ -77,14 +77,11 @@ class NativeJaxSelfAttention(nn.Module):
 
         if decode:
             assert cur_index is not None, "Need cur_index when decode=True"
-            cached_k = self.variable(
-                "cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype
-            )
-            cached_v = self.variable(
-                "cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype
-            )
-            # cached_k = self.variables["cache"]["k"]
-            # cached_v = self.variables["cache"]["v"]
+            cached_k = self.variable( "cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
+            cached_v = self.variable( "cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
+
+                # cached_k = self.variables["cache"]["k"]
+                # cached_v = self.variables["cache"]["v"]
 
             cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k.squeeze(1))
             cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v.squeeze(1))
@@ -94,7 +91,8 @@ class NativeJaxSelfAttention(nn.Module):
             k = jnp.swapaxes(cached_k.value, 1, 2)  # (B, T, H, D)
             v = jnp.swapaxes(cached_v.value, 1, 2)  # (B, T, H, D)
 
-            q = q / jnp.sqrt(head_dim)
+            if False:
+                q = q / jnp.sqrt(head_dim)
             # q = q.transpose(0, 2, 1, 3)             # (B, H, 1, D)
 
             # Build an additive bias: 0 for valid keys, –1e10 for padding keys
@@ -109,8 +107,8 @@ class NativeJaxSelfAttention(nn.Module):
                 y = jax.nn.dot_product_attention(
                         q, k, v,
                         bias=attn_bias,         
-                        # is_causal=False,
-                        is_causal = not decode,  
+                        is_causal=True,
+                        # is_causal = not decode,  
                         # implementation="cudnn",
                         implementation="flash",  # may not work
                 )
@@ -134,7 +132,9 @@ class NativeJaxSelfAttention(nn.Module):
             # y = y.transpose(0, 2, 1, 3).reshape(b, 1, self.qkv_features)
         else:
             # Training path (unchanged)
-            q = q / jnp.sqrt(head_dim)
+            if False:
+                q = q / jnp.sqrt(head_dim)
+
             y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
             y = y.reshape(b, l, self.qkv_features)
 

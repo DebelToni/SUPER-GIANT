@@ -5,12 +5,9 @@ import jax.numpy as jnp
 from transformers import AutoTokenizer
 
 # -----------------------------
-# dtype = jnp.bfloat16
-# compute_dtype = jnp.bfloat16
-# param_dtype = jnp.float32
-dtype = jnp.int8
-compute_dtype = jnp.int8
-param_dtype = jnp.int8
+dtype = jnp.bfloat16
+compute_dtype = jnp.bfloat16
+param_dtype = jnp.float32
 # -----------------------------
 
 # Model Hyperparameters
@@ -34,7 +31,7 @@ acc_steps = 2 # 4
 
 # Other Settings
 use_remat = True
-dataset_percent = 1
+dataset_percent = 10
 chunk_percent = 10
 
 deafult_device = "cuda"

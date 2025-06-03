@@ -33,8 +33,8 @@ from tqdm.auto import tqdm
 # ────────────────────────────────
 # Configuration
 # ────────────────────────────────
-DATASET_NAME   = "wikitext-103-v1"
-DATASET_VENDOR = "wikitext"
+DATASET_VENDOR = "Salesforce/wikitext"
+DATASET_NAME   = "wikitext-2-raw-v1"
 
 TOKENIZER_NAME = "EleutherAI/gpt-neo-125M"
 CACHE_DIR      = Path("tiny_cached")

@@ -22,7 +22,9 @@ Level of V0 intelligence 0.1%:
 Original prompt: One sunny day,
 
 ==================== RESULT ====================
-One sunny day, Lily went to the park with her mom. She saw a big hill and wanted to see what was inside. She ran to the hill and went up around the hill with her hands. She saw a big hole. She was scared, but she was too high. She saw many flowers on the ground<EOF>
+One sunny day, Lily went to the park with her mom. She saw a big hill and wanted to see
+ what was inside. She ran to the hill and went up around the hill with her hands. She saw a
+big hole. She was scared, but she was too high. She saw many flowers on the ground<EOF>
 ```
 V0 was trained on 10% of the TinyStories dataset for 10 minutes and alwready could form semi-coherent simple sentances.
 

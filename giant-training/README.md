@@ -14,4 +14,5 @@ Pip packages:
 - flax
 - transfromers
 - datasets
+
 (venv always activated)

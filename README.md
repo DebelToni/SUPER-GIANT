@@ -38,3 +38,6 @@ V1 features:
 
 V2 goals:
 - ChatBOT training data and knowledge base
+
+
+> Weights for more capable future models will be available on huggingface

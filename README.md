@@ -28,3 +28,13 @@ big hole. She was scared, but she was too high. She saw many flowers on the grou
 ```
 V0 was trained on 10% of the TinyStories dataset for 10 minutes and alwready could form semi-coherent simple sentances.
 
+
+V1 features:
+- Full-dimensional Key-Value cache for faster inference
+- JAX-based Flash attention for overall performance
+- Dynamic allocation and parsing of the database 
+- Overall performance and architecture improvements
+(still in development - features are implemented but more training tests are needed)
+
+V2 goals:
+- ChatBOT training data and knowledge base

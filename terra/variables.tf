@@ -1,41 +1,35 @@
-/**
- * variables.tf – tweak these and `terraform apply` again
- */
-
 variable "pod_name" {
-  description = "Human-readable RunPod Pod name"
+  description = "Human-friendly name for the RunPod GPU instance"
   type        = string
-  default     = "tf-demo-ada"
+  default     = "GIANT-training"
 }
 
 variable "gpu_type" {
-  description = <<-EOT
-    Exact GPU string as listed in docs.runpod.io → GPU types.
-    Must match the --gpuType flag for runpodctl.
-  EOT
-  type    = string
-  default = "NVIDIA RTX 2000 Ada Generation" # 16 GB VRAM
+  description = "RunPod gpuType string (see docs.runpod.io)"
+  type        = string
+  # default     = "NVIDIA RTX 3090" 
+  # default     = "NVIDIA RTX 2000 Ada" 
+  default     = "NVIDIA GeForce RTX 4090" 
 }
 
 variable "image_name" {
-  description = "Container image that the pod will boot"
+  description = "Container image to boot"
   type        = string
-  default     = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-ubuntu22.04"
+  default     = "docker.io/bananc/giant-training:latest"
 }
 
 variable "container_disk_gb" {
-  type        = number
-  default     = 10
+  type    = number
+  default = 10
 }
-
 variable "volume_gb" {
-  type        = number
-  default     = 20
+  type    = number
+  default = 20
 }
 
-variable "price_ceiling" {
-  description = "Optional $/hr ceiling. Leave null for 'cheapest available'."
+variable "max_cost_usd_per_hour" {
+  description = "Optional price ceiling for on-demand pods"
   type        = number
-  default     = null
+  default     = 0.5
 }
 

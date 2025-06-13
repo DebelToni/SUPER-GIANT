@@ -137,8 +137,7 @@ def _encode_stream(ctx: int, subset_pct: float) -> Tuple[List[Path], List[Path]]
             train_path, train_mm = _new_memmap("train_tokens", shard)
             val_path,   val_mm   = _new_memmap("val_tokens",   shard)
             train_pos = val_pos = 0
-        pbar.update(0)  # keep tqdm alive (we’re iterating our own gen)
-
+        pbar.update(stride)  # update tqdm by the number of tokens processed
     # final flush
     train_mm.flush(); val_mm.flush()
     for path, rows in [(train_path, train_pos), (val_path, val_pos)]:

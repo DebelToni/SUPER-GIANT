@@ -8,3 +8,4 @@ prompts/
 __pycache__
 testing/
 logs/
+*.pub

@@ -1,7 +1,7 @@
 import os
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"   
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"  
-os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+# os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
 # os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   
 
@@ -34,7 +34,7 @@ def main():
     print("Setting up JAX...")
     train_tokens, val_tokens, tokenizer = get_data(
         subset_pct = Config.dataset_percent,
-        chunk_pct  = Config.chunk_percent,
+        # chunk_pct  = Config.chunk_percent,
         context_length = Config.context_length)
 
     Config.vocab_size = len(tokenizer)

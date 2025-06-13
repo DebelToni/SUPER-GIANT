@@ -40,8 +40,8 @@ from tqdm.auto import tqdm
 # ────────────────────────────────
 # Configuration constants
 # ────────────────────────────────
-DATASET_NAME   = "wikitext-103-v1"
-DATASET_VENDOR = "wikitext"
+DATASET_VENDOR = "Salesforce/wikitext"
+DATASET_NAME   = "wikitext-2-raw-v1"
 
 TOKENIZER_NAME = "EleutherAI/gpt-neo-125M"
 CACHE_DIR      = Path("tiny_cached")
@@ -134,9 +134,8 @@ def _encode_stream(ctx: int, subset_pct: float) -> Tuple[List[Path], List[Path]]
             train_path, train_mm = _new_mm("train_tokens", shard)
             val_path,   val_mm   = _new_mm("val_tokens",   shard)
             train_pos = val_pos = 0
-        pbar.update(0)
-
-    # flush last shard
+        pbar.update(stride)  # update tqdm by the number of tokens processed
+    # final flush
     train_mm.flush(); val_mm.flush()
     for path, rows in [(train_path, train_pos), (val_path, val_pos)]:
         if rows:

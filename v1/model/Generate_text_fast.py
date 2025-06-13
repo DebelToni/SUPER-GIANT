@@ -1,3 +1,4 @@
+# generate_text_fast.py
 from __future__ import annotations
 
 import argparse
@@ -19,7 +20,7 @@ from GiantGPT import GiantGPT
 
 def build_model() -> GiantGPT:
     return GiantGPT(
-        vocab_size=Config.vocab_size,
+        vocab_size=Config.vocab_size+1,
         context_length=Config.context_length,
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
@@ -159,7 +160,7 @@ def generate(
 
         return (tokens_buf, cache, rng, idx + 1), None
 
-    start_idx = jnp.array(tokens.shape[1] - pad_len + 1, dtype=jnp.int32)
+    start_idx = jnp.array(tokens.shape[1] - pad_len, dtype=jnp.int32)
 
     # init_state = (tokens, cache, rng, tokens.shape[1] - pad_len + 1)
     init_state = (tokens, cache, rng, start_idx)

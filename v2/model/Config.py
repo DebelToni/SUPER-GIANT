@@ -4,15 +4,18 @@ import jax.numpy as jnp
 from transformers import AutoTokenizer
 
 # -----------------------------
-dtype = jnp.bfloat16
-compute_dtype = jnp.bfloat16
-param_dtype = jnp.float32
+# dtype = jnp.bfloat16
+# compute_dtype = jnp.bfloat16
+# param_dtype = jnp.float32
+dtype = jnp.int8
+compute_dtype = jnp.int8
+param_dtype = jnp.int8
 # -----------------------------
 
 # Model Hyperparameters
 embedding_size = 256 # 768
 context_length = 257 # 1024
-num_heads = 2 # 12
+num_heads =  2 # 12
 num_layers = 2 # 12
 feed_forward_size = 4 * embedding_size # 4 is standard in transformer models
 tokenizer_name = "EleutherAI/gpt-neo-125M"

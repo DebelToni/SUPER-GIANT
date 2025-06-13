@@ -30,7 +30,7 @@ def build_model():
     We set dropout_rate to 0.0 as it's not needed during inference.
     """
     return GiantGPT(
-        vocab_size=Config.vocab_size,
+        vocab_size=Config.vocab_size+1,
         context_length=Config.context_length, 
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,

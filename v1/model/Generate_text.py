@@ -10,7 +10,10 @@ import jax
 import jax.numpy as jnp
 from transformers import AutoTokenizer
 
-import Config  
+# import Config  
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
 from GiantGPT import GiantGPT  
 
 def load_params(path: Path):
@@ -30,7 +33,8 @@ def build_model():
     We set dropout_rate to 0.0 as it's not needed during inference.
     """
     return GiantGPT(
-        vocab_size=Config.vocab_size+1,
+        # vocab_size=Config.vocab_size+1,
+        vocab_size = AutoTokenizer.from_pretrained(Config.tokenizer_name).vocab_size,
         context_length=Config.context_length, 
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,

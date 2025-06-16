@@ -14,11 +14,20 @@ def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)
     return jnp.concatenate((-x2, x1), axis=-1)
 
-def apply_rope(q_or_k, sin, cos):
-    # q_or_k:  (b, heads, L, d)
-    # sin/cos: (L, d)
-    #  broadcast sin/cos to batch & heads, apply rotation on last dim
-    return (q_or_k * cos) + (_rotate_every_two(q_or_k) * sin)
+# def apply_rope(q_or_k, sin, cos):
+#     # q_or_k:  (b, heads, L, d)
+#     # sin/cos: (L, d)
+#     #  broadcast sin/cos to batch & heads, apply rotation on last dim
+#     return (q_or_k * cos) + (_rotate_every_two(q_or_k) * sin)
+
+def apply_rope(x, cos, sin, rot_dim):
+    # x: [batch, seq_len, num_heads, head_dim]
+    x1 = x[..., :rot_dim]
+    x2 = x[..., rot_dim:]
+    x1_reshaped = x1.reshape(*x1.shape[:-1], -1, 2)
+    x1_rotated = (x1_reshaped * cos) + (_rotate_every_two(x1_reshaped) * sin)
+    x1_rotated = x1_rotated.reshape(*x1.shape)
+    return jnp.concatenate([x1_rotated, x2], axis=-1)
 
 class NativeJaxSelfAttention(nn.Module):
     """Multi‑head self‑attention using jax.nn.dot_product_attention (cuDNN)."""
@@ -28,6 +37,10 @@ class NativeJaxSelfAttention(nn.Module):
     dropout_rate: float = 0.0
     num_kv: int = 1
     dtype: jnp.dtype = Config.compute_dtype # Use compute_dtype
+    # rot_dim = self.head_dim
+    # inv_freq = 1.0 / (10000 ** (jnp.arange(0, rot_dim, 2) / rot_dim))
+    rot_dim: int = 64  # Default rotation dimension, can be adjusted
+    inv_freq:  float=  1.0 / (10000 ** (jnp.arange(0, rot_dim, 2) / rot_dim))
 
     def setup(self):
         assert (
@@ -53,22 +66,19 @@ class NativeJaxSelfAttention(nn.Module):
     @nn.compact
     def __call__(self, x, *, deterministic: bool, decode: bool = False, cur_index: Optional[int] = None):
         b, l, _ = x.shape
-        head_dim = self.qkv_features // self.num_heads
 
-        q = self.q_proj(x).reshape(b, l, self.num_heads, head_dim)
-        # k = self.k_proj(x).reshape(b, l, self.num_heads, head_dim)
-        # v = self.v_proj(x).reshape(b, l, self.num_heads, head_dim)
+        q = self.q_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+        # k = self.k_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+        # v = self.v_proj(x).reshape(b, l, self.num_heads, self.head_dim)
 
-        k = self.k_proj(x).reshape(b, l, self.num_kv, head_dim)
-        v = self.v_proj(x).reshape(b, l, self.num_kv, head_dim)
+        k = self.k_proj(x).reshape(b, l, self.num_kv, self.head_dim)
+        v = self.v_proj(x).reshape(b, l, self.num_kv, self.head_dim)
 
         k = jnp.repeat(k, self.num_heads // self.num_kv, axis=2)  # (B, L, H, D)
         v = jnp.repeat(v, self.num_heads // self.num_kv, axis=2)  # (B, L, H, D)
 
-        rot_dim = head_dim
-        inv_freq = 1.0 / (10000 ** (jnp.arange(0, rot_dim, 2) / rot_dim))
         seq      = jnp.array([cur_index]) if decode else jnp.arange(l)
-        angles   = jnp.einsum('i,j->ij', seq, inv_freq)           # (L, rot_dim/2)
+        angles   = jnp.einsum('i,j->ij', seq, self.inv_freq)           # (L, rot_dim/2)
         emb      = jnp.repeat(angles, 2, axis=-1)                 # (L, rot_dim)
         sin, cos = jnp.sin(emb).astype(self.dtype), jnp.cos(emb).astype(self.dtype)
         sin, cos = sin[None, :, None, :], cos[None, :, None, :]   # (1,L,1,D)
@@ -77,8 +87,8 @@ class NativeJaxSelfAttention(nn.Module):
 
         if decode:
             assert cur_index is not None, "Need cur_index when decode=True"
-            cached_k = self.variable( "cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
-            cached_v = self.variable( "cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
+            cached_k = self.variable( "cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, self.head_dim), self.dtype)
+            cached_v = self.variable( "cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, self.head_dim), self.dtype)
 
                 # cached_k = self.variables["cache"]["k"]
                 # cached_v = self.variables["cache"]["v"]
@@ -92,7 +102,7 @@ class NativeJaxSelfAttention(nn.Module):
             v = jnp.swapaxes(cached_v.value, 1, 2)  # (B, T, H, D)
 
             if False:
-                q = q / jnp.sqrt(head_dim)
+                q = q / jnp.sqrt(self.head_dim)
             # q = q.transpose(0, 2, 1, 3)             # (B, H, 1, D)
 
             # Build an additive bias: 0 for valid keys, –1e10 for padding keys
@@ -126,14 +136,14 @@ class NativeJaxSelfAttention(nn.Module):
 
             # k = cached_k.value[:, :, : cur_index + 1, :]
             # v = cached_v.value[:, :, : cur_index + 1, :]
-            # q = q / jnp.sqrt(head_dim)
+            # q = q / jnp.sqrt(self.head_dim)
             # q = q.transpose(0, 2, 1, 3)
             # y = jax.nn.dot_product_attention(q, k, v, is_causal=False, implementation="cudnn")
             # y = y.transpose(0, 2, 1, 3).reshape(b, 1, self.qkv_features)
         else:
             # Training path (unchanged)
             if False:
-                q = q / jnp.sqrt(head_dim)
+                q = q / jnp.sqrt(self.head_dim)
 
             y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
             y = y.reshape(b, l, self.qkv_features)

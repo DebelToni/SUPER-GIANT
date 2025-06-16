@@ -1,0 +1,7 @@
+{
+  "prompt": "Generate a short 100-word story wrapped in ```.",
+  "model": "llama3.2:1b",
+  "base_url": "http://localhost:11434/v1",
+  "num_samples": 100,
+  "created_utc": "2025-06-16T13:33:21.104307Z"
+}

@@ -1,0 +1,4 @@
+flask>=3.1
+flask-socketio>=5.3
+openai>=1.21      
+python-dotenv>=1.0

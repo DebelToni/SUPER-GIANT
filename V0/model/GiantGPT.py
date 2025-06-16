@@ -3,7 +3,9 @@
 import jax.numpy as jnp
 from flax import linen as nn
 from Transformer_block import TinyTransformerBlock
-import Config # Import Config to access dtypes
+# import Config # Import Config to access dtypes
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")  # Load the configuration from YAML
 
 class GiantGPT(nn.Module):
     vocab_size:     int

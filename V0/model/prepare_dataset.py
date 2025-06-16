@@ -7,12 +7,15 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 from tqdm.auto import tqdm
 
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")  # Load the configuration from YAML
+
 # ── tweakables ────────────────────────────────────────────────────────────────
-DATASET_NAME   = "roneneldan/TinyStories"
-TOKENIZER_NAME = "EleutherAI/gpt-neo-125M"
-CACHE_DIR      = Path("tiny_cached")          # kept on the Colab VM disk
+DATASET_NAME   = Config.dataset_name
+TOKENIZER_NAME = Config.tokenizer_name
+CACHE_DIR      = Path(Config.tokenizer_path)          # kept on the Colab VM disk
 VAL_SPLIT_PCT  = 3.0                          # 97 / 3 train-val split
-DTYPE          = np.uint16                    # 65 535 > 50 000-token vocab
+DTYPE          = Config.tokenizer_dtype
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

@@ -37,14 +37,21 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 from tqdm.auto import tqdm
 
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
 # ────────────────────────────────
 # Configuration constants
 # ────────────────────────────────
-DATASET_VENDOR = "Salesforce/wikitext"
-DATASET_NAME   = "wikitext-2-raw-v1"
+# DATASET_VENDOR = "Salesforce/wikitext"
+# DATASET_NAME   = "wikitext-2-raw-v1"
+DATASET_VENDOR = Config.dataset_vendor
+DATASET_NAME   = Config.dataset_name
 
-TOKENIZER_NAME = "EleutherAI/gpt-neo-125M"
-CACHE_DIR      = Path("tiny_cached")
+# TOKENIZER_NAME = "EleutherAI/gpt-neo-125M"
+TOKENIZER_NAME = Config.tokenizer_name
+# CACHE_DIR      = Path("tiny_cached")
+CACHE_DIR      = Path(Config.cache_dir)
 
 VAL_EVERY_N_WIN = 33          # deterministic interleaving train/val
 STRIDE_FRAC     = 0.5         # 50 % overlap between successive windows
@@ -86,7 +93,10 @@ def _iter_windows(ds, ctx: int, stride: int):
 # ────────────────────────────────
 
 def _encode_stream(ctx: int, subset_pct: float) -> Tuple[List[Path], List[Path]]:
-    ds = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train")
+    if Config.dataset_has_vendor:
+        ds = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train")
+    else:
+        ds = load_dataset(DATASET_NAME, split="train")
     stride = max(1, int(ctx * STRIDE_FRAC))
 
     # optional subset

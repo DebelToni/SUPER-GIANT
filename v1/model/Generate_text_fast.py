@@ -15,12 +15,16 @@ import jax.lax as lax
 
 from functools import partial
 
-import Config
+# import Config
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
 from GiantGPT import GiantGPT
 
 def build_model() -> GiantGPT:
     return GiantGPT(
-        vocab_size=Config.vocab_size+1,
+        # vocab_size=Config.vocab_size+1,
+        vocab_size = AutoTokenizer.from_pretrained(Config.tokenizer_name).vocab_size,
         context_length=Config.context_length,
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,

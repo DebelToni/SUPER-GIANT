@@ -13,8 +13,12 @@ except ImportError:
     import jax
 
 import optax
-import Config
+# import Config
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
 import jax.numpy as jnp
+from transformers import AutoTokenizer
 
 from GiantGPT import GiantGPT
 from Training_step    import train_step
@@ -37,14 +41,14 @@ def main():
         # chunk_pct  = Config.chunk_percent,
         context_length = Config.context_length)
 
-    Config.vocab_size = len(tokenizer)
 
     print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
     print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")
     print(Config.num_epochs * len(train_tokens) // Config.batch_size, "total steps")
 
     model = GiantGPT(
-        vocab_size = Config.vocab_size,
+        # vocab_size = Config.vocab_size,
+        vocab_size = AutoTokenizer.from_pretrained(Config.tokenizer_name).vocab_size,
         context_length    = Config.context_length,
         d_model    = Config.embedding_size,
         n_heads    = Config.num_heads,

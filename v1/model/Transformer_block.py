@@ -8,7 +8,10 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
-import Config # Import Config to access dtypes if needed, or pass explicitly
+# import Config # Import Config to access dtypes if needed, or pass explicitly
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
 
 def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)

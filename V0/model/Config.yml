@@ -1,0 +1,31 @@
+dtype: bfloat16
+compute_dtype: bfloat16
+param_dtype: float32
+
+tokenizer_name: EleutherAI/gpt-neo-125M
+tokenizer_path: tiny_cached
+tokenizer_dtype: uint16
+
+dataset_name: roneneldan/TinyStories
+
+# model:
+embedding_size: 256
+context_length: 257
+num_heads: 2
+num_layers: 2
+feed_forward_size: 512
+dropout_rate: 0.1
+
+# training:
+learning_rate: 2e-4
+weight_decay: 1e-2
+batch_size: 8
+num_epochs: 1
+acc_steps: 2
+
+# other:
+use_remat: true
+dataset_percent: 1
+chunk_percent: 10
+default_device: cuda
+

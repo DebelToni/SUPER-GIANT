@@ -6,7 +6,10 @@ os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 # os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"   
 
 
-import jax, jax.numpy as jnp, optax, Config
+import jax, jax.numpy as jnp, optax
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")  # Load the configuration from YAML
+from transformers import AutoTokenizer
 
 from GiantGPT import GiantGPT
 from Training_step    import train_step
@@ -32,7 +35,7 @@ def main():
     print(Config.num_epochs * len(train_tokens) // Config.batch_size, "total steps")
 
     model = GiantGPT(
-        vocab_size = Config.vocab_size,
+        vocab_size = AutoTokenizer.from_pretrained(Config.tokenizer_name).vocab_size,
         context_length    = Config.context_length,
         d_model    = Config.embedding_size,
         n_heads    = Config.num_heads,

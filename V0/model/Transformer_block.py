@@ -7,7 +7,9 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-import Config # Import Config to access dtypes if needed, or pass explicitly
+# import Config # Import Config to access dtypes if needed, or pass explicitly
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")  # Load the configuration from YAML
 
 class NativeJaxSelfAttention(nn.Module):
     """Multi‑head self‑attention using jax.nn.dot_product_attention (cuDNN)."""

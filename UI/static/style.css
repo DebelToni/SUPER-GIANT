@@ -1,9 +1,25 @@
-body {
-    font-family: sans-serif;
-    background-color: #f0f0f0;
-    padding: 2rem;
-}
-h1 {
-    color: #333;
-}
+/* Layout ----------------------------------------------------- */
+body.wrap           { display:flex; flex-direction:column; height:100vh;
+                      margin:0; font-family:monospace; background:#0d0d0d; }
+header              { text-align:center; padding:.8rem 0; font-size:1.4rem;
+                      background:#111; color:#7af; letter-spacing:.04em; }
+main#terminal       { flex:1; overflow-y:auto; padding:1rem; white-space:pre-wrap;
+                      background:#000; color:#ccc; }
+form#runForm        { display:flex; justify-content:center; gap:.6rem;
+                      padding:1rem; background:#111; }
+
+/* Inputs ----------------------------------------------------- */
+#cmdInput           { flex:1; max-width:50rem; padding:.55rem .7rem;
+                      border-radius:30px; border:none; font-size:1rem; }
+#cmdInput:focus     { outline:none; box-shadow:0 0 0 2px #7af; }
+
+button              { padding:.55rem 1.1rem; border:none;
+                      border-radius:25px; font-size:1rem;
+                      background:#222; color:#eee; cursor:pointer; }
+button:disabled     { opacity:.4; cursor:not-allowed; }
+
+/* Terminal colouring ----------------------------------------- */
+span.cmd            { color:#0f0; }
+span.out            { color:#ccc; }
+span.err            { color:#f66; }
 

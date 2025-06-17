@@ -1,7 +1,8 @@
 //---------------------------------------------------------------
 // Change this if your API host/port differs
 //---------------------------------------------------------------
-const apiBase = "http://localhost:8000";
+const apiBase = window.API_BASE || "http://localhost:8000";
+// const apiBase = "http://localhost:8000";
 
 const term   = document.querySelector("#terminal");
 const form   = document.querySelector("#runForm");

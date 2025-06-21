@@ -9,9 +9,14 @@ tokenizer_name: EleutherAI/gpt-neo-125M
 tokenizer_path: tiny_cached
 tokenizer_dtype: uint16
 
-dataset_name: roneneldan/TinyStories
-dataset_has_vendor: false
-dataset_vendor: roneneldan
+# DATASET_VENDOR = "Salesforce/wikitext"
+# DATASET_NAME   = "wikitext-2-raw-v1"
+dataset_name: wikitext-2-raw-v1
+dataset_has_vendor: true
+dataset_vendor: Salesforce
+# dataset_name: roneneldan/TinyStories
+# dataset_has_vendor: false
+# dataset_vendor: roneneldan
 
 # model:
 embedding_size: 256

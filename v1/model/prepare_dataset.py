@@ -117,7 +117,7 @@ def _encode_stream(ctx: int, subset_pct: float) -> Tuple[List[Path], List[Path]]
     train_pos = val_pos = 0
     win_cnt = 0
 
-    pbar = tqdm(total=len(ds), desc="packing", unit="line")
+    pbar = tqdm( desc="packing", unit="window")
     for window in _iter_windows(ds, ctx, stride):
         target_mm, target_pos = (
             (val_mm, val_pos) if (win_cnt % VAL_EVERY_N_WIN == 0)
@@ -144,7 +144,8 @@ def _encode_stream(ctx: int, subset_pct: float) -> Tuple[List[Path], List[Path]]
             train_path, train_mm = _new_mm("train_tokens", shard)
             val_path,   val_mm   = _new_mm("val_tokens",   shard)
             train_pos = val_pos = 0
-        pbar.update(stride)  # update tqdm by the number of tokens processed
+        # pbar.update(stride)  # update tqdm by the number of tokens processed
+        pbar.update(1)
     # final flush
     train_mm.flush(); val_mm.flush()
     for path, rows in [(train_path, train_pos), (val_path, val_pos)]:

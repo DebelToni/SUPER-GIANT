@@ -31,31 +31,63 @@ def _draw_numbers(op: str) -> Tuple[int, int]:
             if a * b <= 121:
                 return a, b
 
+# math_env.py  –  excerpt
+MAX_TERMS = 3          # ≤ Config.max_expression_terms
 
-def sample_problem() -> Tuple[str, int]:
-    """Return one valid expression and its ground-truth answer.
+def sample_problem(max_terms: int = MAX_TERMS) -> Tuple[str, int]:
+    """Random chain of 2…max_terms numbers and operators."""
+    n_terms = random.randint(2, max_terms)
 
-    Example:
-        "047 + 015 =" , 62
-    """
-    op = random.choice(_OPS)
-    a, b = _draw_numbers(op)
+    nums = [random.randint(0, 121) for _ in range(n_terms)]
+    ops  = [random.choice(_OPS)     for _ in range(n_terms - 1)]
 
-    if op == "+":
-        truth = a + b
-    elif op == "-":
-        truth = a - b
-    else:  # "*"
-        truth = a * b
+    # Evaluate left-to-right (like a hand calculator)
+    val = nums[0]
+    for op, b in zip(ops, nums[1:]):
+        if op == "+": val += b
+        elif op == "-": val -= b
+        else:          val *= b
 
-    expr = f"{a:03d} {op} {b:03d} ="
-    return expr, truth
+    # Reject results that fall outside the vocabulary; resample
+    if not (0 <= val <= 121):
+        return sample_problem(max_terms)
+
+    expr_parts = [f"{nums[0]:03d}"]
+    for op, num in zip(ops, nums[1:]):
+        expr_parts.append(op)
+        expr_parts.append(f"{num:03d}")
+    expr = " ".join(expr_parts) + " ="
+    return expr, val
 
 
-def sample_batch(batch_size: int) -> Tuple[List[str], List[int]]:
-    """Vectorised wrapper around *sample_problem()*."""
-    exprs, truths = zip(*(sample_problem() for _ in range(batch_size)))
+def sample_batch(batch_size: int, max_terms: int = MAX_TERMS):
+    exprs, truths = zip(*(sample_problem(max_terms) for _ in range(batch_size)))
     return list(exprs), list(truths)
+
+# def sample_problem() -> Tuple[str, int]:
+#     """Return one valid expression and its ground-truth answer.
+#
+#     Example:
+#         "047 + 015 =" , 62
+#     """
+#     op = random.choice(_OPS)
+#     a, b = _draw_numbers(op)
+#
+#     if op == "+":
+#         truth = a + b
+#     elif op == "-":
+#         truth = a - b
+#     else:  # "*"
+#         truth = a * b
+#
+#     expr = f"{a:03d} {op} {b:03d} ="
+#     return expr, truth
+#
+#
+# def sample_batch(batch_size: int) -> Tuple[List[str], List[int]]:
+#     """Vectorised wrapper around *sample_problem()*."""
+#     exprs, truths = zip(*(sample_problem() for _ in range(batch_size)))
+#     return list(exprs), list(truths)
 
 
 # ---------------------------------------------------------------------------

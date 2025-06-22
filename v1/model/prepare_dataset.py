@@ -34,7 +34,7 @@ from typing import List, Tuple
 
 import numpy as np
 from datasets import load_dataset
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from tqdm.auto import tqdm
 
 from omegaconf import OmegaConf
@@ -64,7 +64,12 @@ PAD_FRAC_LIMIT  = 0.05        # sanity‑check threshold
 # Tokeniser & pad‑token handling
 # ────────────────────────────────
 print("▶ Loading tokenizer …")
-_tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+if Config.use_custom_tokenizer:
+    _tokenizer = PreTrainedTokenizerFast.from_pretrained(
+        Config.custom_tokenizer_path
+    )
+else:
+    _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 if _tokenizer.pad_token is None:
     _tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
 PAD_TOKEN_ID = _tokenizer.pad_token_id

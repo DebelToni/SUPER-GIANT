@@ -34,7 +34,7 @@ from typing import List, Tuple
 
 import numpy as np
 from datasets import load_dataset
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from tqdm.auto import tqdm
 
 from omegaconf import OmegaConf
@@ -67,7 +67,12 @@ from datasets import load_from_disk
 DATA_PATH = Path(Config.dataset_path or "math_dataset_arrow")
 print(f"▶ Loading math dataset from {DATA_PATH} …")
 ds_main = load_from_disk(str(DATA_PATH))
-_tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+if Config.use_custom_tokenizer:
+    _tokenizer = PreTrainedTokenizerFast.from_pretrained(
+        Config.custom_tokenizer_path
+    )
+else:
+    _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 if _tokenizer.pad_token is None:
     _tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
 PAD_TOKEN_ID = _tokenizer.pad_token_id

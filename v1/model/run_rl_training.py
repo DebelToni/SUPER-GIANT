@@ -48,6 +48,13 @@ else:
     _tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 tokenizer = _tokenizer
 
+id2num = np.full(tokenizer.vocab_size, -1, dtype=np.int32)   # default “invalid”
+for tok, idx in tokenizer.get_vocab().items():
+    if len(tok) == 3 and tok.isdigit():          # "000" … "121"
+        id2num[idx] = int(tok)
+
+id2num = jnp.array(id2num)
+
 model = GiantGPT(
         vocab_size = tokenizer.vocab_size,
         context_length    = Config.context_length,
@@ -118,7 +125,8 @@ for step in range(1, NUM_UPDATES + 1):
     logits = get_next_token_logits(model.apply, state.params, prompt_tokens)
     action = jax.random.categorical(sub, logits)
 
-    action_int = np.vectorize(tokenizer.token_to_int.__getitem__)(action)
+    # action_int = np.vectorize(tokenizer.token_to_int.__getitem__)(action)
+    action_int = jnp.take(id2num, action)
     rewards = (action_int == np.array(truth_batch)).astype(np.float32)
     rewards = jnp.array(rewards)
 

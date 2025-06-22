@@ -68,7 +68,7 @@ BASE_MOMENT  = RL_Config.baseline_momentum
 CTX_LEN      = RL_Config.context_length
 SEED         = 42
 LOG_EVERY    = RL_Config.print_every
-CHECK_EVERY  = RL_Config.checkpoint_every
+CHECK_EVERY  = RL_Config.save_every
 SAVE_DIR     = Path("checkpoints_rl")
 SAVE_DIR.mkdir(exist_ok=True)
 

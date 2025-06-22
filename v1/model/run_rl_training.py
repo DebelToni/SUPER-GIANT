@@ -294,8 +294,9 @@ for step in range(1, NUM_UPDATES + 1):
 
     # --- 3. reward --------------------------------------------------------
     action_int = jnp.take(id2num, actions)                      # (B,)
-    rewards    = (action_int == jnp.array(truths)).astype(jnp.float32)
-
+    # rewards    = (action_int == jnp.array(truths)).astype(jnp.float32)
+    error     = jnp.abs(action_int - jnp.array(truths))
+    rewards   = 1.0 - (error / 121.0)
     baseline   = BASE_MOMENT * baseline + (1 - BASE_MOMENT) * rewards.mean()
     advantages = rewards - baseline
 

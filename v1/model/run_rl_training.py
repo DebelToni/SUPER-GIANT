@@ -92,18 +92,9 @@ def get_next_token_logits(apply_fn,
                       deterministic=True)
     return logits[:, -1, :]
 
-ENTROPY_COEF = 0.01  # <-- put near other constants
-# NEWER VERSION:
-@jax.jit
-def compute_loss_and_grads(params, tokens, actions, advantages):
-    def loss_fn(p):
-        logits     = get_next_token_logits(model.apply, p, tokens)
-        log_probs  = jax.nn.log_softmax(logits)
-        act_logp   = jnp.take_along_axis(log_probs, actions[:, None], 1).squeeze(1)
-        entropy    = -(log_probs * jnp.exp(log_probs)).sum(axis=1).mean()
-        policy_L   = -(advantages * act_logp).mean()
-        return policy_L - ENTROPY_COEF * entropy
-    return jax.value_and_grad(loss_fn)(params)
+print("Starting RL fine‑tuning…")
+wall0 = time.time()
+
 
 
 # @jax.jit
@@ -122,8 +113,6 @@ def compute_loss_and_grads(params, tokens, actions, advantages):
 #     loss, grads = jax.value_and_grad(loss_fn)(params)
 #     return loss, grads
 
-print("Starting RL fine‑tuning…")
-wall0 = time.time()
 
 # for step in range(1, NUM_UPDATES + 1):
 #     expr_batch, truth_batch = sample_batch(BATCH_SIZE)
@@ -187,47 +176,138 @@ def compute_loss_and_grads_no_enthropy(params,
     return jax.value_and_grad(loss_fn)(params)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2. Main RL loop                                                               |
-# ──────────────────────────────────────────────────────────────────────────────
-for step in range(1, NUM_UPDATES + 1):
-    # -------- data -----------------------------------------------------------
-    exprs, truths        = sample_batch(BATCH_SIZE)
-    tok_batch, lens      = encode_batch(tokenizer, exprs, CTX_LEN)
-    tokens               = jnp.array(tok_batch, dtype=jnp.int32)    # (B,T)
-    idx                  = lens - 1                                 # (B,)
+# ENTROPY_COEF = 0.01  # <-- put near other constants
+# # NEWER VERSION:
+# @jax.jit
+# def compute_loss_and_grads(params, tokens, actions, advantages):
+#     def loss_fn(p):
+#         logits     = get_next_token_logits(model.apply, p, tokens)
+#         log_probs  = jax.nn.log_softmax(logits)
+#         act_logp   = jnp.take_along_axis(log_probs, actions[:, None], 1).squeeze(1)
+#         entropy    = -(log_probs * jnp.exp(log_probs)).sum(axis=1).mean()
+#         policy_L   = -(advantages * act_logp).mean()
+#         return policy_L - ENTROPY_COEF * entropy
+#     return jax.value_and_grad(loss_fn)(params)
+#
+#
+# # ──────────────────────────────────────────────────────────────────────────────
+# # 2. Main RL loop                                                               |
+# # ──────────────────────────────────────────────────────────────────────────────
+# for step in range(1, NUM_UPDATES + 1):
+#     # -------- data -----------------------------------------------------------
+#     exprs, truths        = sample_batch(BATCH_SIZE)
+#     tok_batch, lens      = encode_batch(tokenizer, exprs, CTX_LEN)
+#     tokens               = jnp.array(tok_batch, dtype=jnp.int32)    # (B,T)
+#     idx                  = lens - 1                                 # (B,)
+#
+#     # -------- policy forward & action ---------------------------------------
+#     logits_full = model.apply({"params": state.params},
+#                               tokens,
+#                               deterministic=True)        # (B,T,V)
+#     logits = jnp.take_along_axis(logits_full,
+#                                  idx[:, None, None],
+#                                  axis=1).squeeze(1)       # (B,V)
+#
+#     rng, sub      = jax.random.split(rng)
+#     actions       = jax.random.categorical(sub, logits)   # (B,)
+#
+#     # -------- reward --------------------------------------------------------
+#     action_int    = jnp.take(id2num, actions)             # numeric value
+#     rewards       = (action_int == jnp.array(truths)).astype(jnp.float32)
+#
+#     baseline      = BASE_MOMENT * baseline + (1 - BASE_MOMENT) * rewards.mean()
+#     advantages    = rewards - baseline
+#
+#     # -------- back-prop -----------------------------------------------------
+#     # loss, grads   = compute_loss_and_grads(state.params,
+#     #                                        tokens,
+#     #                                        idx,
+#     #                                        actions,
+#                                            # advantages)
+#     loss, grads = compute_loss_and_grads(state.params,
+#                                             tokens,
+#                                             actions,
+#                                             advantages)
+#     state         = state.apply_gradients(grads=grads)
+#
+#     # -------- logging & checkpointing --------------------------------------
+#     if step % LOG_EVERY == 0:
+#         took = time.time() - wall0
+#         print(f"step {step:>6d}  loss {loss:+.6f}  "
+#               f"avgR {rewards.mean():.3f}  baseline {float(baseline):.3f}  "
+#               f"{took/LOG_EVERY:.3f}s/it")
+#         wall0 = time.time()
+#
+#     if step % CHECK_EVERY == 0:
+#         ckpt_path = SAVE_DIR / f"ckpt_{step:06d}.npz"
+#         print(f"Saving → {ckpt_path}")
+#         save_npz(state.params, ckpt_path)
 
-    # -------- policy forward & action ---------------------------------------
+# ───────────── Hyper-params ────────────────────────────────────────────────
+ENTROPY_COEF = 0.01          # 0 → turn off entropy bonus
+
+# ───────────── Loss & gradients (correct gather) ───────────────────────────
+@jax.jit
+def compute_loss_and_grads(params,
+                           tokens: jnp.ndarray,      # (B,T)
+                           idx:    jnp.ndarray,      # (B,)  '=' position
+                           actions: jnp.ndarray,     # (B,)
+                           advantages: jnp.ndarray): # (B,)
+    def loss_fn(p):
+        logits_full = model.apply({"params": p},
+                                  tokens,
+                                  deterministic=True)        # (B,T,V)
+
+        # logits at the '=' position for every sample
+        logits = jnp.take_along_axis(logits_full,
+                                     idx[:, None, None],      # (B,1,1)
+                                     axis=1).squeeze(1)       # → (B,V)
+
+        log_probs  = jax.nn.log_softmax(logits)               # (B,V)
+        act_logp   = jnp.take_along_axis(log_probs,
+                                         actions[:, None], 1).squeeze(1)
+        policy_L   = -(advantages * act_logp).mean()
+
+        entropy    = -(log_probs * jnp.exp(log_probs)).sum(axis=1).mean()
+        return policy_L - ENTROPY_COEF * entropy
+
+    return jax.value_and_grad(loss_fn)(params)
+
+# ───────────── Main RL loop ────────────────────────────────────────────────
+for step in range(1, NUM_UPDATES + 1):
+    # --- 1. sample batch ---------------------------------------------------
+    exprs, truths   = sample_batch(BATCH_SIZE)
+    tok_batch, lens = encode_batch(tokenizer, exprs, CTX_LEN)
+    tokens          = jnp.array(tok_batch, dtype=jnp.int32)    # (B,T)
+    idx             = lens - 1                                 # (B,)
+
+    # --- 2. forward pass & action sampling -------------------------------
     logits_full = model.apply({"params": state.params},
                               tokens,
-                              deterministic=True)        # (B,T,V)
+                              deterministic=True)              # (B,T,V)
     logits = jnp.take_along_axis(logits_full,
                                  idx[:, None, None],
-                                 axis=1).squeeze(1)       # (B,V)
+                                 axis=1).squeeze(1)             # (B,V)
 
-    rng, sub      = jax.random.split(rng)
-    actions       = jax.random.categorical(sub, logits)   # (B,)
+    rng, sub  = jax.random.split(rng)
+    actions   = jax.random.categorical(sub, logits)             # (B,)
 
-    # -------- reward --------------------------------------------------------
-    action_int    = jnp.take(id2num, actions)             # numeric value
-    rewards       = (action_int == jnp.array(truths)).astype(jnp.float32)
+    # --- 3. reward --------------------------------------------------------
+    action_int = jnp.take(id2num, actions)                      # (B,)
+    rewards    = (action_int == jnp.array(truths)).astype(jnp.float32)
 
-    baseline      = BASE_MOMENT * baseline + (1 - BASE_MOMENT) * rewards.mean()
-    advantages    = rewards - baseline
+    baseline   = BASE_MOMENT * baseline + (1 - BASE_MOMENT) * rewards.mean()
+    advantages = rewards - baseline
 
-    # -------- back-prop -----------------------------------------------------
-    # loss, grads   = compute_loss_and_grads(state.params,
-    #                                        tokens,
-    #                                        idx,
-    #                                        actions,
-                                           # advantages)
+    # --- 4. back-prop -----------------------------------------------------
     loss, grads = compute_loss_and_grads(state.params,
-                                            tokens,
-                                            actions,
-                                            advantages)
-    state         = state.apply_gradients(grads=grads)
+                                         tokens,
+                                         idx,
+                                         actions,
+                                         advantages)
+    state       = state.apply_gradients(grads=grads)
 
-    # -------- logging & checkpointing --------------------------------------
+    # --- 5. logging / checkpoint -----------------------------------------
     if step % LOG_EVERY == 0:
         took = time.time() - wall0
         print(f"step {step:>6d}  loss {loss:+.6f}  "
@@ -239,6 +319,7 @@ for step in range(1, NUM_UPDATES + 1):
         ckpt_path = SAVE_DIR / f"ckpt_{step:06d}.npz"
         print(f"Saving → {ckpt_path}")
         save_npz(state.params, ckpt_path)
+
 
 
 print("Done!")

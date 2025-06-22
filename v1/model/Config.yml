@@ -17,6 +17,8 @@ dataset_vendor: Salesforce
 # dataset_name: roneneldan/TinyStories
 # dataset_has_vendor: false
 # dataset_vendor: roneneldan
+use_custom_dataset: true
+
 
 # model:
 embedding_size: 256

@@ -92,35 +92,35 @@ def get_next_token_logits(apply_fn,
                       deterministic=True)
     return logits[:, -1, :]
 
-# ENTROPY_COEF = 0.01  # <-- put near other constants
+ENTROPY_COEF = 0.01  # <-- put near other constants
 # NEWER VERSION:
-# @jax.jit
-# def compute_loss_and_grads(params, tokens, actions, advantages):
-#     def loss_fn(p):
-#         logits     = get_next_token_logits(model.apply, p, tokens)
-#         log_probs  = jax.nn.log_softmax(logits)
-#         act_logp   = jnp.take_along_axis(log_probs, actions[:, None], 1).squeeze(1)
-#         entropy    = -(log_probs * jnp.exp(log_probs)).sum(axis=1).mean()
-#         policy_L   = -(advantages * act_logp).mean()
-#         return policy_L - ENTROPY_COEF * entropy
-#     return jax.value_and_grad(loss_fn)(params)
-
-
 @jax.jit
-def compute_loss_and_grads(params: FrozenDict,
-                           tokens: jnp.ndarray,
-                           actions: jnp.ndarray,
-                           advantages: jnp.ndarray,
-                           rng_key: jax.random.PRNGKey):
+def compute_loss_and_grads(params, tokens, actions, advantages):
     def loss_fn(p):
-        logits = get_next_token_logits(model.apply, p, tokens)
-        log_probs = jax.nn.log_softmax(logits)
-        logp_action = jnp.take_along_axis(log_probs,
-                                          actions[:, None],
-                                          axis=1).squeeze(1)
-        return -(advantages * logp_action).mean()
-    loss, grads = jax.value_and_grad(loss_fn)(params)
-    return loss, grads
+        logits     = get_next_token_logits(model.apply, p, tokens)
+        log_probs  = jax.nn.log_softmax(logits)
+        act_logp   = jnp.take_along_axis(log_probs, actions[:, None], 1).squeeze(1)
+        entropy    = -(log_probs * jnp.exp(log_probs)).sum(axis=1).mean()
+        policy_L   = -(advantages * act_logp).mean()
+        return policy_L - ENTROPY_COEF * entropy
+    return jax.value_and_grad(loss_fn)(params)
+
+
+# @jax.jit
+# def compute_loss_and_grads(params: FrozenDict,
+#                            tokens: jnp.ndarray,
+#                            actions: jnp.ndarray,
+#                            advantages: jnp.ndarray,
+#                            rng_key: jax.random.PRNGKey):
+#     def loss_fn(p):
+#         logits = get_next_token_logits(model.apply, p, tokens)
+#         log_probs = jax.nn.log_softmax(logits)
+#         logp_action = jnp.take_along_axis(log_probs,
+#                                           actions[:, None],
+#                                           axis=1).squeeze(1)
+#         return -(advantages * logp_action).mean()
+#     loss, grads = jax.value_and_grad(loss_fn)(params)
+#     return loss, grads
 
 print("Starting RL fine‑tuning…")
 wall0 = time.time()
@@ -162,7 +162,7 @@ wall0 = time.time()
 # 1. Loss & gradients (gather at “=” position)                                  |
 # ──────────────────────────────────────────────────────────────────────────────
 @jax.jit
-def compute_loss_and_grads(params,
+def compute_loss_and_grads_no_enthropy(params,
                            tokens: jnp.ndarray,      # (B,T)
                            idx:    jnp.ndarray,      # (B,)  position of '='
                            actions: jnp.ndarray,     # (B,)
@@ -216,11 +216,15 @@ for step in range(1, NUM_UPDATES + 1):
     advantages    = rewards - baseline
 
     # -------- back-prop -----------------------------------------------------
-    loss, grads   = compute_loss_and_grads(state.params,
-                                           tokens,
-                                           idx,
-                                           actions,
-                                           advantages)
+    # loss, grads   = compute_loss_and_grads(state.params,
+    #                                        tokens,
+    #                                        idx,
+    #                                        actions,
+                                           # advantages)
+    loss, grads = compute_loss_and_grads(state.params,
+                                            tokens,
+                                            actions,
+                                            advantages)
     state         = state.apply_gradients(grads=grads)
 
     # -------- logging & checkpointing --------------------------------------

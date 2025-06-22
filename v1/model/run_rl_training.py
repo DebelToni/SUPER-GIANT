@@ -24,6 +24,8 @@ from math_env import sample_batch, encode_batch
 from GiantGPT import GiantGPT
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
+from checkpoint_io import save_npz
+
 from omegaconf import OmegaConf
 Config = OmegaConf.load("Config.yml")
 RL_Config = OmegaConf.load("config_rl.yml")
@@ -155,9 +157,7 @@ for step in range(1, NUM_UPDATES + 1):
     if step % CHECK_EVERY == 0:
         ckpt_path = SAVE_DIR / f"ckpt_{step:06d}.npz"
         print(f"Saving → {ckpt_path}")
-        with ckpt_path.open("wb") as f:
-            for arr in jax.tree_util.tree_leaves(state.params):
-                np.save(f, np.array(arr), allow_pickle=False)
+        save_npz(state.params, ckpt_path)
 
 print("Done!")
 

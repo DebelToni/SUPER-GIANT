@@ -8,7 +8,7 @@ compute_dtype: float16
 tokenizer_name: EleutherAI/gpt-neo-125M
 tokenizer_path: tiny_cached
 tokenizer_dtype: uint16
-use_custom_tokenizer: false
+use_custom_tokenizer: true
 custom_tokenizer_path: math_tokenizer_data
 
 # DATASET_VENDOR = "Salesforce/wikitext"

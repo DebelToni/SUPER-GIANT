@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from checkpoint_io import load_npz
 
 import jax.lax as lax
 
@@ -42,40 +43,6 @@ def _numpy_or_jax_array(x):
     """Ensure leaves are JAX arrays – helpful if checkpoint stored NumPy."""
     return jnp.asarray(x) if not isinstance(x, jax.Array) else x
 
-def load_rl_npz(path: Path, model_template: GiantGPT) -> dict:
-    """Rebuild params PyTree from the flat arrays stored in .npz.
-
-    The file was created with:
-        np.savez(path, a0=leaf0, a1=leaf1, …)
-    """
-    npz     = np.load(path, allow_pickle=False)
-    arrays  = [npz[k] for k in sorted(npz.files)]          # a0, a1, …
-    # Re-create the *structure* using a dummy forward pass
-    dummy   = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
-    treedef = jax.tree_util.tree_structure(
-                 model_template.init(jax.random.PRNGKey(0), dummy)["params"]
-             )
-    return jax.tree_util.tree_unflatten(treedef, arrays)
-
-def load_stream_npy(path: Path, model_template: GiantGPT) -> dict:
-    arrays = []
-    with path.open("rb") as f:
-        while True:
-            try:
-                arrays.append(np.load(f, allow_pickle=False))
-            except (ValueError, OSError):   # EOF reached
-                break
-
-    if not arrays:
-        raise ValueError(f"No arrays found in {path}")
-
-    # rebuild tree-structure from a dummy init
-    dummy = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
-    treedef = jax.tree_util.tree_structure(
-        model_template.init(jax.random.PRNGKey(0), dummy)["params"]
-    )
-    return jax.tree_util.tree_unflatten(treedef, arrays)
-
 def load_checkpoint(path: Path):
     """Return a PyTree of JAX arrays living on *CPU* (device_put later)."""
     ext = path.suffix.lower()
@@ -83,7 +50,7 @@ def load_checkpoint(path: Path):
         with path.open("rb") as f:
             params = pickle.load(f)
     elif ext == ".npz":
-        params = dict(np.load(path, allow_pickle=True))
+        params = load_npz(path)
     else:  
         arr = np.load(path, allow_pickle=True)
         params = arr.item() if hasattr(arr, "item") else arr
@@ -229,15 +196,7 @@ def main():
     temperature = 0.0 if args.greedy else args.temperature
 
     print("\nLoading checkpoint…")
-    # params_cpu = load_checkpoint(args.checkpoint)
-    if args.checkpoint.suffix == ".npz":
-        model_tmpl = build_model()
-        try:
-            params_cpu = load_rl_npz(args.checkpoint, model_tmpl)      # true .npz
-        except (KeyError, AttributeError):
-            params_cpu = load_stream_npy(args.checkpoint, model_tmpl)  # fallback
-    else:
-        params_cpu = load_checkpoint(args.checkpoint)                  # .pkl
+    params_cpu = load_checkpoint(args.checkpoint)
 
     print("Building model…")
     model = build_model()

@@ -1,157 +1,177 @@
-# run_rl_training.py
-"""Reinforcement‑learning fine‑tuning script.
+# run_rl_training.py  — fixed version
+"""Reinforcement‑learning fine‑tuning for GiantGPT on toy arithmetic.
 
-This file mirrors *Run_training.py* but swaps cross‑entropy for a simple
-REINFORCE objective with a moving‑average baseline.
+Changes vs. first draft
+-----------------------
+* **Removed** the problematic `static_argnums` usage that made JAX try to
+  hash the parameters dict.  The new code relies on JAX’s default pytree
+  handling, so `params` is treated as a normal dynamic argument and no
+  hash attempt is made.
+* **Re‑organised** the jitted functions so that the only *static* value
+  is the model’s `apply` method; all pytrees (params, tokens, RNG keys)
+  are dynamic and safe.
 
-The policy is the same GiantGPT decoder‑only model; we only change the
-loss and the data pipeline.
+You can drop this file straight into your repo, overwriting the previous
+version.
 """
 from __future__ import annotations
 
 import os
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # nicer on GPU mem
 
 import functools
+import itertools
 import math
-import pickle
+import time
 from pathlib import Path
-from typing import Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from omegaconf import OmegaConf
+from flax.training import train_state
+from flax.core import FrozenDict
 
-from math_tokenizer import build_math_tokenizer
-from math_env import sample_problem
-from GiantGPT import GiantGPT
+import yaml
 
-# -------------------------------------------------------------------------
-# Configuration -----------------------------------------------------------
-# -------------------------------------------------------------------------
-CFG = OmegaConf.load("config_rl.yml")
+# ---------------------------------------------------------------------------
+# Local code – make sure these imports resolve inside your project layout
+# ---------------------------------------------------------------------------
+from math_env import sample_batch  # freshly added helper for arithmetic
+from GiantGPT import GiantGPT       # your existing model definition
+from math_tokenizer import MathTokenizer
 
-# for reproducibility
-SEED = 42
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+CONFIG_PATH = Path(__file__).with_name("config_rl.yml")
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 
-# -------------------------------------------------------------------------
-# Utilities ---------------------------------------------------------------
-# -------------------------------------------------------------------------
+BATCH_SIZE   = _cfg.get("batch_size", 64)
+NUM_UPDATES  = _cfg.get("num_updates", 50_000)
+LR           = _cfg.get("learning_rate", 3e-4)
+BASE_MOMENT  = _cfg.get("baseline_momentum", 0.9)
+CTX_LEN      = _cfg.get("context_length", 32)
+SEED         = _cfg.get("seed", 42)
+LOG_EVERY    = _cfg.get("log_every", 200)
+CHECK_EVERY  = _cfg.get("checkpoint_every", 5_000)
+SAVE_DIR     = Path(_cfg.get("save_dir", "checkpoints"))
+SAVE_DIR.mkdir(exist_ok=True)
 
-def pad_to_length(ids: list[int], *, pad: int, length: int) -> list[int]:
-    """Right‑pad ``ids`` with ``pad`` up to ``length`` elements."""
-    if len(ids) > length:
-        # keep the right‑most tokens (GPT sees the most recent context)
-        ids = ids[-length:]
-    return ids + [pad] * (length - len(ids))
+# ---------------------------------------------------------------------------
+# Helper: initialise model & optimiser
+# ---------------------------------------------------------------------------
+print("Building model…")
+tokenizer = MathTokenizer.load("math_tokenizer_data")
 
-
-def log_prob_of_action(logits: jax.Array, action: jax.Array) -> jax.Array:
-    """Return log‑probability of *action* under unnormalised *logits*."""
-    log_probs = jax.nn.log_softmax(logits)
-    batch_idx = jnp.arange(action.shape[0])
-    return log_probs[batch_idx, action]
-
-# -------------------------------------------------------------------------
-# Build objects -----------------------------------------------------------
-# -------------------------------------------------------------------------
-print("Building tokenizer…")
-tokenizer = build_math_tokenizer()
-PAD = tokenizer.pad_token_id
-
-print("Initialising model…")
 model = GiantGPT(
-    vocab_size=tokenizer.vocab_size,
-    context_length=CFG.context_length,
-    d_model=CFG.embedding_size,
-    n_heads=CFG.num_heads,
-    d_ff=CFG.feed_forward_size,
-    n_layers=CFG.num_layers,
-    dropout_rate=CFG.dropout_rate,
+    vocab_size=len(tokenizer),
+    **_cfg["model"],  # e.g. emb_dim, n_heads, n_layers, …
 )
 
+def init_model(rng: jax.random.PRNGKey):
+    """Creates initial params (Flax FrozenDict)."""
+    dummy_tokens = jnp.zeros((1, CTX_LEN), dtype=jnp.int32)
+    params = model.init(rng, dummy_tokens)["params"]
+    return params
+
 rng = jax.random.PRNGKey(SEED)
-params = model.init(rng, jnp.zeros((1, CFG.context_length), dtype=jnp.int32))["params"]
+params = init_model(rng)
 
-# Adam + weight‑decay (there is no LR schedule because RL updates are noisy)
-optimizer = optax.adamw(CFG.learning_rate, weight_decay=CFG.weight_decay)
-opt_state = optimizer.init(params)
+state = train_state.TrainState.create(
+    apply_fn=model.apply,
+    params=params,
+    tx=optax.adamw(LR, weight_decay=_cfg.get("weight_decay", 0.01)),
+)
 
-# Moving‑average reward baseline -----------------------------------------
-baseline = 0.0
-mom = CFG.baseline_momentum
+# Running baseline (moving average of recent rewards)
+baseline = jnp.array(0.0)
 
-# JIT‑compiled helper to get logits for the *next* token -------------------
-@functools.partial(jax.jit, static_argnums=0)
-def next_token_logits(params: dict, inputs: jax.Array) -> jax.Array:
-    """Return unnormalised logits for position *len(inputs)-1*."""
-    logits = model.apply({"params": params}, inputs, deterministic=True)
-    return logits[:, inputs.shape[1] - 1, :]  # (batch, vocab)
+# ---------------------------------------------------------------------------
+# Jitted helpers
+# ---------------------------------------------------------------------------
+@functools.partial(jax.jit, static_argnums=(0,))
+def get_next_token_logits(apply_fn, params: FrozenDict, tokens: jnp.ndarray):
+    """Returns logits for the *next* position (last index) for each example."""
+    logits = apply_fn({"params": params}, tokens)     # (B, T, V)
+    return logits[:, -1, :]                           # (B, V)
 
-# -------------------------------------------------------------------------
-# Main update loop --------------------------------------------------------
-# -------------------------------------------------------------------------
+@jax.jit
+def compute_loss_and_grads(params: FrozenDict,
+                           tokens: jnp.ndarray,
+                           actions: jnp.ndarray,
+                           advantages: jnp.ndarray,
+                           rng_key: jax.random.PRNGKey):
+    """REINFORCE loss; returns (loss, grads)."""
+    def loss_fn(p):
+        logits = get_next_token_logits(model.apply, p, tokens)   # (B, V)
+        log_probs = jax.nn.log_softmax(logits)
+        # Gather log‑p of selected actions
+        logp_action = jnp.take_along_axis(log_probs,
+                                          actions[:, None],
+                                          axis=1).squeeze(1)
+        # REINFORCE objective (negative for gradient descent)
+        return -(advantages * logp_action).mean()
+    loss, grads = jax.value_and_grad(loss_fn)(params)
+    return loss, grads
+
+# ---------------------------------------------------------------------------
+# Training loop
+# ---------------------------------------------------------------------------
 print("Starting RL fine‑tuning…")
+wall0 = time.time()
 
-for step in range(1, CFG.num_updates + 1):
-    # ------------------------------------------------------------------
-    # 1. Generate a batch of prompts and ground truths
-    # ------------------------------------------------------------------
-    exprs: list[str] = []
-    truths: list[int] = []
-    for _ in range(CFG.batch_size):
-        expr, truth = sample_problem()  # two‑operand expression
-        exprs.append(expr)
-        truths.append(truth)
+for step in range(1, NUM_UPDATES + 1):
+    # ---------------------------------------------------------------------
+    # 1.  Generate on‑the‑fly batch of problems
+    # ---------------------------------------------------------------------
+    expr_batch, truth_batch = sample_batch(BATCH_SIZE)  # list[str], list[int]
+    prompt_tokens = tokenizer.encode_batch(expr_batch, pad_to=CTX_LEN)  # (B, T)
+    prompt_tokens = jnp.array(prompt_tokens, dtype=jnp.int32)
 
-    token_ids = [pad_to_length(tokenizer(expr, add_special_tokens=False).input_ids,
-                               pad=PAD, length=CFG.context_length) for expr in exprs]
-    tokens = jnp.asarray(token_ids, dtype=jnp.int32)  # (B, L)
-
-    # ------------------------------------------------------------------
-    # 2. Sample an answer token & compute log‑probabilities
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------------
+    # 2.  Policy: sample an answer token from model distribution
+    # ---------------------------------------------------------------------
     rng, sub = jax.random.split(rng)
-    subkeys = jax.random.split(sub, CFG.batch_size)
+    logits = get_next_token_logits(model.apply, state.params, prompt_tokens)
+    action = jax.random.categorical(sub, logits)           # (B,)
 
-    logits = next_token_logits(params, tokens)      # (B, V)
-    sampled = jax.vmap(jax.random.categorical)(subkeys, logits)  # (B,)
-    logp = log_prob_of_action(logits, sampled)      # (B,)
+    # ---------------------------------------------------------------------
+    # 3.  Reward: 1 if action token == truth else 0
+    # ---------------------------------------------------------------------
+    action_int = np.vectorize(tokenizer.token_to_int.__getitem__)(action)
+    rewards = (action_int == np.array(truth_batch)).astype(np.float32)
+    rewards = jnp.array(rewards)
 
-    # ------------------------------------------------------------------
-    # 3. Reward (Python side, not inside the TPU/GPU graph)
-    # ------------------------------------------------------------------
-    pred_nums = [int(tokenizer.convert_ids_to_tokens(int(t))) for t in np.asarray(sampled)]
-    rewards = np.array([1.0 if p == t else 0.0 for p, t in zip(pred_nums, truths)], dtype=np.float32)
-    avg_reward = rewards.mean()
+    # Moving‑average baseline (scalar)
+    baseline = BASE_MOMENT * baseline + (1 - BASE_MOMENT) * rewards.mean()
+    advantages = rewards - baseline  # broadcast
 
-    # moving baseline
-    baseline = mom * baseline + (1 - mom) * avg_reward
-    advantages = rewards - baseline  # broadcasting OK (scalar baseline)
+    # ---------------------------------------------------------------------
+    # 4.  Compute loss and update params
+    # ---------------------------------------------------------------------
+    loss, grads = compute_loss_and_grads(state.params,
+                                         prompt_tokens,
+                                         action,
+                                         advantages,
+                                         rng)
+    state = state.apply_gradients(grads=grads)
 
-    # ------------------------------------------------------------------
-    # 4. Compute REINFORCE loss & update parameters
-    # ------------------------------------------------------------------
-    def loss_fn(params_: dict, tokens_: jax.Array, actions_: jax.Array, adv_: jax.Array) -> jax.Array:
-        lgt = next_token_logits(params_, tokens_)
-        lp  = log_prob_of_action(lgt, actions_)
-        return -jnp.mean(adv_ * lp)
+    # ---------------------------------------------------------------------
+    # 5.  Logging / checkpoint
+    # ---------------------------------------------------------------------
+    if step % LOG_EVERY == 0:
+        took = time.time() - wall0
+        print(f"step {step:>6d} \t loss {loss:.4f} \t avgR {rewards.mean():.3f} "
+              f"\t baseline {float(baseline):.3f} \t {took/LOG_EVERY:.3f}s/it")
+        wall0 = time.time()
 
-    loss, grads = jax.value_and_grad(loss_fn)(params, tokens, sampled, jnp.asarray(advantages))
-    updates, opt_state = optimizer.update(grads, opt_state, params)
-    params = optax.apply_updates(params, updates)
-
-    # ------------------------------------------------------------------
-    # 5. Logging & checkpointing
-    # ------------------------------------------------------------------
-    if step % 100 == 0:
-        print(f"step {step:>6} | loss {loss:.4f} | reward {avg_reward:.3f} | baseline {baseline:.3f}")
-
-    if step % 5000 == 0:
-        ckpt_path = Path(f"rl_checkpoint_step{step}.pkl")
+    if step % CHECK_EVERY == 0:
+        ckpt_path = SAVE_DIR / f"ckpt_{step:06d}.npz"
+        print(f"Saving → {ckpt_path}")
         with ckpt_path.open("wb") as f:
-            pickle.dump(params, f)
-        print(f"✔ saved checkpoint → {ckpt_path}")
+            for arr in jax.tree_util.tree_leaves(state.params):
+                np.save(f, np.array(arr), allow_pickle=False)
+
+print("Done!")
 

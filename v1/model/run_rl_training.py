@@ -125,39 +125,117 @@ def compute_loss_and_grads(params: FrozenDict,
 print("Starting RL fine‑tuning…")
 wall0 = time.time()
 
+# for step in range(1, NUM_UPDATES + 1):
+#     expr_batch, truth_batch = sample_batch(BATCH_SIZE)
+#     prompt_tokens = encode_batch(tokenizer, expr_batch, CTX_LEN)
+#     prompt_tokens = jnp.array(prompt_tokens, dtype=jnp.int32)
+#
+#     rng, sub = jax.random.split(rng)
+#     logits = get_next_token_logits(model.apply, state.params, prompt_tokens)
+#     action = jax.random.categorical(sub, logits)
+#
+#     action_int = jnp.take(id2num, action)
+#     rewards = (action_int == np.array(truth_batch)).astype(np.float32)
+#     rewards = jnp.array(rewards)
+#
+#     baseline = BASE_MOMENT * baseline + (1 - BASE_MOMENT) * rewards.mean()
+#     advantages = rewards - baseline
+#
+#     loss, grads = compute_loss_and_grads(state.params,
+#                                          prompt_tokens,
+#                                          action,
+#                                          advantages,
+#                                          rng)
+#     state = state.apply_gradients(grads=grads)
+#
+#     if step % LOG_EVERY == 0:
+#         took = time.time() - wall0
+#         print(f"step {step:>6d} \t loss {loss:.4f} \t avgR {rewards.mean():.3f} "
+#               f"\t baseline {float(baseline):.3f} \t {took/LOG_EVERY:.3f}s/it")
+#         wall0 = time.time()
+#
+#     if step % CHECK_EVERY == 0:
+#         ckpt_path = SAVE_DIR / f"ckpt_{step:06d}.npz"
+#         print(f"Saving → {ckpt_path}")
+#         save_npz(state.params, ckpt_path)
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. Loss & gradients (gather at “=” position)                                  |
+# ──────────────────────────────────────────────────────────────────────────────
+@jax.jit
+def compute_loss_and_grads(params,
+                           tokens: jnp.ndarray,      # (B,T)
+                           idx:    jnp.ndarray,      # (B,)  position of '='
+                           actions: jnp.ndarray,     # (B,)
+                           advantages: jnp.ndarray,  # (B,)
+                           ):
+    def loss_fn(p):
+        # full forward pass
+        logits_full = model.apply({"params": p},
+                                  tokens,
+                                  deterministic=True)          # (B,T,V)
+
+        # slice out the logits that correspond to the ‘=’ position
+        logits = jnp.take_along_axis(logits_full,
+                                     idx[:, None, None],        # (B,1,1)
+                                     axis=1).squeeze(1)         # → (B,V)
+
+        log_probs   = jax.nn.log_softmax(logits)                # (B,V)
+        logp_action = jnp.take_along_axis(log_probs,
+                                          actions[:, None], 1).squeeze(1)
+        return -(advantages * logp_action).mean()
+
+    return jax.value_and_grad(loss_fn)(params)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. Main RL loop                                                               |
+# ──────────────────────────────────────────────────────────────────────────────
 for step in range(1, NUM_UPDATES + 1):
-    expr_batch, truth_batch = sample_batch(BATCH_SIZE)
-    prompt_tokens = encode_batch(tokenizer, expr_batch, CTX_LEN)
-    prompt_tokens = jnp.array(prompt_tokens, dtype=jnp.int32)
+    # -------- data -----------------------------------------------------------
+    exprs, truths        = sample_batch(BATCH_SIZE)
+    tok_batch, lens      = encode_batch(tokenizer, exprs, CTX_LEN)
+    tokens               = jnp.array(tok_batch, dtype=jnp.int32)    # (B,T)
+    idx                  = lens - 1                                 # (B,)
 
-    rng, sub = jax.random.split(rng)
-    logits = get_next_token_logits(model.apply, state.params, prompt_tokens)
-    action = jax.random.categorical(sub, logits)
+    # -------- policy forward & action ---------------------------------------
+    logits_full = model.apply({"params": state.params},
+                              tokens,
+                              deterministic=True)        # (B,T,V)
+    logits = jnp.take_along_axis(logits_full,
+                                 idx[:, None, None],
+                                 axis=1).squeeze(1)       # (B,V)
 
-    action_int = jnp.take(id2num, action)
-    rewards = (action_int == np.array(truth_batch)).astype(np.float32)
-    rewards = jnp.array(rewards)
+    rng, sub      = jax.random.split(rng)
+    actions       = jax.random.categorical(sub, logits)   # (B,)
 
-    baseline = BASE_MOMENT * baseline + (1 - BASE_MOMENT) * rewards.mean()
-    advantages = rewards - baseline
+    # -------- reward --------------------------------------------------------
+    action_int    = jnp.take(id2num, actions)             # numeric value
+    rewards       = (action_int == jnp.array(truths)).astype(jnp.float32)
 
-    loss, grads = compute_loss_and_grads(state.params,
-                                         prompt_tokens,
-                                         action,
-                                         advantages,
-                                         rng)
-    state = state.apply_gradients(grads=grads)
+    baseline      = BASE_MOMENT * baseline + (1 - BASE_MOMENT) * rewards.mean()
+    advantages    = rewards - baseline
 
+    # -------- back-prop -----------------------------------------------------
+    loss, grads   = compute_loss_and_grads(state.params,
+                                           tokens,
+                                           idx,
+                                           actions,
+                                           advantages)
+    state         = state.apply_gradients(grads=grads)
+
+    # -------- logging & checkpointing --------------------------------------
     if step % LOG_EVERY == 0:
         took = time.time() - wall0
-        print(f"step {step:>6d} \t loss {loss:.4f} \t avgR {rewards.mean():.3f} "
-              f"\t baseline {float(baseline):.3f} \t {took/LOG_EVERY:.3f}s/it")
+        print(f"step {step:>6d}  loss {loss:+.6f}  "
+              f"avgR {rewards.mean():.3f}  baseline {float(baseline):.3f}  "
+              f"{took/LOG_EVERY:.3f}s/it")
         wall0 = time.time()
 
     if step % CHECK_EVERY == 0:
         ckpt_path = SAVE_DIR / f"ckpt_{step:06d}.npz"
         print(f"Saving → {ckpt_path}")
         save_npz(state.params, ckpt_path)
+
 
 print("Done!")
 

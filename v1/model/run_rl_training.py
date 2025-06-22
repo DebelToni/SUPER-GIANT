@@ -39,7 +39,6 @@ import yaml
 # ---------------------------------------------------------------------------
 from math_env import sample_batch  # freshly added helper for arithmetic
 from GiantGPT import GiantGPT       # your existing model definition
-from math_tokenizer import MathTokenizer
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from omegaconf import OmegaConf

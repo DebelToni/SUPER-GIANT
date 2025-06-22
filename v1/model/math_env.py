@@ -10,6 +10,7 @@ encode_batch(tok, exprs, ctx_len) -> list[list[int]]
 
 import random
 from typing import List, Tuple
+import jax.numpy as jnp
 
 # ---------------------------------------------------------------------------
 

@@ -70,7 +70,7 @@ if Config.use_custom_tokenizer:
         Config.custom_tokenizer_path
     )
 else:
-    _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+    _tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 tokenizer = _tokenizer
 
 model = GiantGPT(

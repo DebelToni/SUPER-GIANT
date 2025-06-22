@@ -60,21 +60,25 @@ def sample_batch(batch_size: int) -> Tuple[List[str], List[int]]:
 # ---------------------------------------------------------------------------
 # Token-helper --------------------------------------------------------------
 # ---------------------------------------------------------------------------
-def encode_batch(tokenizer, exprs: List[str], ctx_len: int) -> List[List[int]]:
-    """Tokenise & pad a batch of expressions to *ctx_len*.
+def encode_batch(tokenizer, exprs, ctx_len):
+    pad_id = tokenizer.pad_token_id or 0
+    eos_id = tokenizer.eos_token_id
 
-    The function is kept deliberately framework-agnostic: it returns a
-    nested Python list of ints.  The training script casts it to a JAX
-    array (`jnp.array(...)`) right afterwards.
-    """
-    pad_id = (
-        tokenizer.pad_token_id
-        if tokenizer.pad_token_id is not None
-        else 0  # fall-back for pad-less tokenisers
-    )
+    tokens   = []
+    lengths  = []
 
-    encoded = [
-        tokenizer.encode(expr, add_special_tokens=False)[:ctx_len] for expr in exprs
-    ]
-    return [seq + [pad_id] * (ctx_len - len(seq)) for seq in encoded]
+    for expr in exprs:
+        ids = tokenizer.encode(expr, add_special_tokens=False)
 
+        # Strip the trailing EOS that our math tokenizer always appends
+        if ids and ids[-1] == eos_id:
+            ids = ids[:-1]
+
+        lengths.append(len(ids))          # position of '='  →  lengths[i]-1
+        if len(ids) > ctx_len:
+            ids = ids[:ctx_len]           # just in case
+            lengths[-1] = ctx_len
+
+        tokens.append(ids + [pad_id] * (ctx_len - len(ids)))
+
+    return tokens, jnp.array(lengths, dtype=jnp.int32)

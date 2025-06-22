@@ -5,7 +5,7 @@ Changes vs. first draft
 -----------------------
 * **Removed** the problematic `static_argnums` usage that made JAX try to
   hash the parameters dict.  The new code relies on JAX’s default pytree
-  handling, so `params` is treated as a normal dynamic argument and no
+  handling, so `params` is treated as a normal dynamic argument and norunrl
   hash attempt is made.
 * **Re‑organised** the jitted functions so that the only *static* value
   is the model’s `apply` method; all pytrees (params, tokens, RNG keys)
@@ -40,6 +40,10 @@ import yaml
 from math_env import sample_batch  # freshly added helper for arithmetic
 from GiantGPT import GiantGPT       # your existing model definition
 from math_tokenizer import MathTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
 
 # ---------------------------------------------------------------------------
 # Config
@@ -63,6 +67,13 @@ SAVE_DIR.mkdir(exist_ok=True)
 # ---------------------------------------------------------------------------
 print("Building model…")
 tokenizer = MathTokenizer.load("math_tokenizer_data")
+if Config.use_custom_tokenizer:
+    _tokenizer = PreTrainedTokenizerFast.from_pretrained(
+        Config.custom_tokenizer_path
+    )
+else:
+    _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+tokenizer = _tokenizer
 
 model = GiantGPT(
     vocab_size=len(tokenizer),

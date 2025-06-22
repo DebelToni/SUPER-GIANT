@@ -316,6 +316,10 @@ for step in range(1, NUM_UPDATES + 1):
               f"{took/LOG_EVERY:.3f}s/it")
         wall0 = time.time()
 
+    if step == 1:
+        print("Example train expression:", exprs[0], " → ", truths[0])
+
+
     if step % CHECK_EVERY == 0:
         ckpt_path = SAVE_DIR / f"ckpt_{step:06d}.npz"
         print(f"Saving → {ckpt_path}")

@@ -1,11 +1,6 @@
-# Reinforcement‑learning fine‑tuning configuration for GiantGPT on simple math expressions
+custom_tokenizer_path: math_tokenizer_data
+context_length: 32
 
-# Tokeniser  data --------------------------------------------------------
-
-custom_tokenizer_path: math_tokenizer_data  # produced by math_tokenizer.py
-context_length: 32                          # plenty for "000 + 000 ="
-
-# Model hyper‑parameters ---------------------------------------------------
 
 embedding_size: 256
 num_heads: 2
@@ -13,18 +8,16 @@ num_layers: 2
 feed_forward_size: 1024
 dropout_rate: 0.1
 
-# Optimiser ---------------------------------------------------------------
 
 learning_rate: 5e-5
 weight_decay: 1e-2
 
-# RL training loop ---------------------------------------------------------
 
-num_updates: 50000        # total policy‑gradient updates (≈ epochs)
-batch_size: 64            # rollouts per update
-baseline_momentum: 0.9    # EMA coefficient for the reward baseline
-max_new_tokens: 1         # model generates exactly one token (the answer)
-max_expression_terms: 2   # currently expressions are strictly 2‑operand
-print_every: 500          # log metrics every N updates
-save_every: 5000          # checkpoint every N updates
+num_updates: 50000
+batch_size: 64
+baseline_momentum: 0.9
+max_new_tokens: 1
+max_expression_terms: 2
+print_every: 500
+save_every: 5000
 

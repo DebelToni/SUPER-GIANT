@@ -42,6 +42,21 @@ def _numpy_or_jax_array(x):
     """Ensure leaves are JAX arrays – helpful if checkpoint stored NumPy."""
     return jnp.asarray(x) if not isinstance(x, jax.Array) else x
 
+def load_rl_npz(path: Path, model_template: GiantGPT) -> dict:
+    """Rebuild params PyTree from the flat arrays stored in .npz.
+
+    The file was created with:
+        np.savez(path, a0=leaf0, a1=leaf1, …)
+    """
+    npz     = np.load(path, allow_pickle=False)
+    arrays  = [npz[k] for k in sorted(npz.files)]          # a0, a1, …
+    # Re-create the *structure* using a dummy forward pass
+    dummy   = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
+    treedef = jax.tree_util.tree_structure(
+                 model_template.init(jax.random.PRNGKey(0), dummy)["params"]
+             )
+    return jax.tree_util.tree_unflatten(treedef, arrays)
+
 def load_checkpoint(path: Path):
     """Return a PyTree of JAX arrays living on *CPU* (device_put later)."""
     ext = path.suffix.lower()
@@ -195,7 +210,12 @@ def main():
     temperature = 0.0 if args.greedy else args.temperature
 
     print("\nLoading checkpoint…")
-    params_cpu = load_checkpoint(args.checkpoint)
+    # params_cpu = load_checkpoint(args.checkpoint)
+    if args.checkpoint.suffix == ".npz":
+        model_tmpl = build_model()                 # only needed to get the treedef
+        params_cpu = load_rl_npz(args.checkpoint, model_tmpl)
+    else:
+        params_cpu = load_checkpoint(args.checkpoint)
 
     print("Building model…")
     model = build_model()

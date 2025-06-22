@@ -48,9 +48,9 @@ else:
     _tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 tokenizer = _tokenizer
 
-id2num = np.full(tokenizer.vocab_size, -1, dtype=np.int32)   # default “invalid”
+id2num = np.full(tokenizer.vocab_size, -1, dtype=np.int32)
 for tok, idx in tokenizer.get_vocab().items():
-    if len(tok) == 3 and tok.isdigit():          # "000" … "121"
+    if len(tok) == 3 and tok.isdigit():
         id2num[idx] = int(tok)
 
 id2num = jnp.array(id2num)
@@ -81,20 +81,27 @@ state = train_state.TrainState.create(
 
 baseline = jnp.array(0.0)
 
-# @functools.partial(jax.jit, static_argnums=(0,))
-# def get_next_token_logits(apply_fn, params: FrozenDict, tokens: jnp.ndarray):
-#     logits = apply_fn({"params": params}, tokens)
-#     return logits[:, -1, :]
-# # ─── utilities ────────────────────────────────────────────────────────────────
 @functools.partial(jax.jit, static_argnums=(0,))
 def get_next_token_logits(apply_fn,
                           params: FrozenDict,
                           tokens: jnp.ndarray):
-    # Disable dropout → no RNG required
     logits = apply_fn({"params": params},
                       tokens,
-                      deterministic=True)      #  ← NEW
+                      deterministic=True)
     return logits[:, -1, :]
+
+# ENTROPY_COEF = 0.01  # <-- put near other constants
+# NEWER VERSION:
+# @jax.jit
+# def compute_loss_and_grads(params, tokens, actions, advantages):
+#     def loss_fn(p):
+#         logits     = get_next_token_logits(model.apply, p, tokens)
+#         log_probs  = jax.nn.log_softmax(logits)
+#         act_logp   = jnp.take_along_axis(log_probs, actions[:, None], 1).squeeze(1)
+#         entropy    = -(log_probs * jnp.exp(log_probs)).sum(axis=1).mean()
+#         policy_L   = -(advantages * act_logp).mean()
+#         return policy_L - ENTROPY_COEF * entropy
+#     return jax.value_and_grad(loss_fn)(params)
 
 
 @jax.jit
@@ -125,7 +132,6 @@ for step in range(1, NUM_UPDATES + 1):
     logits = get_next_token_logits(model.apply, state.params, prompt_tokens)
     action = jax.random.categorical(sub, logits)
 
-    # action_int = np.vectorize(tokenizer.token_to_int.__getitem__)(action)
     action_int = jnp.take(id2num, action)
     rewards = (action_int == np.array(truth_batch)).astype(np.float32)
     rewards = jnp.array(rewards)

@@ -43,22 +43,33 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from omegaconf import OmegaConf
 Config = OmegaConf.load("Config.yml")
+RL_Config = OmegaConf.load("config_rl.yml")
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-CONFIG_PATH = Path(__file__).with_name("config_rl.yml")
-_cfg = yaml.safe_load(CONFIG_PATH.read_text())
-
-BATCH_SIZE   = _cfg.get("batch_size", 64)
-NUM_UPDATES  = _cfg.get("num_updates", 50_000)
-LR           = _cfg.get("learning_rate", 3e-4)
-BASE_MOMENT  = _cfg.get("baseline_momentum", 0.9)
-CTX_LEN      = _cfg.get("context_length", 32)
-SEED         = _cfg.get("seed", 42)
-LOG_EVERY    = _cfg.get("log_every", 200)
-CHECK_EVERY  = _cfg.get("checkpoint_every", 5_000)
-SAVE_DIR     = Path(_cfg.get("save_dir", "checkpoints"))
+# CONFIG_PATH = Path(__file__).with_name("config_rl.yml")
+# _cfg = yaml.safe_load(CONFIG_PATH.read_text())
+#
+# BATCH_SIZE   = _cfg.get("batch_size", 64)
+# NUM_UPDATES  = _cfg.get("num_updates", 50_000)
+# LR           = _cfg.get("learning_rate", 3e-4)
+# BASE_MOMENT  = _cfg.get("baseline_momentum", 0.9)
+# CTX_LEN      = _cfg.get("context_length", 32)
+# SEED         = _cfg.get("seed", 42)
+# LOG_EVERY    = _cfg.get("log_every", 200)
+# CHECK_EVERY  = _cfg.get("checkpoint_every", 5_000)
+# SAVE_DIR     = Path(_cfg.get("save_dir", "checkpoints"))
+# SAVE_DIR.mkdir(exist_ok=True)
+BATCH_SIZE   = RL_Config.batch_size
+NUM_UPDATES  = RL_Config.num_updates
+LR           = RL_Config.learning_rate
+BASE_MOMENT  = RL_Config.baseline_momentum
+CTX_LEN      = RL_Config.context_length
+SEED         = 42
+LOG_EVERY    = RL_Config.log_every
+CHECK_EVERY  = RL_Config.checkpoint_every
+SAVE_DIR     = Path("checkpoints_rl")
 SAVE_DIR.mkdir(exist_ok=True)
 
 # ---------------------------------------------------------------------------

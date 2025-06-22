@@ -8,7 +8,7 @@ from typing import List, Optional
 
 import jax
 import jax.numpy as jnp
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 # import Config  
 from omegaconf import OmegaConf
@@ -26,21 +26,23 @@ def load_params(path: Path):
         return pickle.load(f)
 
 
-def build_model():
-    """Re‑instantiate GiantGPT with the same hyper‑params as during training.
-    
-    It will automatically pick up the dtypes from Config.py.
-    We set dropout_rate to 0.0 as it's not needed during inference.
-    """
+def build_model() -> GiantGPT:
+    """Re‑instantiate GiantGPT with tokenizer‑aware vocab size."""
+
+    if Config.use_custom_tokenizer:
+        tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+    else:
+        tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+
     return GiantGPT(
         # vocab_size=Config.vocab_size+1,
-        vocab_size = AutoTokenizer.from_pretrained(Config.tokenizer_name).vocab_size,
-        context_length=Config.context_length, 
+        vocab_size=tok.vocab_size,
+        context_length=Config.context_length,
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
         d_ff=Config.feed_forward_size,
         n_layers=Config.num_layers,
-        dropout_rate=0.0, 
+        dropout_rate=0.0,
     )
 
 
@@ -131,8 +133,12 @@ def main():
 
     print("--- Setup ---")
     print(f"Using JAX device: {jax.default_backend()} ({jax.devices()})")
-    print(f"Loading tokenizer (EleutherAI/gpt-neo-125M) …", flush=True)
-    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-125M")
+    tok_src = Config.custom_tokenizer_path if Config.use_custom_tokenizer else Config.tokenizer_name
+    print(f"Loading tokenizer ({tok_src}) …", flush=True)
+    if Config.use_custom_tokenizer:
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

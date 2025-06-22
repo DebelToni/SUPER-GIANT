@@ -9,7 +9,7 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 import jax.lax as lax
 
@@ -22,15 +22,20 @@ Config = OmegaConf.load("Config.yml")
 from GiantGPT import GiantGPT
 
 def build_model() -> GiantGPT:
+    if Config.use_custom_tokenizer:
+        tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+    else:
+        tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+
     return GiantGPT(
         # vocab_size=Config.vocab_size+1,
-        vocab_size = AutoTokenizer.from_pretrained(Config.tokenizer_name).vocab_size,
+        vocab_size=tok.vocab_size,
         context_length=Config.context_length,
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
         d_ff=Config.feed_forward_size,
         n_layers=Config.num_layers,
-        dropout_rate=0.0,  
+        dropout_rate=0.0,
     )
 
 def _numpy_or_jax_array(x):
@@ -194,7 +199,10 @@ def main():
 
     print("Building model…")
     model = build_model()
-    tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+    if Config.use_custom_tokenizer:
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 
     prompt_ids = preprocess_prompt(tokenizer, args.prompt, Config.context_length)
 

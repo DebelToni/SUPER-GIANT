@@ -44,7 +44,8 @@ def main():
 
     print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
     print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")
-    print(Config.num_epochs * len(train_tokens) // Config.batch_size, "total steps")
+    print(math.ceil(len(train_tokens) / Config.batch_size) * Config.num_epochs,
+          "total steps")
 
     model = GiantGPT(
         # vocab_size = Config.vocab_size,
@@ -79,10 +80,8 @@ def main():
     #     decay_steps=total_steps - 500,
     # )
 
-    # examples_per_epoch   = Config.train_tokens // Config.seq_len
-    examples_per_epoch   = train_tokens.size // Config.batch_size
-    steps_per_epoch      = math.ceil(examples_per_epoch / Config.batch_size)
-    total_steps          = steps_per_epoch * Config.num_epochs
+    steps_per_epoch = math.ceil(len(train_tokens) / Config.batch_size)
+    total_steps     = steps_per_epoch * Config.num_epochs
 
     assert total_steps > 0, "total_steps must be positive"
     assert total_steps > 500, (

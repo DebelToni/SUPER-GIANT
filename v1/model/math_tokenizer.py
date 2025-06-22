@@ -47,12 +47,16 @@ if __name__ == "__main__":
     tok = build_math_tokenizer()
     # Example usage
     # print(tok.encode("002 + 017 = 019").tokens)
-    print(tok.tokenize("002 + 017 = 019"))
-    print(tok.encode("002 + 017 = 019"))
-    for token in tok.get_vocab():
-        print(f"{token}: {tok.get_vocab()[token]}")
-    print("Pad token ID:", tok.pad_token_id)
-    print("EOS token ID:", tok.eos_token_id)
+    print(tok.tokenize("002 + 017 * 002 = 036"))
+    print(tok.encode("002 + 017 * 002 = 036"))
+    print(tok.tokenize("2 + 17 * 2 = 36"))
+    print(tok.encode("2 + 17 * 2 = 36"))
+    print(tok.tokenize("002+017*002=036"))
+    print(tok.encode("002+017*002=036"))
+    # for token in tok.get_vocab():
+    #     print(f"{token}: {tok.get_vocab()[token]}")
+    # print("Pad token ID:", tok.pad_token_id)
+    # print("EOS token ID:", tok.eos_token_id)
 
     # Save to disk for later loading via .from_pretrained()
     tok.save_pretrained("math_tokenizer_data")

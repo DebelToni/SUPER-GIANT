@@ -57,6 +57,25 @@ def load_rl_npz(path: Path, model_template: GiantGPT) -> dict:
              )
     return jax.tree_util.tree_unflatten(treedef, arrays)
 
+def load_stream_npy(path: Path, model_template: GiantGPT) -> dict:
+    arrays = []
+    with path.open("rb") as f:
+        while True:
+            try:
+                arrays.append(np.load(f, allow_pickle=False))
+            except (ValueError, OSError):   # EOF reached
+                break
+
+    if not arrays:
+        raise ValueError(f"No arrays found in {path}")
+
+    # rebuild tree-structure from a dummy init
+    dummy = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
+    treedef = jax.tree_util.tree_structure(
+        model_template.init(jax.random.PRNGKey(0), dummy)["params"]
+    )
+    return jax.tree_util.tree_unflatten(treedef, arrays)
+
 def load_checkpoint(path: Path):
     """Return a PyTree of JAX arrays living on *CPU* (device_put later)."""
     ext = path.suffix.lower()
@@ -212,10 +231,13 @@ def main():
     print("\nLoading checkpoint…")
     # params_cpu = load_checkpoint(args.checkpoint)
     if args.checkpoint.suffix == ".npz":
-        model_tmpl = build_model()                 # only needed to get the treedef
-        params_cpu = load_rl_npz(args.checkpoint, model_tmpl)
+        model_tmpl = build_model()
+        try:
+            params_cpu = load_rl_npz(args.checkpoint, model_tmpl)      # true .npz
+        except (KeyError, AttributeError):
+            params_cpu = load_stream_npy(args.checkpoint, model_tmpl)  # fallback
     else:
-        params_cpu = load_checkpoint(args.checkpoint)
+        params_cpu = load_checkpoint(args.checkpoint)                  # .pkl
 
     print("Building model…")
     model = build_model()

@@ -74,9 +74,15 @@ else:
 tokenizer = _tokenizer
 
 model = GiantGPT(
-    vocab_size=len(tokenizer),
-    **_cfg["model"],  # e.g. emb_dim, n_heads, n_layers, …
-)
+        # vocab_size = Config.vocab_size,
+        vocab_size = tokenizer.vocab_size,
+        context_length    = Config.context_length,
+        d_model    = Config.embedding_size,
+        n_heads    = Config.num_heads,
+        d_ff       = Config.feed_forward_size,
+        n_layers   = Config.num_layers,
+        dropout_rate = Config.dropout_rate,
+    )
 
 def init_model(rng: jax.random.PRNGKey):
     """Creates initial params (Flax FrozenDict)."""

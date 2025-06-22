@@ -69,6 +69,16 @@ def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
     # return variables.pop("params")  
     return variables["cache"]
 
+def preprocess_prompt_no_EOS(tokenizer, prompt: str, max_len: int):
+    ids = tokenizer.encode(prompt, add_special_tokens=False)
+
+    if ids and ids[-1] == tokenizer.eos_token_id:
+        ids = ids[:-1]
+
+    if len(ids) >= max_len:
+        ids = ids[-max_len:]
+    return np.array(ids, dtype="int32")
+
 def preprocess_prompt(tokenizer, prompt: str, max_len: int):
     ids = tokenizer(prompt, return_tensors="np").input_ids[0]
     if ids.shape[0] >= max_len:

@@ -33,8 +33,10 @@ from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
-from datasets import load_dataset
+
+from datasets import load_dataset, load_from_disk, DatasetDict
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
 from tqdm.auto import tqdm
 
 from omegaconf import OmegaConf
@@ -98,10 +100,20 @@ def _iter_windows(ds, ctx: int, stride: int):
 # ────────────────────────────────
 
 def _encode_stream(ctx: int, subset_pct: float) -> Tuple[List[Path], List[Path]]:
-    if Config.dataset_has_vendor:
-        ds = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train")
+    # if Config.dataset_has_vendor:
+    #     ds = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train")
+    # else:
+    #     ds = load_dataset(DATASET_NAME, split="train")
+    """Load dataset and encode to fixed windows."""
+    if Config.use_custom_dataset:
+        ds = load_from_disk(str(Config.dataset_path))
+        if isinstance(ds, DatasetDict):
+            ds = ds["train"]
     else:
-        ds = load_dataset(DATASET_NAME, split="train")
+        if Config.dataset_has_vendor:
+            ds = load_dataset(DATASET_VENDOR, DATASET_NAME, split="train")
+        else:
+            ds = load_dataset(DATASET_NAME, split="train")
     stride = max(1, int(ctx * STRIDE_FRAC))
 
     # optional subset

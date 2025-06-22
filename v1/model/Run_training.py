@@ -25,10 +25,7 @@ from Evaluate         import evaluate
 from Data_loader      import data_loader
 from Save_params      import save_params
 import numpy as np, time, pathlib, pickle, functools, math
-if Config.use_custom_dataset:
-    from prepare_my_dataset import get_data
-else:
-    from prepare_dataset  import get_data
+from prepare_dataset  import get_data
 
 def main():
     for k, v in Config.__dict__.items():

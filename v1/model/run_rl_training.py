@@ -65,7 +65,6 @@ SAVE_DIR.mkdir(exist_ok=True)
 # Helper: initialise model & optimiser
 # ---------------------------------------------------------------------------
 print("Building model…")
-tokenizer = MathTokenizer.load("math_tokenizer_data")
 if Config.use_custom_tokenizer:
     _tokenizer = PreTrainedTokenizerFast.from_pretrained(
         Config.custom_tokenizer_path

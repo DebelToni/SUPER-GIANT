@@ -107,7 +107,8 @@ params = init_model(rng)
 state = train_state.TrainState.create(
     apply_fn=model.apply,
     params=params,
-    tx=optax.adamw(LR, weight_decay=_cfg.get("weight_decay", 0.01)),
+    # tx=optax.adamw(LR, weight_decay=_cfg.get("weight_decay", 0.01)),
+    tx=optax.adamw(LR, weight_decay=RL_Config.weight_decay),
 )
 
 # Running baseline (moving average of recent rewards)

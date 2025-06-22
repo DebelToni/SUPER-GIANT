@@ -1,93 +1,80 @@
 # math_env.py
-"""Tiny environment for on‑the‑fly generation of simple arithmetic problems
-suitable for RL fine‑tuning.
+"""Tiny helper for RL-fine-tuning GiantGPT on arithmetic.
 
-The vocabulary in *math_tokenizer.py* can represent integers 0‒121 as three‑
-character zero‑padded tokens ("000" … "121") plus the operator tokens
-"+", "‑" and "*", and the equals sign "=".  To keep the answer always
-representable we restrict operands accordingly (for multiplication we cap
-factors at 11 because 11×11 = 121).
-
-Exports
--------
-sample_problem() → (expr: str, answer: int)
-    Returns a single expression such as "047 + 015 =" and its ground‑truth
-    result (62).
-
-sample_batch(batch_size: int) → (list[str], list[int])
-    Convenience wrapper that calls *sample_problem* `batch_size` times and
-    returns parallel lists of prompts and answers.
+Functions
+---------
+sample_problem()          -> (expr_str, truth_int)
+sample_batch(B)           -> (list[str], list[int])
+encode_batch(tok, exprs, ctx_len) -> list[list[int]]
 """
-from __future__ import annotations
 
-import operator
 import random
 from typing import List, Tuple
 
 # ---------------------------------------------------------------------------
-# Supported binary operators — must align with the tokenizer’s symbols
-# ---------------------------------------------------------------------------
-OPS = {
-    "+": operator.add,
-    "-": operator.sub,
-    "*": operator.mul,
-}
 
-# Precompute things that speed up sampling a bit
-_BINARY_OPS = list(OPS.keys())
-_MAX_SAFE_FACTOR = 11        # 11 * 11 <= 121 so product always valid
+_OPS = ["+", "-", "*"]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _format_number(n: int) -> str:
-    """Return *n* as a zero‑padded string of width 3 (000‒999)."""
-    return f"{n:03d}"
+def _draw_numbers(op: str) -> Tuple[int, int]:
+    """Pick two numbers so that the result ∈ [0, 121]."""
+    while True:
+        a = random.randint(0, 121)
+        b = random.randint(0, 121)
+        if op == "+" and a + b <= 121:
+            return a, b
+        if op == "-" and a - b >= 0:
+            return a, b
+        if op == "*":
+            # keep products small enough; try a few times
+            if a * b <= 121:
+                return a, b
 
 
 def sample_problem() -> Tuple[str, int]:
-    """Generate one valid arithmetic expression and its result.
+    """Return one valid expression and its ground-truth answer.
 
-    The function keeps drawing random operands/operators until the computed
-    answer is within the 0‒121 range inclusive.
+    Example:
+        "047 + 015 =" , 62
     """
-    while True:
-        op = random.choice(_BINARY_OPS)
+    op = random.choice(_OPS)
+    a, b = _draw_numbers(op)
 
-        if op == "*":            # keep products in range
-            a = random.randint(0, _MAX_SAFE_FACTOR)
-            b = random.randint(0, _MAX_SAFE_FACTOR)
-        else:                    # + or − can use the full range
-            a = random.randint(0, 121)
-            b = random.randint(0, 121)
+    if op == "+":
+        truth = a + b
+    elif op == "-":
+        truth = a - b
+    else:  # "*"
+        truth = a * b
 
-        result = OPS[op](a, b)
-        if 0 <= result <= 121:
-            expr = f"{_format_number(a)} {op} {_format_number(b)} ="
-            return expr, result
-        # else loop again – very cheap given tiny ranges
+    expr = f"{a:03d} {op} {b:03d} ="
+    return expr, truth
 
 
 def sample_batch(batch_size: int) -> Tuple[List[str], List[int]]:
-    """Vectorised wrapper around *sample_problem*.
-
-    Parameters
-    ----------
-    batch_size : int
-        Number of independent expressions to draw.
-
-    Returns
-    -------
-    exprs : list[str]
-        The prompts ready for tokenisation.
-    truths : list[int]
-        The ground‑truth answers aligned with *exprs*.
-    """
+    """Vectorised wrapper around *sample_problem()*."""
     exprs, truths = zip(*(sample_problem() for _ in range(batch_size)))
     return list(exprs), list(truths)
 
 
-__all__ = ["sample_problem", "sample_batch"]
+# ---------------------------------------------------------------------------
+# Token-helper --------------------------------------------------------------
+# ---------------------------------------------------------------------------
+def encode_batch(tokenizer, exprs: List[str], ctx_len: int) -> List[List[int]]:
+    """Tokenise & pad a batch of expressions to *ctx_len*.
+
+    The function is kept deliberately framework-agnostic: it returns a
+    nested Python list of ints.  The training script casts it to a JAX
+    array (`jnp.array(...)`) right afterwards.
+    """
+    pad_id = (
+        tokenizer.pad_token_id
+        if tokenizer.pad_token_id is not None
+        else 0  # fall-back for pad-less tokenisers
+    )
+
+    encoded = [
+        tokenizer.encode(expr, add_special_tokens=False)[:ctx_len] for expr in exprs
+    ]
+    return [seq + [pad_id] * (ctx_len - len(seq)) for seq in encoded]
 

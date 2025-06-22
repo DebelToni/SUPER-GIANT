@@ -20,7 +20,7 @@ from flax.core import FrozenDict
 
 import yaml
 
-from math_env import sample_batch
+from math_env import sample_batch, encode_batch
 from GiantGPT import GiantGPT
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
@@ -100,7 +100,7 @@ wall0 = time.time()
 
 for step in range(1, NUM_UPDATES + 1):
     expr_batch, truth_batch = sample_batch(BATCH_SIZE)
-    prompt_tokens = tokenizer.encode_batch(expr_batch, pad_to=CTX_LEN)
+    prompt_tokens = encode_batch(tokenizer, expr_batch, CTX_LEN)
     prompt_tokens = jnp.array(prompt_tokens, dtype=jnp.int32)
 
     rng, sub = jax.random.split(rng)

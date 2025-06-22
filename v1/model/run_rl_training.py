@@ -74,10 +74,21 @@ state = train_state.TrainState.create(
 
 baseline = jnp.array(0.0)
 
+# @functools.partial(jax.jit, static_argnums=(0,))
+# def get_next_token_logits(apply_fn, params: FrozenDict, tokens: jnp.ndarray):
+#     logits = apply_fn({"params": params}, tokens)
+#     return logits[:, -1, :]
+# # ─── utilities ────────────────────────────────────────────────────────────────
 @functools.partial(jax.jit, static_argnums=(0,))
-def get_next_token_logits(apply_fn, params: FrozenDict, tokens: jnp.ndarray):
-    logits = apply_fn({"params": params}, tokens)
+def get_next_token_logits(apply_fn,
+                          params: FrozenDict,
+                          tokens: jnp.ndarray):
+    # Disable dropout → no RNG required
+    logits = apply_fn({"params": params},
+                      tokens,
+                      deterministic=True)      #  ← NEW
     return logits[:, -1, :]
+
 
 @jax.jit
 def compute_loss_and_grads(params: FrozenDict,

@@ -1,0 +1,41 @@
+name: AI Review & Auto-merge
+on:
+  push:
+    branches: [testing]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0            # we need earlier SHA for diff
+        submodules: recursive     # pulls sub-repo at its current pointer
+
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Install deps
+      run: npm ci
+
+    - name: Run AI review
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        GITHUB_EVENT_AFTER:  ${{ github.event.after }}
+      run: node .github/ai-review.js
+
+    - name: Merge to production if PASS
+      if: success()               # only runs when previous step passed
+      env:
+        GH_TOKEN: ${{ secrets.GH_PAT }}
+      run: |
+        git config --global user.name  "ai-bot"
+        git config --global user.email "bot@example.com"
+        git checkout production
+        git merge --no-ff $GITHUB_SHA -m "Auto-merge: $GITHUB_SHA"
+        git push origin production
+

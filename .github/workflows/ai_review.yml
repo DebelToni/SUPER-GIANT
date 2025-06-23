@@ -15,7 +15,7 @@ jobs:
 
       # … your install & AI-review steps …
 
-      - name: Merge to production if PASS
+      - name: Merge to approved if PASS
         if: success()
         env:
           GH_PAT: ${{ secrets.GH_PAT }}     # make it available to the script
@@ -28,6 +28,6 @@ jobs:
           git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}.git
 
           # merge & push
-          git checkout production
+          git checkout approved 
           git merge --no-ff $GITHUB_SHA -m "Auto-merge: $GITHUB_SHA"
-          git push origin production
+          git push origin approved

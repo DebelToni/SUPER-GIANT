@@ -35,7 +35,7 @@ ${diff}
 // 4. Call the model
 const openai = new OpenAI();
 const resp = await openai.chat.completions.create({
-  model: 'gpt-4o-mini',
+  model: 'gpt-4.1-mini',
   temperature: 0,
   messages: [{ role: 'system', content: system },
              { role: 'user',   content: user   }],

@@ -53,23 +53,45 @@ form.addEventListener("submit", async (e) => {
 });
 
 // SSE -----------------------------------------------------------------------
-function listen(job_id) {
-  es = new EventSource(`${apiBase}/events/${job_id}`);
+// function listen(job_id) {
+//   es = new EventSource(`${apiBase}/events/${job_id}`);
+//
+//   es.addEventListener("message", (evt) => {
+//     if (evt.data.endsWith("\r")) {          // progress update
+//       replaceLast(evt.data.replace(/\r$/, ""));
+//     } else {
+//       print(evt.data);
+//       if (!evt.data.endsWith("\n")) print("\n");
+//     }
+//   });
+//
+//   es.addEventListener("done", () => {
+//     cancel.disabled = true;
+//     es.close();
+//   });
+// }
 
-  es.addEventListener("message", (evt) => {
-    if (evt.data.endsWith("\r")) {          // progress update
-      replaceLast(evt.data.replace(/\r$/, ""));
-    } else {
-      print(evt.data);
-      if (!evt.data.endsWith("\n")) print("\n");
-    }
-  });
+// swap EventSource for fetch + stream
+async function listen(jobId) {
+  const res = await fetch(
+    `${apiBase}/events/${jobId}`,
+    { headers: { "ngrok-skip-browser-warning": "true" } }
+  );
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
 
-  es.addEventListener("done", () => {
-    cancel.disabled = true;
-    es.close();
-  });
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop();                // keep incomplete chunk
+    for (const line of lines) print(line + "\n");
+  }
+  cancel.disabled = true;
 }
+
 
 // Cancel --------------------------------------------------------------------
 cancel.addEventListener("click", async () => {

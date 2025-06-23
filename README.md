@@ -181,3 +181,4 @@ else:
 ## Summary
 
 The current implementation defines a lightweight GPT‑style model in Flax/JAX with rotary attention, multi‑query keys/values, SiLU‑gated feed‑forwards, RMSNorm and a tied embedding projection. Training uses AdamW with a warmup‑cosine schedule and mixed precision (`bfloat16` compute with `float32` parameters). Inference relies on a cache of full‑length key/value tensors and can stream tokens efficiently via a JIT‑compiled step function.
+// safe change

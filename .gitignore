@@ -10,3 +10,5 @@ testing/
 logs/
 # *.pub
 id_rsa
+node_modules/
+.env

@@ -72,25 +72,67 @@ form.addEventListener("submit", async (e) => {
 // }
 
 // swap EventSource for fetch + stream
+// ------------------------------------------------------------
+// Replace your previous listen() with this version
+// ------------------------------------------------------------
 async function listen(jobId) {
-  const res = await fetch(
-    `${apiBase}/events/${jobId}`,
-    { headers: { "ngrok-skip-browser-warning": "true" } }
-  );
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder("utf-8");
+  // Ask ngrok to skip the warning page
+  const res = await fetch(`${apiBase}/events/${jobId}`, {
+    headers: { "ngrok-skip-browser-warning": "true" }
+  });
 
-  let buffer = "";
+  // Plain-text streaming reader
+  const reader   = res.body.getReader();
+  const decoder  = new TextDecoder();
+  let   buf      = "";
+  let   evtData  = "";          // accumulates multiline data: fields
+  let   evtType  = "message";   // default SSE event type
+
+  cancel.disabled = false;
+
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop();                // keep incomplete chunk
-    for (const line of lines) print(line + "\n");
+
+    buf += decoder.decode(value, { stream: true });
+
+    // Process one line at a time (SSE is line-delimited UTF-8)
+    let nl;
+    while ((nl = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, nl).trimEnd(); // remove trailing \r
+      buf        = buf.slice(nl + 1);          // remainder
+
+      if (line === "") {
+        // Blank line finishes the current event ------------- //
+        if (evtType === "done") {
+          cancel.disabled = true;
+          return;             // finished, close stream
+        }
+
+        if (evtData) {
+          print(evtData + "\n");
+          evtData = "";
+        }
+        evtType = "message";  // reset for next event
+        continue;
+      }
+
+      // Ignore curl-style progress or anything that isn't SSE
+      if (line.startsWith("% ") || /^\d+\s+\d+/.test(line)) continue;
+
+      // Parse a field --------------------------------------- //
+      if (line.startsWith("data:")) {
+        evtData += line.slice(5).trimStart() + "\n";
+      } else if (line.startsWith("event:")) {
+        evtType = line.slice(6).trimStart();
+      }
+      // You can add handling for id:, retry:, etc. if needed
+    }
   }
-  cancel.disabled = true;
+
+  cancel.disabled = true;      // safety
 }
+
 
 
 // Cancel --------------------------------------------------------------------

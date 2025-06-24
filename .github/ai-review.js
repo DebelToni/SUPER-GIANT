@@ -155,7 +155,7 @@ Otherwise respond with:
 \`\`\``
         }
       ],
-      response_format: { type: 'json_schema', json_schema }
+      response_format: { type: 'json_schema', json_schema: jsonSchema }
     });
 
     /* ---------------- inspect + act on reply ----------- */

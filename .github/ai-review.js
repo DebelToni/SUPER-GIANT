@@ -27,6 +27,10 @@ import { zodToJsonSchema } from 'zod-to-json-schema';   // npm i zod zod-to-json
     }).strict();
 
     // 4‒ Fire the request using the Structured-Outputs API
+	const jsonSchema = {
+			name: 'ai_review_verdict',
+			...zodToJsonSchema(Verdict)   // converts Zod → JSON-Schema Draft-2020-12
+	};
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const resp = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',          // 06-2025 default, lowest latency
@@ -48,9 +52,10 @@ if the code of this diff seems wrong, inconsistant or wrong syntax, return the j
       ],
       response_format: {
         type: 'json_schema',
-        json_schema: zodToJsonSchema(Verdict)   // converts Zod → JSON-Schema Draft-2020-12
+		json_schema: jsonSchema
       }
     });
+
 	console.log('----RESPONSE START----');
 	console.log(resp.choices[0].message.content);
 	console.log('----RESPONSE END----');

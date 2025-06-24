@@ -136,7 +136,7 @@ If the code of this diff seems wrong, inconsistent or wrong syntax, return the J
       ],
       response_format: {
         type: 'json_schema',
-        jsonSchema                       // <-- correct key & structure
+        json_schema: jsonSchema                       // <-- correct key & structure
       }
     });
 

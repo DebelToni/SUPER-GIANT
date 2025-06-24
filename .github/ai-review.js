@@ -32,7 +32,9 @@ import { zodToJsonSchema } from 'zod-to-json-schema';   // npm i zod zod-to-json
         { role: 'system', content: 'You are a meticulous senior engineer. ' +
           'Return a JSON object that satisfies the provided schema ­— nothing else.' },
         { role: 'user', content: `Project context:
-<static docs go here>
+This project is a python backend for LLM training, inference and visualization. There is a backend server under server/ that managest the commands and initializes any training or generation. Under ui/ there is a fronend that visualizes the process and the commands for a user to use the architecture from a remote browser. 
+
+The core of the model is written in python using JAX. The model has custom syntethic datadeneration, KV caching at inference, RL workflow and much more in coresponding scripts.
 
 Diff under review:
 \`\`\`diff

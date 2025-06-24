@@ -16,6 +16,9 @@ import { zodToJsonSchema } from 'zod-to-json-schema';   // npm i zod zod-to-json
     const diff = fullDiff.length > MAX_CHARS
       ? `${fullDiff.slice(0, MAX_CHARS)}\n\n--- DIFF TRUNCATED ---`
       : fullDiff;
+	console.log('----DIF START----');
+	console.log(diff);
+	console.log('----DIF END----');
 
     // 3‒ Single-field schema describing the only answer we accept
     const Verdict = z.object({
@@ -48,6 +51,9 @@ if the code of this diff seems wrong, inconsistant or wrong syntax, return the j
         schema: zodToJsonSchema(Verdict)   // converts Zod → JSON-Schema Draft-2020-12
       }
     });
+	console.log('----RESPONSE START----');
+	console.log(resp.choices[0].message.content);
+	console.log('----RESPONSE END----');
 
     // 5‒ Strictly parse the answer and act on it
     const { verdict } = Verdict.parse(JSON.parse(resp.choices[0].message.content));

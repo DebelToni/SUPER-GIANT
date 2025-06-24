@@ -19,6 +19,8 @@
   "homepage": "https://github.com/DebelToni/SUPER-GIANT#readme",
   "dependencies": {
     "@actions/core": "^1.11.1",
-    "openai": "^5.7.0"
+    "openai": "^5.7.0",
+    "zod": "^3.25.67",
+    "zod-to-json-schema": "^3.24.5"
   }
 }

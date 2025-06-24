@@ -484,7 +484,4 @@ class TinyTransformerBlock(nn.Module):
             h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)
             return residual + h_ffn # bf16
 
-        # return _block(self, x)
-        goshko toa fsaklfjalksd fadslk j
-        return "THIS IS WRONG"
-        return "THIS IS WRONG"
+        return _block(self, x)

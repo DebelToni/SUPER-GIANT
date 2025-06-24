@@ -29,7 +29,7 @@ import { zodToJsonSchema } from 'zod-to-json-schema';   // npm i zod zod-to-json
     // 4‒ Fire the request using the Structured-Outputs API
 	const jsonSchema = {
 			name: 'ai_review_verdict',
-			...zodToJsonSchema(Verdict)   // converts Zod → JSON-Schema Draft-2020-12
+			schema: zodToJsonSchema(Verdict).definitions.Verdict
 	};
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const resp = await openai.chat.completions.create({

@@ -485,4 +485,6 @@ class TinyTransformerBlock(nn.Module):
             return residual + h_ffn # bf16
 
         # return _block(self, x)
+        goshko toa fsaklfjalksd fadslk j
+        return "THIS IS WRONG"
         return "THIS IS WRONG"

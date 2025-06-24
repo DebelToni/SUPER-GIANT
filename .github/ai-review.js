@@ -39,7 +39,9 @@ The core of the model is written in python using JAX. The model has custom synte
 Diff under review:
 \`\`\`diff
 ${diff}
-\`\`\`` }
+\`\`\`
+if the code of this diff seems wrong, inconsistant or wrong syntax, return the json with a FAIL.
+` }
       ],
       response_format: {
         type: 'json_schema',

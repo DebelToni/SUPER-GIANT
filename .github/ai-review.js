@@ -39,7 +39,9 @@ The core of the model is written in python using JAX. The model has custom synte
 Diff under review:
 \`\`\`diff
 ${diff}
-\`\`\`` }
+\`\`\`
+if the code of this diff seems wrong, inconsistant or wrong syntax, return the json with a FAIL.
+` }
       ],
       response_format: {
         type: 'json_schema',
@@ -50,6 +52,7 @@ ${diff}
     // 5‒ Strictly parse the answer and act on it
     const { verdict } = Verdict.parse(JSON.parse(resp.choices[0].message.content));
     core.notice(`Model verdict: ${verdict}`);
+	console.log(`Model verdict: ${verdict}`);
     if (verdict !== 'PASS') {
       core.setFailed('AI review failed.');
       process.exit(1);

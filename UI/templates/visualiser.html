@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Training Log Visualizer (Canvas)</title>
+  <!-- Quick styling with Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Give every chart a consistent height */
+    canvas { height: 360px !important; width: 100% !important; }
+  </style>
+</head>
+<body class="min-h-screen bg-gray-50 text-gray-800 p-6">
+  <h1 class="text-3xl font-bold mb-6">Training Log Visualizer (Pure Canvas)</h1>
+
+  <!-- File picker (manual) -->
+  <div class="mb-8">
+    <label class="block font-semibold mb-2" for="fileInput">Choose a <code>.txt</code> log file:</label>
+    <input id="fileInput" type="file" accept=".txt" class="block w-full file:mr-4 file:py-2 file:px-4 file:border-0 file:rounded-lg file:bg-indigo-600 file:text-white file:cursor-pointer" />
+  </div>
+
+  <!-- Summary cards -->
+  <div id="summary" class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-10"></div>
+
+  <!-- Two canvases for Loss and Perplexity -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+    <div class="bg-white shadow rounded-2xl p-4"><canvas id="chartLoss"></canvas></div>
+    <div class="bg-white shadow rounded-2xl p-4"><canvas id="chartPPL"></canvas></div>
+  </div>
+
+<script>
+/************************** Helper utilities ***************************/
+const intClean = (s) => parseInt(s.replace(/,/g, ''), 10);
+
+function renderSummary(s) {
+  const card = (t, v) => `<div class="p-4 bg-white rounded-2xl shadow"><p class="font-semibold">${t}</p><p>${v}</p></div>`;
+  document.getElementById('summary').innerHTML = `
+    ${card('Dataset fraction', s.datasetPct ? `${s.datasetPct}% (${s.datasetLines.toLocaleString()} lines)` : '–')}
+    ${card('Batches', s.trainBatches ? `Train ${s.trainBatches.toLocaleString()} / Val ${s.valBatches.toLocaleString()}` : '–')}
+    ${card('Tokens shape', s.trainTokens ? `Train ${s.trainTokens.toLocaleString()} × 257<br>Val ${s.valTokens.toLocaleString()} × 257` : '–')}
+    ${card('Total steps', s.totalSteps ? s.totalSteps.toLocaleString() : '–')}
+    ${card('Epochs', s.epochs ?? '–')}
+    ${card('Batch size', s.batchSize ?? '–')}
+  `;
+}
+
+/************************** Canvas chart ******************************/
+function drawLineChart(canvasId, xVals, yVals, label) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth * dpr;
+  const h = canvas.clientHeight * dpr;
+  canvas.width = w; canvas.height = h;
+
+  ctx.clearRect(0, 0, w, h);
+  const margin = { left: 50, top: 20, right: 20, bottom: 40 };
+  const plotW = w - margin.left - margin.right;
+  const plotH = h - margin.top - margin.bottom;
+
+  const minX = Math.min(...xVals);
+  const maxX = Math.max(...xVals);
+  const minY = Math.min(...yVals);
+  const maxY = Math.max(...yVals);
+
+  // Axes
+  ctx.strokeStyle = '#4B5563'; // gray-600
+  ctx.lineWidth = 1 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(margin.left, margin.top);
+  ctx.lineTo(margin.left, margin.top + plotH);
+  ctx.lineTo(margin.left + plotW, margin.top + plotH);
+  ctx.stroke();
+
+  ctx.fillStyle = '#4B5563';
+  ctx.font = `${12 * dpr}px sans-serif`;
+  ctx.textAlign = 'center';
+
+  // X ticks
+  const xTicks = 5;
+  for (let i = 0; i <= xTicks; i++) {
+    const t = minX + ((maxX - minX) * i) / xTicks;
+    const x = margin.left + ((t - minX) / (maxX - minX)) * plotW;
+    ctx.beginPath();
+    ctx.moveTo(x, margin.top + plotH);
+    ctx.lineTo(x, margin.top + plotH + 5 * dpr);
+    ctx.stroke();
+    ctx.fillText(Math.round(t), x, margin.top + plotH + 18 * dpr);
+  }
+
+  // Y ticks
+  ctx.textAlign = 'right';
+  const yTicks = 5;
+  for (let i = 0; i <= yTicks; i++) {
+    const t = minY + ((maxY - minY) * i) / yTicks;
+    const y = margin.top + plotH - ((t - minY) / (maxY - minY)) * plotH;
+    ctx.beginPath();
+    ctx.moveTo(margin.left - 5 * dpr, y);
+    ctx.lineTo(margin.left, y);
+    ctx.stroke();
+    ctx.fillText(t.toFixed(2), margin.left - 8 * dpr, y + 4 * dpr);
+  }
+
+  // Line path
+  ctx.strokeStyle = '#6366F1'; // indigo-500
+  ctx.lineWidth = 2 * dpr;
+  ctx.beginPath();
+  xVals.forEach((xVal, idx) => {
+    const x = margin.left + ((xVal - minX) / (maxX - minX)) * plotW;
+    const y = margin.top + plotH - ((yVals[idx] - minY) / (maxY - minY)) * plotH;
+    if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Y-axis label
+  ctx.save();
+  ctx.translate(15 * dpr, margin.top + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.font = `${14 * dpr}px sans-serif`;
+  ctx.fillText(label, 0, 0);
+  ctx.restore();
+}
+
+/************************** Parser ************************************/
+function parseLog(raw) {
+  const s = {};
+  const ds = raw.match(/Using\s+([0-9.]+)%\s*(?:→|->)\s*([\d,]+)\s+lines/i);
+  if (ds) { s.datasetPct = +ds[1]; s.datasetLines = intClean(ds[2]); }
+  const b = raw.match(/train batches:\s*(\d+)\s+val batches:\s*(\d+)/i);
+  if (b) { s.trainBatches = +b[1]; s.valBatches = +b[2]; }
+  const t = raw.match(/train_tokens shape:\s*\((\d+),\s*\d+\).*?val_tokens shape:\s*\((\d+),\s*\d+\)/is);
+  if (t) { s.trainTokens = +t[1]; s.valTokens = +t[2]; }
+  const ts = raw.match(/(\d+)\s+total steps/i);
+  if (ts) s.totalSteps = +ts[1];
+  const tr = raw.match(/Training for\s+(\d+)\s+epochs? with\s+(\d+)\s+batch size/i);
+  if (tr) { s.epochs = +tr[1]; s.batchSize = +tr[2]; }
+  renderSummary(s);
+
+  const re = /step\s+(\d+)\s+out of[^|]+\|\s+loss\s+([0-9.]+)\s+ppl\s+([0-9.]+)/gi;
+  const steps = [], losses = [], ppls = [];
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    steps.push(+m[1]); losses.push(+m[2]); ppls.push(+m[3]);
+  }
+  if (!steps.length) {
+    alert('No step/loss/ppl lines found – check log format.');
+    return;
+  }
+
+  drawLineChart('chartLoss', steps, losses, 'Loss');
+  drawLineChart('chartPPL', steps, ppls, 'Perplexity');
+}
+
+/************************** File Handling *****************************/
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => parseLog(evt.target.result);
+  reader.readAsText(file);
+});
+
+async function autoLoad() {
+  try {
+    const res = await fetch('log.txt', { cache: 'no-store' });
+    if (!res.ok) throw new Error();
+    const txt = await res.text();
+    parseLog(txt);
+  } catch {}
+}
+window.addEventListener('load', autoLoad);
+</script>
+</body>
+</html>

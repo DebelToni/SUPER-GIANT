@@ -110,7 +110,8 @@ async function listen(jobId) {
         }
 
         if (evtData) {
-          print(evtData + "\n");
+          // print(evtData + "\n");
+          print(evtData);
           evtData = "";
         }
         evtType = "message";  // reset for next event

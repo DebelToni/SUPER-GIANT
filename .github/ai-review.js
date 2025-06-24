@@ -48,7 +48,7 @@ if the code of this diff seems wrong, inconsistant or wrong syntax, return the j
       ],
       response_format: {
         type: 'json_schema',
-        schema: zodToJsonSchema(Verdict)   // converts Zod → JSON-Schema Draft-2020-12
+        json_schema: zodToJsonSchema(Verdict)   // converts Zod → JSON-Schema Draft-2020-12
       }
     });
 	console.log('----RESPONSE START----');

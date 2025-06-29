@@ -181,36 +181,78 @@ class TinyTransformerBlock(nn.Module):
 # d_model / n_heads / d_ff / dropout_rate can come from Config
 # (or pass them in directly if you prefer).
 
+# @functools.partial(
+#     jax.jit,
+#     # static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
+#     static_argnames=("deterministic", "enable_kv_cache"),
+# )
+# def transformer_block_apply(
+#     params,
+#     x: jnp.ndarray,
+#     *,
+#     rng,
+#     deterministic: bool,
+#     enable_kv_cache: bool = False,
+#     cur_index: Optional[int] = None,
+# ):
+#     """Forward pass for TinyTransformerBlock, compiled once with XLA.
+#
+#     Static argnames prevent needless recompiles when only batch data or RNGs
+#     change between calls.
+#     """
+#     return TinyTransformerBlock(
+#         d_model=Config.embedding_size,
+#         n_heads=Config.num_heads,
+#         d_ff=Config.feed_forward_size,
+#         dropout_rate=Config.dropout_rate,
+#         dtype=Config.compute_dtype,
+#     ).apply(
+#         {"params": params},
+#         x,
+#         deterministic=deterministic,
+#         enable_kv_cache=enable_kv_cache,
+#         cur_index=cur_index,
+#         rngs={"dropout": rng},
+#     )
+# Transformer_block.py
 @functools.partial(
     jax.jit,
-    # static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
-    static_argnames=("deterministic", "enable_kv_cache"),
+    static_argnames=("deterministic", "enable_kv_cache")  # cur_index NOT static
 )
 def transformer_block_apply(
     params,
-    x: jnp.ndarray,
+    cache,                  # ← NEW
+    x,
     *,
-    rng,
+    rng=None,
     deterministic: bool,
     enable_kv_cache: bool = False,
     cur_index: Optional[int] = None,
 ):
-    """Forward pass for TinyTransformerBlock, compiled once with XLA.
+    # build variables dict
+    variables = {"params": params}
+    if cache is not None:                # may be None during training
+        variables["cache"] = cache
 
-    Static argnames prevent needless recompiles when only batch data or RNGs
-    change between calls.
-    """
-    return TinyTransformerBlock(
+    rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
+
+    y, mutated = TinyTransformerBlock(          # *single layer*
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
         d_ff=Config.feed_forward_size,
         dropout_rate=Config.dropout_rate,
         dtype=Config.compute_dtype,
+        name="layer",                           # name is irrelevant here
     ).apply(
-        {"params": params},
+        variables,
         x,
         deterministic=deterministic,
         enable_kv_cache=enable_kv_cache,
         cur_index=cur_index,
-        rngs={"dropout": rng},
+        mutable=["cache"],                     # ask for updated cache
+        # **rng_kw
+        rngs=rng_kw.get("rngs", {})  # pass rngs if available
     )
+
+    return y, mutated["cache"]                 # return outputs & new cache
+

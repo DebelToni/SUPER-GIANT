@@ -15,7 +15,7 @@ def train_step(params, opt_state, batch, *, model, optimizer, dropout_rng):
         loss = (loss * batch["mask"]).sum() / batch["mask"].sum()
         return loss
 
-    (loss, grads) = jax.value_and_grad(loss_fn)(params)
+    (loss, grads) = jax.value_and_grad(loss_fn)(params, rng=dropout_rng)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
     return new_params, opt_state, loss

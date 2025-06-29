@@ -65,10 +65,11 @@ def main():
     # Monkey-patch model.apply to use the JIT-compiled forward pass
     # ------------------------------------------------------------------
     def _apply_jitted(variables, tokens, *, deterministic=False,
-                      enable_kv_cache=False, cur_index=None):
+                      enable_kv_cache=False, cur_index=None, rng=None):
         return giant_gpt_apply(
             variables["params"],
             tokens,
+            rng=rng,
             deterministic=deterministic,
             enable_kv_cache=enable_kv_cache,
             cur_index=cur_index,

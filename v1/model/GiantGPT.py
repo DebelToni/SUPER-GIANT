@@ -70,10 +70,12 @@ class GiantGPT(nn.Module):
                                         f"layer_{idx}",
                                         layer_params)
 
+            layer_rng = self.make_rng("dropout")
             # Apply the JIT-compiled transformer block
             x = transformer_block_apply(
                 layer_params,
                 x,
+                rng=layer_rng,
                 deterministic=deterministic,
                 enable_kv_cache=enable_kv_cache,
                 cur_index=cur_index,
@@ -98,6 +100,7 @@ class GiantGPT(nn.Module):
 def giant_gpt_apply(params,
                     tokens,
                     *,
+                    rng,
                     deterministic: bool = False,
                     enable_kv_cache: bool = False,
                     cur_index: Optional[int] = None):
@@ -116,5 +119,6 @@ def giant_gpt_apply(params,
         deterministic=deterministic,
         enable_kv_cache=enable_kv_cache,
         cur_index=cur_index,
+        rngs={"dropout": rng},
     )
 

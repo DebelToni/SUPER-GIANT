@@ -105,8 +105,13 @@ def giant_gpt_apply(params,
                     enable_kv_cache: bool = False,
                     cur_index: Optional[int] = None):
     """Compiled forward pass for GiantGPT."""
+    if Config.use_custom_tokenizer:
+        tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+    else:
+        tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+
     return GiantGPT(
-        vocab_size=Config.vocab_size,
+        vocab_size=tok.vocab_size,
         context_length=Config.context_length,
         d_model=Config.d_model,
         n_heads=Config.n_heads,

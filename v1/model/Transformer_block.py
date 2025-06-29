@@ -199,9 +199,9 @@ def transformer_block_apply(
     change between calls.
     """
     return TinyTransformerBlock(
-        d_model=Config.d_model,
-        n_heads=Config.n_heads,
-        d_ff=Config.d_ff,
+        d_model=Config.embedding_size
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
         dropout_rate=Config.dropout_rate,
         dtype=Config.compute_dtype,
     ).apply(

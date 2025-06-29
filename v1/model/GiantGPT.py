@@ -96,21 +96,24 @@ class GiantGPT(nn.Module):
         )
         return logits
 
-
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
+    static_argnames=("deterministic", "enable_kv_cache"),  # cur_index NOT static
 )
-def giant_gpt_apply(params,
-                    tokens,
-                    *,
-                    rng = None,
-                    deterministic: bool = False,
-                    enable_kv_cache: bool = False,
-                    cur_index: Optional[int] = None):
-
+def giant_gpt_apply(
+    params,
+    cache,                   # ← NEW positional arg
+    tokens,
+    *,                       # keyword-only from here
+    rng=None,
+    deterministic: bool = False,
+    enable_kv_cache: bool = False,
+    cur_index: Optional[int] = None,
+):
+    # ── 1. Get vocab size (unchanged) ───────────────────────────
     if Config.use_custom_tokenizer:
-        tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+        tok = PreTrainedTokenizerFast.from_pretrained(
+            Config.custom_tokenizer_path)
     else:
         tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 
@@ -124,32 +127,24 @@ def giant_gpt_apply(params,
         dropout_rate=Config.dropout_rate,
     )
 
-    # extra_kwargs = {}
-    # if rng is not None:
-    #     extra_kwargs["rngs"] = {"dropout": rng}
-    #
-    # return model.apply(
-    #     {"params": params},
-    #     tokens,
-    #     deterministic=deterministic,
-    #     enable_kv_cache=enable_kv_cache,
-    #     cur_index=cur_index,
-    #     **extra_kwargs,
-    # )
-    apply_kwargs = {
-        "params": params,
-        "tokens": tokens,
-        "deterministic": deterministic,
-        "enable_kv_cache": enable_kv_cache,
-        "cur_index": cur_index,
-    }
-    if rng is not None:
-        apply_kwargs["rngs"] = {"dropout": rng}
+    # ── 2. Build *variables* dict (params [+ cache]) ────────────
+    variables = {"params": params}
+    if cache is not None:               # inference path
+        variables["cache"] = cache
 
-    # ← add mutable=["cache"] so Flax returns the updated cache collection
-    outputs, mutated_vars = model.apply(
-        **apply_kwargs,
-        mutable=["cache"],
+    # ── 3. Optional RNGs dict ───────────────────────────────────
+    rngs_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
+
+    # ── 4. Call model.apply; ask it to return updated cache ────
+    logits, mutated = model.apply(
+        variables,
+        tokens,                         # ← POSitional arg
+        deterministic=deterministic,
+        enable_kv_cache=enable_kv_cache,
+        cur_index=cur_index,
+        mutable=["cache"],              # get new cache back
+        **rngs_kw,
     )
-    # mutated_vars["cache"] is the new cache
-    return outputs, mutated_vars["cache"]
+
+    return logits, mutated["cache"]
+

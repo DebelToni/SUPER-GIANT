@@ -68,6 +68,7 @@ def main():
                       enable_kv_cache=False, cur_index=None, rng=None):
         return giant_gpt_apply(
             variables["params"],
+            None,
             tokens,
             rng=rng,
             deterministic=deterministic,

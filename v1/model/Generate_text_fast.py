@@ -20,7 +20,7 @@ from functools import partial
 from omegaconf import OmegaConf
 Config = OmegaConf.load("Config.yml")
 
-from GiantGPT import GiantGPT
+from GiantGPT import GiantGPT, giant_gpt_apply  # ← import the JIT helper
 
 def build_model() -> GiantGPT:
     if Config.use_custom_tokenizer:
@@ -66,7 +66,6 @@ def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
         decode=True,
         cur_index=jnp.array(0, jnp.int32),
     )
-    # return variables.pop("params")  
     return variables["cache"]
 
 def preprocess_prompt_no_EOS(tokenizer, prompt: str, max_len: int):
@@ -85,45 +84,39 @@ def preprocess_prompt(tokenizer, prompt: str, max_len: int):
         ids = ids[-max_len:]
     return ids.astype("int32")
 
-def make_step_fn(model: GiantGPT, temperature: float, top_k: Optional[int]):
-    """Returns a *pure* JIT‑able step function closed over params/constants."""
+def make_step_fn(temperature: float, top_k: Optional[int]):
+    """Returns a *pure* JIT-able step function closed over params/constants."""
 
-    # @jax.jit(donate_argnums=(1,))  
     @partial(jax.jit, donate_argnums=(1,))
     def step_fn(
         params: dict,
         cache: dict,
-        prev_token: jnp.ndarray,  
-        cur_index: jnp.ndarray,   
+        prev_token: jnp.ndarray,
+        cur_index: jnp.ndarray,
         rng: jax.random.KeyArray,
     ):
-
-        logits, new_vars = model.apply(
-            {"params": params, "cache": cache},
+        # ← call the JIT-compiled model helper instead of model.apply
+        logits, cache = giant_gpt_apply(
+            params,
+            cache,
             prev_token,
             deterministic=True,
-            # decode=True,
-            use_kv_cache=True,
+            enable_kv_cache=True,
             cur_index=cur_index,
-            rngs={"dropout": rng},  
-            mutable=["cache"],
+            rng=rng,
         )
-        cache = new_vars["cache"]
-        logits = logits[:, 0]  
+        logits = logits[:, 0]
 
         if temperature == 0.0:
             next_token = jnp.argmax(logits, axis=-1)
         else:
             logits = logits / temperature
-            # if top_k is not None and top_k > 0:
-            #     kth = jnp.sort(logits, axis=-1)[:, -top_k][:, None]
-            #     logits = jnp.where(logits < kth, -jnp.inf, logits)
             if top_k and top_k > 0:
                 values, _ = jax.lax.top_k(logits, top_k)
                 kth = values[:, -1][:, None]
                 logits = jnp.where(logits < kth, -jnp.inf, logits)
             next_token = jax.random.categorical(rng, logits, axis=-1)
-        next_token = next_token.astype(jnp.int32)[:, None]  
+        next_token = next_token.astype(jnp.int32)[:, None]
         return next_token, cache
 
     return step_fn
@@ -132,7 +125,7 @@ def generate(
     params: dict,
     model: GiantGPT,
     tokenizer,
-    prompt_ids: jnp.ndarray,  
+    prompt_ids: jnp.ndarray,
     max_new_tokens: int,
     temperature: float,
     top_k: Optional[int],
@@ -141,16 +134,15 @@ def generate(
     params = jax.tree_util.tree_map(lambda x: jax.device_put(x, device), params)
 
     cache = init_caches(model, params)
-
-    tokens = prompt_ids[None, :]  
+    tokens = prompt_ids[None, :]
     rng = jax.random.PRNGKey(42)
 
-    step_fn = make_step_fn(model, temperature, top_k)
+    step_fn = make_step_fn(temperature, top_k)  # ← no model capture
 
     if tokens.shape[1] > 1:
         def warm_body(state, token_and_idx):
             cache, _ = state
-            tok, idx = token_and_idx  
+            tok, idx = token_and_idx
             _, cache = step_fn(params, cache, tok[None, None], idx, rng)
             return (cache, None), None
 
@@ -164,26 +156,19 @@ def generate(
 
     pad_len = max_new_tokens
     max_len = tokens.shape[1] + pad_len
-    tokens = jnp.pad(tokens, ((0, 0), (0, pad_len)))  
+    tokens = jnp.pad(tokens, ((0, 0), (0, pad_len)))
 
     def generation_body(state, _):
         tokens_buf, cache, rng, idx = state
         rng, step_rng = jax.random.split(rng)
 
-        # prev_token = tokens_buf[:, idx-1:idx]  
-        prev_token = lax.dynamic_slice_in_dim(tokens_buf, idx - 1, 1, axis=1)  # (1,1)
-
-        # next_token, cache = step_fn(params, cache, prev_token, idx-1, step_rng)
-        next_token, cache = step_fn(params, cache, prev_token, idx - 1, step_rng)  # (1,1)
-
-        # tokens_buf = tokens_buf.at[:, idx].set(next_token.squeeze(1))
+        prev_token = lax.dynamic_slice_in_dim(tokens_buf, idx - 1, 1, axis=1)
+        next_token, cache = step_fn(params, cache, prev_token, idx - 1, step_rng)
         tokens_buf = lax.dynamic_update_slice(tokens_buf, next_token, (0, idx))
 
         return (tokens_buf, cache, rng, idx + 1), None
 
     start_idx = jnp.array(tokens.shape[1] - pad_len, dtype=jnp.int32)
-
-    # init_state = (tokens, cache, rng, tokens.shape[1] - pad_len + 1)
     init_state = (tokens, cache, rng, start_idx)
     (tokens, _, _, _), _ = jax.lax.scan(
         generation_body,
@@ -192,7 +177,10 @@ def generate(
         length=max_new_tokens,
     )
 
-    return tokenizer.decode(tokens[0, :tokens.shape[1]-pad_len + max_new_tokens], skip_special_tokens=True)
+    return tokenizer.decode(
+        tokens[0, : tokens.shape[1] - pad_len + max_new_tokens],
+        skip_special_tokens=True,
+    )
 
 def main():
     ap = argparse.ArgumentParser()
@@ -218,7 +206,7 @@ def main():
 
     prompt_ids = preprocess_prompt(tokenizer, args.prompt, Config.context_length)
 
-    print("Generating… (first call will JIT‑compile)")
+    print("Generating… (first call will JIT-compile)")
     text = generate(
         params_cpu,
         model,
@@ -235,3 +223,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

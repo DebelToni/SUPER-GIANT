@@ -13,12 +13,12 @@ custom_tokenizer_path: math_tokenizer_data
 
 # DATASET_VENDOR = "Salesforce/wikitext"
 # DATASET_NAME   = "wikitext-2-raw-v1"
-dataset_name: wikitext-2-raw-v1
-dataset_has_vendor: true
-dataset_vendor: Salesforce
-# dataset_name: roneneldan/TinyStories
-# dataset_has_vendor: false
-# dataset_vendor: roneneldan
+# dataset_name: wikitext-2-raw-v1
+# dataset_has_vendor: true
+# dataset_vendor: Salesforce
+dataset_name: roneneldan/TinyStories
+dataset_has_vendor: false
+dataset_vendor: roneneldan
 use_custom_dataset: false
 dataset_path: math_dataset_arrow # of the custom dataset
 

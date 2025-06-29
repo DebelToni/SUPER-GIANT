@@ -239,7 +239,14 @@ def transformer_block_apply(
 
     if enable_kv_cache:
         # ─ inference / generation ─
-        y, mutated = TinyTransformerBlock(...).apply(
+        y, mutated = TinyTransformerBlock(          # *single layer*
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        dropout_rate=Config.dropout_rate,
+        dtype=Config.compute_dtype,
+        name="layer",                           # name is irrelevant here
+    ).apply(
             variables,
             x,
             deterministic=deterministic,
@@ -251,7 +258,14 @@ def transformer_block_apply(
         new_cache = mutated["cache"]
     else:
         # ─ training / plain forward ─
-        y = TinyTransformerBlock(...).apply(
+        y = TinyTransformerBlock(          # *single layer*
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        dropout_rate=Config.dropout_rate,
+        dtype=Config.compute_dtype,
+        name="layer",                           # name is irrelevant here
+    ).apply(
             variables,
             x,
             deterministic=deterministic,

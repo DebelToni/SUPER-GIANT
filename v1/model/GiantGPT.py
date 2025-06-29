@@ -125,7 +125,8 @@ class GiantGPT(nn.Module):
 
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
+    # static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
+    static_argnames=("deterministic", "enable_kv_cache"),
 )
 def giant_gpt_apply(params,
                     tokens,

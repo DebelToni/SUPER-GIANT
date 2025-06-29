@@ -1,4 +1,7 @@
 # generate_text.py
+"""
+My old inference script that does not use JIT or KV caching. Do not refer to this.
+"""
 
 import numpy as np
 import argparse

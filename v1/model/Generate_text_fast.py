@@ -96,15 +96,24 @@ def make_step_fn(temperature: float, top_k: Optional[int]):
         rng: jax.random.KeyArray,
     ):
         # ← call the JIT-compiled model helper instead of model.apply
+        # logits, cache = giant_gpt_apply(
+        #     params,
+        #     cache,
+        #     prev_token,
+        #     rng=rng,
+        #     deterministic=True,
+        #     enable_kv_cache=True,
+        #     cur_index=cur_index,
+        #     rng=rng,
+        # )
         logits, cache = giant_gpt_apply(
             params,
-            cache,
-            prev_token,
-            rng=rng,
+            prev_token,                # ← tokens arg
+            cache=cache,               # ← NEW keyword
+            rng=rng,                   # ← only once
             deterministic=True,
             enable_kv_cache=True,
             cur_index=cur_index,
-            rng=rng,
         )
         logits = logits[:, 0]
 

@@ -81,6 +81,48 @@ class GiantGPT(nn.Module):
         return logits
 
 
+# @functools.partial(
+#     jax.jit,
+#     static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
+# )
+# def giant_gpt_apply(params,
+#                     tokens,
+#                     *,
+#                     rng = None,
+#                     deterministic: bool = False,
+#                     enable_kv_cache: bool = False,
+#                     cur_index: Optional[int] = None):
+#
+#     if Config.use_custom_tokenizer:
+#         tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+#     else:
+#         tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+#
+#     model = GiantGPT(
+#         vocab_size=tok.vocab_size,
+#         context_length=Config.context_length,
+#         d_model=Config.embedding_size,
+#         n_heads=Config.num_heads,
+#         d_ff=Config.feed_forward_size,
+#         n_layers=Config.num_layers,
+#         dropout_rate=Config.dropout_rate,
+#     )
+#
+#     extra_kwargs = {}
+#     if rng is not None:
+#         extra_kwargs["rngs"] = {"dropout": rng}
+#
+#     return model.apply(
+#         {"params": params},
+#         tokens,
+#         deterministic=deterministic,
+#         enable_kv_cache=enable_kv_cache,
+#         cur_index=cur_index,
+#         **extra_kwargs,
+#     )
+
+# GiantGPT.py  --------------------------------------------------------------
+
 @functools.partial(
     jax.jit,
     static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
@@ -88,11 +130,13 @@ class GiantGPT(nn.Module):
 def giant_gpt_apply(params,
                     tokens,
                     *,
-                    rng = None,
+                    cache=None,                    # ← NEW
+                    rng=None,                      # ← unchanged
                     deterministic: bool = False,
                     enable_kv_cache: bool = False,
                     cur_index: Optional[int] = None):
 
+    # -------- tokenizer / model instantiation (unchanged) -----------------
     if Config.use_custom_tokenizer:
         tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
     else:
@@ -108,16 +152,32 @@ def giant_gpt_apply(params,
         dropout_rate=Config.dropout_rate,
     )
 
-    extra_kwargs = {}
-    if rng is not None:
-        extra_kwargs["rngs"] = {"dropout": rng}
+    # -------- build the variables dict ------------------------------------
+    variables = {"params": params}
+    if cache is not None:
+        variables["cache"] = cache            # hold previous KV tensors
 
-    return model.apply(
-        {"params": params},
+    extra = {}
+    if rng is not None:
+        extra["rngs"] = {"dropout": rng}      # key only when supplied
+
+    # If we carry a cache we must mark it mutable so we get the
+    # *updated* cache back.
+    mutable = ["cache"] if cache is not None else False
+
+    out = model.apply(
+        variables,
         tokens,
         deterministic=deterministic,
         enable_kv_cache=enable_kv_cache,
         cur_index=cur_index,
-        **extra_kwargs,
+        mutable=mutable,
+        **extra,
     )
+
+    if cache is None:                # no caching path → just logits
+        return out                        # logits tensor
+    else:                           # caching path → (logits, new_cache)
+        logits, new_vars = out
+        return logits, new_vars["cache"]
 

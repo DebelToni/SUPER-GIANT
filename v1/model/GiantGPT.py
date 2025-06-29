@@ -151,25 +151,34 @@ def giant_gpt_apply(
         n_layers=Config.num_layers,
         dropout_rate=Config.dropout_rate,
     )
-
-    # ── 2. Build *variables* dict (params [+ cache]) ────────────
+    # ── 1) Prepare variable collections ─────────────────────────
     variables = {"params": params}
-    if cache is not None:               # inference path
+    if enable_kv_cache and cache is not None:
         variables["cache"] = cache
 
-    # ── 3. Optional RNGs dict ───────────────────────────────────
+    # ── 2) RNG dict if needed ───────────────────────────────────
     rngs_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
-    # ── 4. Call model.apply; ask it to return updated cache ────
-    logits, mutated = model.apply(
-        variables,
-        tokens,                         # ← POSitional arg
-        deterministic=deterministic,
-        enable_kv_cache=enable_kv_cache,
-        cur_index=cur_index,
-        mutable=["cache"],              # get new cache back
-        **rngs_kw,
-    )
-
-    return logits, mutated["cache"]
-
+    if enable_kv_cache:
+        # ── Inference: return logits + updated cache ─────────────
+        logits, mutated = model.apply(
+            variables,
+            tokens,
+            deterministic=deterministic,
+            enable_kv_cache=True,
+            cur_index=cur_index,
+            mutable=["cache"],
+            **rngs_kw,
+        )
+        return logits, mutated["cache"]
+    else:
+        # ── Training/Eval: no cache → only logits ─────────────────
+        logits = model.apply(
+            variables,
+            tokens,
+            deterministic=deterministic,
+            enable_kv_cache=False,
+            cur_index=cur_index,
+            **rngs_kw,
+        )
+        return logits

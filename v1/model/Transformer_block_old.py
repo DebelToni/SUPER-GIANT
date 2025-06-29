@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from typing import Optional
@@ -9,8 +10,6 @@ from flax.linen import RMSNorm
 
 from omegaconf import OmegaConf
 Config = OmegaConf.load("Config.yml")
-
-import functools
 
 def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)
@@ -44,7 +43,7 @@ class NativeJaxSelfAttention(nn.Module):
         self.dropout = nn.Dropout(rate=self.dropout_rate)
 
     @nn.compact
-    def __call__(self, x, *, deterministic: bool, enable_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(self, x, *, deterministic: bool, decode: bool = False, cur_index: Optional[int] = None):
         b, l, _ = x.shape
         head_dim = self.qkv_features // self.num_heads
 
@@ -58,7 +57,7 @@ class NativeJaxSelfAttention(nn.Module):
 
         rot_dim = head_dim
         inv_freq = 1.0 / (10000 ** (jnp.arange(0, rot_dim, 2) / rot_dim))
-        seq      = jnp.array([cur_index]) if enable_kv_cache else jnp.arange(l)
+        seq      = jnp.array([cur_index]) if decode else jnp.arange(l)
         angles   = jnp.einsum('i,j->ij', seq, inv_freq)
         emb      = jnp.repeat(angles, 2, axis=-1)
         sin, cos = jnp.sin(emb).astype(self.dtype), jnp.cos(emb).astype(self.dtype)
@@ -66,8 +65,8 @@ class NativeJaxSelfAttention(nn.Module):
         q, k = apply_rope(q, sin, cos), apply_rope(k, sin, cos)
 
 
-        if enable_kv_cache:
-            assert cur_index is not None, "Need cur_index when enable_kv_cache=True"
+        if decode:
+            assert cur_index is not None, "Need cur_index when decode=True"
             cached_k = self.variable( "cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
             cached_v = self.variable( "cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
 
@@ -77,51 +76,36 @@ class NativeJaxSelfAttention(nn.Module):
             k = jnp.swapaxes(cached_k.value, 1, 2)
             v = jnp.swapaxes(cached_v.value, 1, 2)
 
+            if False:
+                q = q / jnp.sqrt(head_dim)
+
             key_len   = k.shape[1]
             valid     = jnp.arange(key_len) <= cur_index
             attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
             attn_bias = attn_bias[None, None, None, :]
 
-            y = jax.nn.dot_product_attention(
-                q, k, v,
-                bias=attn_bias,
-                is_causal=False,
-                implementation="cudnn",
-            )
-
-            # try:
-            #     y = jax.nn.dot_product_attention(
-            #             q, k, v,
-            #             bias=attn_bias,
-            #             is_causal=True,
-            #             implementation="flash",
-            #     )
-            #     jax.debug.print("Using flash attention for kv cache")
-            # except Exception:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         bias=attn_bias,
-            #         is_causal=False,
-            #         implementation="cudnn",
-            #     )
+            try:
+                y = jax.nn.dot_product_attention(
+                        q, k, v,
+                        bias=attn_bias,
+                        is_causal=True,
+                        implementation="flash",
+                )
+            except Exception:
+                y = jax.nn.dot_product_attention(
+                    q, k, v,
+                    bias=attn_bias,
+                    is_causal=False,
+                    implementation="cudnn",
+                )
 
             y = y.reshape(b, 1, self.qkv_features)
 
         else:
-            y = jax.nn.dot_product_attention(q, k, v, is_causal=False, implementation="cudnn")
-            # try:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         is_causal=True,
-            #         implementation="flash",
-            #     )
-            #     jax.debug.print("Using flash attention")
-            # except Exception:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         is_causal=False,
-            #         implementation="cudnn",
-            #     )
+            if False:
+                q = q / jnp.sqrt(head_dim)
+
+            y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)
@@ -139,7 +123,7 @@ class TinyTransformerBlock(nn.Module):
     dtype: jnp.dtype = Config.compute_dtype
 
     @nn.compact
-    def __call__(self, x, *, deterministic: bool, enable_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(self, x, *, deterministic: bool, decode: bool = False, cur_index: Optional[int] = None):
         @nn.remat
         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
             residual = h
@@ -149,7 +133,7 @@ class TinyTransformerBlock(nn.Module):
                 qkv_features=module.d_model,
                 dropout_rate=module.dropout_rate,
                 dtype=module.dtype,
-            )(h_norm, deterministic=deterministic, enable_kv_cache=enable_kv_cache, cur_index=cur_index)
+            )(h_norm, deterministic=deterministic, decode=decode, cur_index=cur_index)
             h = residual + h_attn
 
             residual = h
@@ -173,43 +157,3 @@ class TinyTransformerBlock(nn.Module):
             return residual + h_ffn
 
         return _block(self, x)
-
-# ---------------------------------------------------------------------------
-# JIT-compiled entry point ---------------------------------------------------
-# ---------------------------------------------------------------------------
-
-# d_model / n_heads / d_ff / dropout_rate can come from Config
-# (or pass them in directly if you prefer).
-
-@functools.partial(
-    jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
-)
-def transformer_block_apply(
-    params,
-    x: jnp.ndarray,
-    *,
-    rng,
-    deterministic: bool,
-    enable_kv_cache: bool = False,
-    cur_index: Optional[int] = None,
-):
-    """Forward pass for TinyTransformerBlock, compiled once with XLA.
-
-    Static argnames prevent needless recompiles when only batch data or RNGs
-    change between calls.
-    """
-    return TinyTransformerBlock(
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        dropout_rate=Config.dropout_rate,
-        dtype=Config.compute_dtype,
-    ).apply(
-        {"params": params},
-        x,
-        deterministic=deterministic,
-        enable_kv_cache=enable_kv_cache,
-        cur_index=cur_index,
-        rngs={"dropout": rng},
-    )

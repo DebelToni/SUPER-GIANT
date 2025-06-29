@@ -100,6 +100,7 @@ def make_step_fn(temperature: float, top_k: Optional[int]):
             params,
             cache,
             prev_token,
+            rng=rng,
             deterministic=True,
             enable_kv_cache=True,
             cur_index=cur_index,

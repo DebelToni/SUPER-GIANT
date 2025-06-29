@@ -7,7 +7,7 @@ from Data_loader import data_loader
 
 @partial(jax.jit, static_argnames="model")
 def _loss_on_batch(params, batch, *, model):
-    logits = model.apply({"params": params}, batch["input"], deterministic=True)
+    logits = model.apply({"params": params}, batch["input"], deterministic=True, rng=jax.random.PRNGKey(0))
     loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch["target"])
     loss = (loss * batch["mask"]).sum() / batch["mask"].sum()
     return loss

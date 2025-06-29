@@ -4,9 +4,6 @@ import jax
 
 import jax.numpy as jnp
 from flax import linen as nn
-# ───────────────────────────────────────────────
-# bring in the JIT-compiled transformer block
-# ───────────────────────────────────────────────
 from Transformer_block import TinyTransformerBlock, transformer_block_apply
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
@@ -29,7 +26,6 @@ class GiantGPT(nn.Module):
                  deterministic: bool = False,
                  enable_kv_cache: bool = False,
                  cur_index: Optional[int] = None):
-        # Embedding
         embed = nn.Embed(
             num_embeddings=self.vocab_size,
             features=self.d_model,
@@ -39,18 +35,14 @@ class GiantGPT(nn.Module):
         )
         x = embed(tokens)
 
-        # Input dropout
         x = nn.Dropout(rate=self.dropout_rate)(x,
                                                  deterministic=deterministic)
 
-        # Transformer layers (JIT-compiled)
         for idx in range(self.n_layers):
-            # Each layer’s params live under "layer_{idx}" in the param tree.
             layer_params = self.scope.get_variable("params",
                                                    f"layer_{idx}",
                                                    None)
             if layer_params is None:
-                # First invocation: initialize & stash parameters
                 block = TinyTransformerBlock(
                     d_model=self.d_model,
                     n_heads=self.n_heads,
@@ -71,18 +63,32 @@ class GiantGPT(nn.Module):
                                         f"layer_{idx}",
                                         layer_params)
 
-            layer_rng = self.make_rng("dropout")
-            # Apply the JIT-compiled transformer block
-            x = transformer_block_apply(
-                layer_params,
-                x,
-                rng=layer_rng,
-                deterministic=deterministic,
-                enable_kv_cache=enable_kv_cache,
-                cur_index=cur_index,
-            )
+            # layer_rng = self.make_rng("dropout")
+            # x = transformer_block_apply(
+            #     layer_params,
+            #     x,
+            #     rng=layer_rng,
+            #     deterministic=deterministic,
+            #     enable_kv_cache=enable_kv_cache,
+            #     cur_index=cur_index,
+            # )
+            if deterministic:            # inference → no dropout → no rng needed
+                x = transformer_block_apply(
+                    layer_params, x,
+                    deterministic=True,
+                    enable_kv_cache=enable_kv_cache,
+                    cur_index=cur_index,
+                )
+            else:                        # training → need a fresh sub-key
+                layer_rng = self.make_rng("dropout")
+                x = transformer_block_apply(
+                    layer_params, x,
+                    rng=layer_rng,
+                    deterministic=False,
+                    enable_kv_cache=enable_kv_cache,
+                    cur_index=cur_index,
+                )
 
-        # Output logits via tied embedding
         logits = jnp.einsum(
             "bld,vd->blv",
             x.astype(jnp.float32),
@@ -90,62 +96,24 @@ class GiantGPT(nn.Module):
         )
         return logits
 
-# ---------------------------------------------------------------------------
-# One-shot JIT for the whole model
-# ---------------------------------------------------------------------------
 
 @functools.partial(
     jax.jit,
     static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
 )
-# def giant_gpt_apply(params,
-#                     tokens,
-#                     *,
-#                     rng,
-#                     deterministic: bool = False,
-#                     enable_kv_cache: bool = False,
-#                     cur_index: Optional[int] = None):
-#     """Compiled forward pass for GiantGPT."""
-#     if Config.use_custom_tokenizer:
-#         tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
-#     else:
-#         tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
-#
-#     return GiantGPT(
-#         vocab_size=tok.vocab_size,
-#         context_length=Config.context_length,
-#         d_model=Config.embedding_size,
-#         n_heads=Config.num_heads,
-#         d_ff=Config.feed_forward_size,
-#         n_layers=Config.num_layers,
-#         dropout_rate=Config.dropout_rate,
-#     ).apply(
-#         {"params": params},
-#         tokens,
-#         deterministic=deterministic,
-#         enable_kv_cache=enable_kv_cache,
-#         cur_index=cur_index,
-#         rngs={"dropout": rng},
-#     )
 def giant_gpt_apply(params,
                     tokens,
                     *,
-                    rng: = None,
+                    rng = None,
                     deterministic: bool = False,
                     enable_kv_cache: bool = False,
                     cur_index: Optional[int] = None):
 
-    # ------------------------------------------------------------------
-    # 1) Build / get the tokenizer so we know vocab size
-    # ------------------------------------------------------------------
     if Config.use_custom_tokenizer:
         tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
     else:
         tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 
-    # ------------------------------------------------------------------
-    # 2) Instantiate the Module
-    # ------------------------------------------------------------------
     model = GiantGPT(
         vocab_size=tok.vocab_size,
         context_length=Config.context_length,
@@ -156,22 +124,16 @@ def giant_gpt_apply(params,
         dropout_rate=Config.dropout_rate,
     )
 
-    # ------------------------------------------------------------------
-    # 3) Build kwargs **only** when a key is present
-    # ------------------------------------------------------------------
     extra_kwargs = {}
-    if rng is not None:                       # training path
+    if rng is not None:
         extra_kwargs["rngs"] = {"dropout": rng}
 
-    # ------------------------------------------------------------------
-    # 4) Call apply (variables, *positional_args, **keyword_args)
-    # ------------------------------------------------------------------
     return model.apply(
-        {"params": params},                   # variables
-        tokens,                               # first positional arg
+        {"params": params},
+        tokens,
         deterministic=deterministic,
         enable_kv_cache=enable_kv_cache,
         cur_index=cur_index,
-        **extra_kwargs,                       # maybe empty
+        **extra_kwargs,
     )
 

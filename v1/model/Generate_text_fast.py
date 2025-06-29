@@ -64,7 +64,8 @@ def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
         dummy_token,
         deterministic=True,
         enable_kv_cache=True,
-        cur_index=jnp.array(0, jnp.int32),
+        # cur_index=jnp.array(0, jnp.int32),
+        cur_index=0,
     )
     return variables["cache"]
 

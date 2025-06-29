@@ -63,15 +63,56 @@ class GiantGPT(nn.Module):
                                         f"layer_{idx}",
                                         layer_params)
 
-            layer_rng = self.make_rng("dropout")
-            x = transformer_block_apply(
-                layer_params,
-                x,
-                rng=layer_rng,
-                deterministic=deterministic,
-                enable_kv_cache=enable_kv_cache,
-                cur_index=cur_index,
-            )
+            # layer_rng = self.make_rng("dropout")
+            # x = transformer_block_apply(
+            #     layer_params,
+            #     x,
+            #     rng=layer_rng,
+            #     deterministic=deterministic,
+            #     enable_kv_cache=enable_kv_cache,
+            #     cur_index=cur_index,
+            # )
+                # if deterministic:            # inference → no dropout → no rng needed
+                #     x = transformer_block_apply(
+                #         layer_params, x,
+                #         rng=None,                # no dropout, so no rng
+                #         deterministic=True,
+                #         enable_kv_cache=enable_kv_cache,
+                #         cur_index=cur_index,
+                #     )
+                # else:                        # training → need a fresh sub-key
+                #     layer_rng = self.make_rng("dropout")
+                #     x = transformer_block_apply(
+                #         layer_params, x,
+                #         rng=layer_rng,
+                #         deterministic=False,
+                #         enable_kv_cache=enable_kv_cache,
+                #         cur_index=cur_index,
+                #     )
+            # ───────────────────────────────────────── cache handling
+                layer_cache = self.scope.get_variable("cache", f"layer_{idx}", None)
+
+                if deterministic:             # inference – no dropout key needed
+                    x, new_cache = transformer_block_apply(
+                        layer_params, layer_cache, x,
+                        deterministic=True,
+                        enable_kv_cache=enable_kv_cache,
+                        cur_index=cur_index,
+                    )
+                else:                         # training – supply a fresh key
+                    layer_rng = self.make_rng("dropout")
+                    x, new_cache = transformer_block_apply(
+                        layer_params, layer_cache, x,
+                        rng=layer_rng,
+                        deterministic=False,
+                        enable_kv_cache=enable_kv_cache,
+                        cur_index=cur_index,
+                    )
+
+                # write the cache back so it’s available next token
+                if enable_kv_cache:
+                    self.scope.put_variable("cache", f"layer_{idx}", new_cache)
+
 
         logits = jnp.einsum(
             "bld,vd->blv",
@@ -80,66 +121,24 @@ class GiantGPT(nn.Module):
         )
         return logits
 
-
-# @functools.partial(
-#     jax.jit,
-#     static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
-# )
-# def giant_gpt_apply(params,
-#                     tokens,
-#                     *,
-#                     rng = None,
-#                     deterministic: bool = False,
-#                     enable_kv_cache: bool = False,
-#                     cur_index: Optional[int] = None):
-#
-#     if Config.use_custom_tokenizer:
-#         tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
-#     else:
-#         tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
-#
-#     model = GiantGPT(
-#         vocab_size=tok.vocab_size,
-#         context_length=Config.context_length,
-#         d_model=Config.embedding_size,
-#         n_heads=Config.num_heads,
-#         d_ff=Config.feed_forward_size,
-#         n_layers=Config.num_layers,
-#         dropout_rate=Config.dropout_rate,
-#     )
-#
-#     extra_kwargs = {}
-#     if rng is not None:
-#         extra_kwargs["rngs"] = {"dropout": rng}
-#
-#     return model.apply(
-#         {"params": params},
-#         tokens,
-#         deterministic=deterministic,
-#         enable_kv_cache=enable_kv_cache,
-#         cur_index=cur_index,
-#         **extra_kwargs,
-#     )
-
-# GiantGPT.py  --------------------------------------------------------------
-
 @functools.partial(
     jax.jit,
-    # static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
-    static_argnames=("deterministic", "enable_kv_cache"),
+    static_argnames=("deterministic", "enable_kv_cache"),  # cur_index NOT static
 )
-def giant_gpt_apply(params,
-                    tokens,
-                    *,
-                    cache=None,                    # ← NEW
-                    rng=None,                      # ← unchanged
-                    deterministic: bool = False,
-                    enable_kv_cache: bool = False,
-                    cur_index: Optional[int] = None):
-
-    # -------- tokenizer / model instantiation (unchanged) -----------------
+def giant_gpt_apply(
+    params,
+    cache,                   # ← NEW positional arg
+    tokens,
+    *,                       # keyword-only from here
+    rng=None,
+    deterministic: bool = False,
+    enable_kv_cache: bool = False,
+    cur_index: Optional[int] = None,
+):
+    # ── 1. Get vocab size (unchanged) ───────────────────────────
     if Config.use_custom_tokenizer:
-        tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+        tok = PreTrainedTokenizerFast.from_pretrained(
+            Config.custom_tokenizer_path)
     else:
         tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 
@@ -153,32 +152,24 @@ def giant_gpt_apply(params,
         dropout_rate=Config.dropout_rate,
     )
 
-    # -------- build the variables dict ------------------------------------
+    # ── 2. Build *variables* dict (params [+ cache]) ────────────
     variables = {"params": params}
-    if cache is not None:
-        variables["cache"] = cache            # hold previous KV tensors
+    if cache is not None:               # inference path
+        variables["cache"] = cache
 
-    extra = {}
-    if rng is not None:
-        extra["rngs"] = {"dropout": rng}      # key only when supplied
+    # ── 3. Optional RNGs dict ───────────────────────────────────
+    rngs_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
-    # If we carry a cache we must mark it mutable so we get the
-    # *updated* cache back.
-    mutable = ["cache"] if cache is not None else False
-
-    out = model.apply(
+    # ── 4. Call model.apply; ask it to return updated cache ────
+    logits, mutated = model.apply(
         variables,
-        tokens,
+        tokens,                         # ← POSitional arg
         deterministic=deterministic,
         enable_kv_cache=enable_kv_cache,
         cur_index=cur_index,
-        mutable=mutable,
-        **extra,
+        mutable=["cache"],              # get new cache back
+        **rngs_kw,
     )
 
-    if cache is None:                # no caching path → just logits
-        return out                        # logits tensor
-    else:                           # caching path → (logits, new_cache)
-        logits, new_vars = out
-        return logits, new_vars["cache"]
+    return logits, mutated["cache"]
 

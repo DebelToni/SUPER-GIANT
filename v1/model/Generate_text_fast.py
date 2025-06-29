@@ -94,7 +94,7 @@ def make_step_fn(temperature: float, top_k: Optional[int]):
         cache: dict,
         prev_token: jnp.ndarray,
         cur_index: jnp.ndarray,
-        rng: jax.random.KeyArray,
+        rng,
     ):
         # ← call the JIT-compiled model helper instead of model.apply
         # logits, cache = giant_gpt_apply(

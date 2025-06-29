@@ -63,7 +63,7 @@ def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
         jax.random.PRNGKey(0),
         dummy_token,
         deterministic=True,
-        decode=True,
+        enable_kv_cache=True,
         cur_index=jnp.array(0, jnp.int32),
     )
     return variables["cache"]

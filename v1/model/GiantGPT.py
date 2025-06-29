@@ -124,16 +124,32 @@ def giant_gpt_apply(params,
         dropout_rate=Config.dropout_rate,
     )
 
-    extra_kwargs = {}
+    # extra_kwargs = {}
+    # if rng is not None:
+    #     extra_kwargs["rngs"] = {"dropout": rng}
+    #
+    # return model.apply(
+    #     {"params": params},
+    #     tokens,
+    #     deterministic=deterministic,
+    #     enable_kv_cache=enable_kv_cache,
+    #     cur_index=cur_index,
+    #     **extra_kwargs,
+    # )
+    apply_kwargs = {
+        "params": params,
+        "tokens": tokens,
+        "deterministic": deterministic,
+        "enable_kv_cache": enable_kv_cache,
+        "cur_index": cur_index,
+    }
     if rng is not None:
-        extra_kwargs["rngs"] = {"dropout": rng}
+        apply_kwargs["rngs"] = {"dropout": rng}
 
-    return model.apply(
-        {"params": params},
-        tokens,
-        deterministic=deterministic,
-        enable_kv_cache=enable_kv_cache,
-        cur_index=cur_index,
-        **extra_kwargs,
+    # ← add mutable=["cache"] so Flax returns the updated cache collection
+    outputs, mutated_vars = model.apply(
+        **apply_kwargs,
+        mutable=["cache"],
     )
-
+    # mutated_vars["cache"] is the new cache
+    return outputs, mutated_vars["cache"]

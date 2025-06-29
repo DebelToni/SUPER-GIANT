@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 import jax
+from jax._src.core import mutable_array
 import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
@@ -236,6 +237,8 @@ def transformer_block_apply(
 
     rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
+    mutable_arg = ["cache"] if enable_kv_cache else False
+
     y, mutated = TinyTransformerBlock(          # *single layer*
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
@@ -249,10 +252,10 @@ def transformer_block_apply(
         deterministic=deterministic,
         enable_kv_cache=enable_kv_cache,
         cur_index=cur_index,
-        mutable=["cache"],                     # ask for updated cache
+        mutable=mutable_arg,
         # **rng_kw
         rngs=rng_kw.get("rngs", {})  # pass rngs if available
     )
 
-    return y, mutated["cache"]                 # return outputs & new cache
-
+    new_cache = mutated["cache"] if enable_kv_cache else None
+    return y, new_cache

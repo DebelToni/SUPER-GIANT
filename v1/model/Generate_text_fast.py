@@ -64,7 +64,8 @@ def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
         dummy_token,
         deterministic=True,
         enable_kv_cache=True,
-        cur_index=jnp.array(0, jnp.int32),
+        # cur_index=jnp.array(0, jnp.int32),
+        cur_index=0,
     )
     return variables["cache"]
 
@@ -93,11 +94,12 @@ def make_step_fn(temperature: float, top_k: Optional[int]):
         cache: dict,
         prev_token: jnp.ndarray,
         cur_index: jnp.ndarray,
-        rng: jax.random.KeyArray,
+        rng,
     ):
         # ← call the JIT-compiled model helper instead of model.apply
         logits, cache = giant_gpt_apply(
             params,
+            cache,
             prev_token,
             rng=rng,
             deterministic=True,

@@ -8,6 +8,7 @@ from flax import linen as nn
 # bring in the JIT-compiled transformer block
 # ───────────────────────────────────────────────
 from Transformer_block import TinyTransformerBlock, transformer_block_apply
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from omegaconf import OmegaConf
 Config = OmegaConf.load("Config.yml")
@@ -113,10 +114,10 @@ def giant_gpt_apply(params,
     return GiantGPT(
         vocab_size=tok.vocab_size,
         context_length=Config.context_length,
-        d_model=Config.d_model,
-        n_heads=Config.n_heads,
-        d_ff=Config.d_ff,
-        n_layers=Config.n_layers,
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        n_layers=Config.num_layers,
         dropout_rate=Config.dropout_rate,
     ).apply(
         {"params": params},

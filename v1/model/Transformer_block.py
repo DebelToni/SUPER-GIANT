@@ -85,7 +85,7 @@ class NativeJaxSelfAttention(nn.Module):
             y = jax.nn.dot_product_attention(
                 q, k, v,
                 bias=attn_bias,
-                is_causal=False,
+                is_causal=True,
                 implementation="cudnn",
             )
 
@@ -108,7 +108,7 @@ class NativeJaxSelfAttention(nn.Module):
             y = y.reshape(b, 1, self.qkv_features)
 
         else:
-            y = jax.nn.dot_product_attention(q, k, v, is_causal=False, implementation="cudnn")
+            y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
             # try:
             #     y = jax.nn.dot_product_attention(
             #         q, k, v,

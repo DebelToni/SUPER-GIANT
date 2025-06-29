@@ -63,31 +63,15 @@ class GiantGPT(nn.Module):
                                         f"layer_{idx}",
                                         layer_params)
 
-            # layer_rng = self.make_rng("dropout")
-            # x = transformer_block_apply(
-            #     layer_params,
-            #     x,
-            #     rng=layer_rng,
-            #     deterministic=deterministic,
-            #     enable_kv_cache=enable_kv_cache,
-            #     cur_index=cur_index,
-            # )
-            if deterministic:            # inference → no dropout → no rng needed
-                x = transformer_block_apply(
-                    layer_params, x,
-                    deterministic=True,
-                    enable_kv_cache=enable_kv_cache,
-                    cur_index=cur_index,
-                )
-            else:                        # training → need a fresh sub-key
-                layer_rng = self.make_rng("dropout")
-                x = transformer_block_apply(
-                    layer_params, x,
-                    rng=layer_rng,
-                    deterministic=False,
-                    enable_kv_cache=enable_kv_cache,
-                    cur_index=cur_index,
-                )
+            layer_rng = self.make_rng("dropout")
+            x = transformer_block_apply(
+                layer_params,
+                x,
+                rng=layer_rng,
+                deterministic=deterministic,
+                enable_kv_cache=enable_kv_cache,
+                cur_index=cur_index,
+            )
 
         logits = jnp.einsum(
             "bld,vd->blv",

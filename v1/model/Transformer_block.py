@@ -237,25 +237,29 @@ def transformer_block_apply(
 
     rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
-    mutable_arg = ["cache"] if enable_kv_cache else False
-
-    y, mutated = TinyTransformerBlock(          # *single layer*
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        dropout_rate=Config.dropout_rate,
-        dtype=Config.compute_dtype,
-        name="layer",                           # name is irrelevant here
-    ).apply(
-        variables,
-        x,
-        deterministic=deterministic,
-        enable_kv_cache=enable_kv_cache,
-        cur_index=cur_index,
-        mutable=mutable_arg,
-        # **rng_kw
-        rngs=rng_kw.get("rngs", {})  # pass rngs if available
-    )
+    if enable_kv_cache:
+        # ─ inference / generation ─
+        y, mutated = TinyTransformerBlock(...).apply(
+            variables,
+            x,
+            deterministic=deterministic,
+            enable_kv_cache=True,
+            cur_index=cur_index,
+            mutable=["cache"],
+            **rng_kw,
+        )
+        new_cache = mutated["cache"]
+    else:
+        # ─ training / plain forward ─
+        y = TinyTransformerBlock(...).apply(
+            variables,
+            x,
+            deterministic=deterministic,
+            enable_kv_cache=False,
+            cur_index=cur_index,
+            **rng_kw,          # mutable omitted
+        )
+        new_cache = None
 
     new_cache = mutated["cache"] if enable_kv_cache else None
     return y, new_cache

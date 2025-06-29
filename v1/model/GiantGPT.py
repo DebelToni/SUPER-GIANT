@@ -110,7 +110,7 @@ class GiantGPT(nn.Module):
                     )
 
                 # write the cache back so it’s available next token
-                if enable_kv_cache:
+                if enable_kv_cache and new_cache is not None:
                     self.scope.put_variable("cache", f"layer_{idx}", new_cache)
 
 

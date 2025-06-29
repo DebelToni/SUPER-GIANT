@@ -101,30 +101,29 @@ class GiantGPT(nn.Module):
 def giant_gpt_apply(params,
                     tokens,
                     *,
-                    rng,
+                    rng=None,                       # rng may be None
                     deterministic: bool = False,
                     enable_kv_cache: bool = False,
                     cur_index: Optional[int] = None):
-    """Compiled forward pass for GiantGPT."""
-    if Config.use_custom_tokenizer:
-        tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
-    else:
-        tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 
-    return GiantGPT(
-        vocab_size=tok.vocab_size,
-        context_length=Config.context_length,
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        n_layers=Config.num_layers,
-        dropout_rate=Config.dropout_rate,
-    ).apply(
+    apply_kwargs = dict(
         {"params": params},
         tokens,
         deterministic=deterministic,
         enable_kv_cache=enable_kv_cache,
         cur_index=cur_index,
-        rngs={"dropout": rng},
     )
 
+    # ← add this guard
+    if rng is not None:
+        apply_kwargs["rngs"] = {"dropout": rng}
+
+    return GiantGPT(
+        vocab_size=Config.vocab_size,
+        context_length=Config.context_length,
+        d_model=Config.d_model,
+        n_heads=Config.n_heads,
+        d_ff=Config.d_ff,
+        n_layers=Config.n_layers,
+        dropout_rate=Config.dropout_rate,
+    ).apply(**apply_kwargs)

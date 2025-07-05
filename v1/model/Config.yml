@@ -6,7 +6,7 @@ compute_dtype: float16
 # param_dtype: float16
 
 tokenizer_name: EleutherAI/gpt-neo-125M
-tokenizer_path: tiny_cached
+cache_dir_path: tiny_cached
 tokenizer_dtype: uint16
 use_custom_tokenizer: false
 custom_tokenizer_path: math_tokenizer_data

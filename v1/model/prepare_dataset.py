@@ -53,7 +53,7 @@ DATASET_NAME   = Config.dataset_name
 # TOKENIZER_NAME = "EleutherAI/gpt-neo-125M"
 TOKENIZER_NAME = Config.tokenizer_name
 # CACHE_DIR      = Path("tiny_cached")
-CACHE_DIR      = Path(Config.tokenizer_path)
+CACHE_DIR      = Path(Config.cache_dir_path)
 
 VAL_EVERY_N_WIN = 33          # deterministic interleaving train/val
 STRIDE_FRAC     = 0.5         # 50 % overlap between successive windows

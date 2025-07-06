@@ -1,0 +1,56 @@
+I have made my custom LLM following a standard decoder only structure in JAX. I had fancy things like kv cache and jit compilation for some parts and what I did not was make jit compile as much as possible. Finally managed to do it (had a lot of problems with rng when jit compiling) but the results got worse - sure the training and inference is a bit faster but the quality is worse.
+
+Before jit compiling (before adding more jit compilation) I was getting with the same model size and dataset reposponces like this:
+python3 Generate_text_fast.py --prompt "Once upon" --steps 10 --checkpoint model_params.pkl --greedy
+Once upon a time, there was a little girl named Lily
+
+python3 Generate_text_fast.py --prompt "Tom really wanted to climb a mountain." --steps 50 --checkpoint model_params.pkl --greedy
+Tom really wanted to climb a mountain. They saw a big tree with many branches and leaves. They wanted to climb the tree, but they were too small. They wanted to climb the tree and see what was inside. 
+"Let's go inside and see what is inside," Tom
+
+
+Now after the introduced changes we can see that the quality of trained inteligence is much lower, althought same model size:
+python3 Generate_text_fast.py --prompt "Once upon" --steps 10 --checkpoint model_params.pkl --greedy
+Once uponOnce once upon. Upon has once the upon
+
+
+
+I may have messed something up like an optimizer parameter but if it is not that or similiar its the jit compiled and passing of rng probably not making the training/inference deterministic or something. I will try to provide you first with all the files that i have right now in this message. Because they might be too many the next prompt will include the old ones.
+
+For better understanding here is the config for my model that i have and that has not changed when traning with the new setup vs the old:
+```yml
+param_dtype: float32
+dtype: float16
+compute_dtype: float16
+
+tokenizer_name: EleutherAI/gpt-neo-125M
+cache_dir_path: tiny_cached
+tokenizer_dtype: uint16
+use_custom_tokenizer: false
+
+dataset_name: roneneldan/TinyStories # popular for small llms from huggingface
+dataset_has_vendor: false
+use_custom_dataset: false
+
+# model:
+embedding_size: 256
+context_length: 257
+num_heads: 2
+num_layers: 2
+feed_forward_size: 1024
+dropout_rate: 0.1
+
+# training:
+learning_rate: 2e-4
+weight_decay: 1e-2
+batch_size: 8
+num_epochs: 1
+
+# other:
+use_remat: true
+dataset_percent: 10
+chunk_percent: 10
+default_device: cuda
+```
+
+So now if you want read all the files and get familiar with the structure and now i will send you NEXT PROMPT the files from the OLD BETTER WORKING version that has LESS jit compiled parts and rng. For now dont need to answer me

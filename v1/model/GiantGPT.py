@@ -91,21 +91,47 @@ class GiantGPT(nn.Module):
                 #     )
             # ───────────────────────────────────────── cache handling
                 layer_cache = self.scope.get_variable("cache", f"layer_{idx}", None)
+                # jax.debug.print("Layer {idx}")
 
-                if deterministic:             # inference – no dropout key needed
-                    x, new_cache = transformer_block_apply(
-                        layer_params, layer_cache, x,
-                        layer_name=f"layer_{idx}",
+                # if deterministic:             # inference – no dropout key needed
+                #     x, new_cache = transformer_block_apply(
+                #         layer_params, layer_cache, x,
+                #         layer_name=f"layer_{idx}",
+                #         deterministic=True,
+                #         enable_kv_cache=enable_kv_cache,
+                #         cur_index=cur_index,
+                #     )
+                # else:                         # training – supply a fresh key
+                #     layer_rng = self.make_rng("dropout")
+                #     x, new_cache = transformer_block_apply(
+                #         layer_params, layer_cache, x,
+                #         layer_name=f"layer_{idx}",
+                #         rng=layer_rng,
+                #         deterministic=False,
+                #         enable_kv_cache=enable_kv_cache,
+                #         cur_index=cur_index,
+                #     )
+
+                # Instead of calling the standalone jitted fn,
+                # just call the block you already created:
+                apply_fn = jax.jit(
+                    block.apply,
+                    static_argnames=("deterministic", "enable_kv_cache")
+                )
+                if deterministic:
+                    x, new_cache = apply_fn(
+                        {"params": layer_params, "cache": layer_cache},
+                        x,
                         deterministic=True,
                         enable_kv_cache=enable_kv_cache,
                         cur_index=cur_index,
                     )
-                else:                         # training – supply a fresh key
+                else:
                     layer_rng = self.make_rng("dropout")
-                    x, new_cache = transformer_block_apply(
-                        layer_params, layer_cache, x,
-                        layer_name=f"layer_{idx}",
-                        rng=layer_rng,
+                    x, new_cache = apply_fn(
+                        {"params": layer_params, "cache": layer_cache},
+                        x,
+                        rngs={"dropout": layer_rng},
                         deterministic=False,
                         enable_kv_cache=enable_kv_cache,
                         cur_index=cur_index,

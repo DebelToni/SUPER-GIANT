@@ -117,7 +117,7 @@ def main():
             )
 
             global_step += 1
-            if global_step < 3:
+            if global_step < 5:
                 jax.debug.print("dropout key {:02d}: {}", global_step, dropout_rng)
             if global_step % 200 == 0:
                 print(f"step {global_step:>7} / {total_steps:>7} | loss {loss:.4f}  ppl {np.exp(loss):.2f}")

@@ -7,7 +7,7 @@ def train_step(params, opt_state, batch, *, model, optimizer, dropout_rng):
         logits = model.apply(
             {"params": p},
             batch["input"],
-            rng=dropout_rng,
+            rngs={"dropout": dropout_rng},
             deterministic=False,
         )
         loss = optax.softmax_cross_entropy_with_integer_labels(
@@ -19,4 +19,3 @@ def train_step(params, opt_state, batch, *, model, optimizer, dropout_rng):
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
     return new_params, opt_state, loss
-

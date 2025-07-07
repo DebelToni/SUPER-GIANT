@@ -329,11 +329,26 @@ def transformer_block_apply(
         Updated KV‑cache dict (or ``None`` if caching disabled).
     """
     # --- wrap params / cache so Flax finds them under the same name ----------
-    variables = {}
+    # variables = {}
+    # if params is not None:
+    #     variables["params"] = {layer_name: params}
+    # if cache is not None:
+    #     variables["cache"] = {layer_name: cache}
+    variables: Dict[str, Any] = {}
+
+    # -------------------------------------------------
+    # ALWAYS give Flax an empty "params" collection so
+    # that new parameters can be *created* at init time
+    # -------------------------------------------------
+    if "params" not in variables:            # † NEW
+        variables["params"] = {}             # † NEW
+
     if params is not None:
-        variables["params"] = {layer_name: params}
+        variables["params"][layer_name] = params
+
     if cache is not None:
-        variables["cache"] = {layer_name: cache}
+        variables.setdefault("cache", {})[layer_name] = cache
+
 
     rngs_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 

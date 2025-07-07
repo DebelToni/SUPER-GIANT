@@ -81,7 +81,7 @@ class GiantGPT(nn.Module):
                     "deterministic": deterministic,
                     "enable_kv_cache": True,
                     "cur_index": cur_index,
-                    "mutable": ["cache"],
+                    "mutable": ("cache",),
                 }
                 if not deterministic:
                     kw["rngs"] = {"dropout": self.make_rng("dropout")}
@@ -220,7 +220,7 @@ class GiantGPT(nn.Module):
 
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache"),  # cur_index NOT static
+    static_argnames=("deterministic", "enable_kv_cache", "mutable"),  # cur_index NOT static
 )
 def giant_gpt_apply(
     params,

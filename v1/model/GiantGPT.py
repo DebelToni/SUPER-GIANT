@@ -42,15 +42,15 @@ class GiantGPT(nn.Module):
             layer_name = f"layer_{idx}"
             # 1) lazy-init params exactly once
             layer_params = self.scope.get_variable("params", layer_name, None)
+            block = TinyTransformerBlock(
+                d_model=self.d_model,
+                n_heads=self.n_heads,
+                d_ff=self.d_ff,
+                dropout_rate=self.dropout_rate,
+                dtype=Config.compute_dtype,
+                name=layer_name,
+            )
             if layer_params is None:
-                block = TinyTransformerBlock(
-                    d_model=self.d_model,
-                    n_heads=self.n_heads,
-                    d_ff=self.d_ff,
-                    dropout_rate=self.dropout_rate,
-                    dtype=Config.compute_dtype,
-                    name=layer_name,
-                )
                 init_out = block.init(
                     self.make_rng("params"),
                     x,
@@ -68,7 +68,6 @@ class GiantGPT(nn.Module):
                 block.apply,
                 static_argnames=("deterministic", "enable_kv_cache", "mutable"),
             )
-
             # 4) build the proper variables dict
             vars = {"params": layer_params}
             if enable_kv_cache and layer_cache is not None:

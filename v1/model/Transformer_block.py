@@ -187,62 +187,66 @@ class TinyTransformerBlock(nn.Module):
 #     # static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
 #     static_argnames=("deterministic", "enable_kv_cache"),
 # )
-# 
+# def transformer_block_apply(
+#     params,
+#     x: jnp.ndarray,
+#     *,
+#     rng,
+#     deterministic: bool,
+#     enable_kv_cache: bool = False,
+#     cur_index: Optional[int] = None,
+# ):
+#     """Forward pass for TinyTransformerBlock, compiled once with XLA.
+#
+#     Static argnames prevent needless recompiles when only batch data or RNGs
+#     change between calls.
+#     """
+#     return TinyTransformerBlock(
+#         d_model=Config.embedding_size,
+#         n_heads=Config.num_heads,
+#         d_ff=Config.feed_forward_size,
+#         dropout_rate=Config.dropout_rate,
+#         dtype=Config.compute_dtype,
+#     ).apply(
+#         {"params": params},
+#         x,
+#         deterministic=deterministic,
+#         enable_kv_cache=enable_kv_cache,
+#         cur_index=cur_index,
+#         rngs={"dropout": rng},
+#     )
+# Transformer_block.py
+@functools.partial(
+    jax.jit,
+    static_argnames=("deterministic", "enable_kv_cache")  # cur_index NOT static
+)
 def transformer_block_apply(
-    params: dict,
-    cache: Optional[dict],
-    x: jnp.ndarray,
+    params,
+    cache,                  # ← NEW
+    x,
     *,
     rng=None,
-    layer_name: str = "layer",
     deterministic: bool,
     enable_kv_cache: bool = False,
     cur_index: Optional[int] = None,
 ):
-    """
-    Stand‑alone forward for a *single* TinyTransformerBlock that works with the
-    sliced param / cache dictionaries coming from GiantGPT.__call__.
-
-    The caller usually passes *just* the layer’s subtree, e.g.
-
-        params = {...}              # without an outer "layer_7"
-        cache  = {...}
-
-    We wrap those dictionaries under `layer_name` so they match the names that
-    TinyTransformerBlock expects (`name=layer_name`).  If they are already
-    wrapped we leave them untouched.
-
-    Returns
-    -------
-    y : jnp.ndarray
-        The transformed hidden states.
-    new_cache : Optional[dict]
-        The cache subtree for this layer (or ``None`` when cache is disabled).
-    """
-    # ── 1. Normalise params / cache to include the outer layer name ──────────
-    if layer_name is not None and layer_name not in params:
-        params = {layer_name: params}
-    if cache is not None and layer_name is not None and layer_name not in cache:
-        cache = {layer_name: cache}
-
+    # build variables dict
     variables = {"params": params}
-    if cache is not None:
+    if cache is not None:                # may be None during training
         variables["cache"] = cache
 
     rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
-    # ── 2. Single transformer block forward ─────────────────────────────────
-    block = TinyTransformerBlock(
+    if enable_kv_cache:
+        # ─ inference / generation ─
+        y, mutated = TinyTransformerBlock(          # *single layer*
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
         d_ff=Config.feed_forward_size,
         dropout_rate=Config.dropout_rate,
         dtype=Config.compute_dtype,
-        name=layer_name,
-    )
-
-    if enable_kv_cache:
-        y, mutated = block.apply(
+        name="layer",                           # name is irrelevant here
+    ).apply(
             variables,
             x,
             deterministic=deterministic,
@@ -251,17 +255,104 @@ def transformer_block_apply(
             mutable=["cache"],
             **rng_kw,
         )
-        new_cache = mutated["cache"][layer_name] if layer_name in mutated["cache"] else mutated["cache"]
+        new_cache = mutated["cache"]
     else:
-        y = block.apply(
+        # ─ training / plain forward ─
+        y = TinyTransformerBlock(          # *single layer*
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        dropout_rate=Config.dropout_rate,
+        dtype=Config.compute_dtype,
+        name="layer",                           # name is irrelevant here
+    ).apply(
             variables,
             x,
             deterministic=deterministic,
             enable_kv_cache=False,
             cur_index=cur_index,
-            **rng_kw,
+            **rng_kw,          # mutable omitted
         )
         new_cache = None
 
+    new_cache = mutated["cache"] if enable_kv_cache else None
     return y, new_cache
 
+
+# --------------------------------------------------------------------------
+# Updated JIT-compiled wrapper that keeps every block in its own Flax scope
+# by accepting an explicit `layer_name`.  This new definition *overrides*
+# the earlier (constant-name) version declared above.
+# --------------------------------------------------------------------------
+import functools
+@functools.partial(
+    jax.jit,
+    static_argnames=("layer_name", "deterministic", "enable_kv_cache")
+)
+def transformer_block_apply(
+    params: dict,
+    cache: Optional[dict],
+    x: jnp.ndarray,
+    *,
+    rng=None,
+    layer_name: str,
+    deterministic: bool,
+    enable_kv_cache: bool = False,
+    cur_index: Optional[int] = None,
+):
+    """Forward pass for a single TinyTransformerBlock.
+
+    Parameters
+    ----------
+    params
+        Parameter subtree for *this* layer (weights only).
+    cache
+        KV‑cache subtree for this layer, or ``None`` during training.
+    x
+        `[batch, seq, d_model]` activations coming from the previous layer.
+    rng
+        PRNGKey or ``None``.  Only needed when ``deterministic=False``.
+    layer_name
+        Unique scope name (e.g. ``"layer_3"``).  Compiled separately per layer.
+    deterministic
+        Flag propagated down to the attention and MLP blocks.
+    enable_kv_cache
+        Whether to read/write the cache collection.
+    cur_index
+        Current time‑step during autoregressive decoding.  Ignored in training.
+
+    Returns
+    -------
+    y
+        Activations of shape `[batch, seq, d_model]`.
+    new_cache
+        Updated KV‑cache dict (or ``None`` if caching disabled).
+    """
+    # --- wrap params / cache so Flax finds them under the same name ----------
+    variables = {"params": {layer_name: params}}
+    if cache is not None:
+        variables["cache"] = {layer_name: cache}
+
+    rngs_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
+
+    y, mutated = TinyTransformerBlock(
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        dropout_rate=Config.dropout_rate,
+        dtype=Config.compute_dtype,
+        name=layer_name,
+    ).apply(
+        variables,
+        x,
+        deterministic=deterministic,
+        enable_kv_cache=enable_kv_cache,
+        cur_index=cur_index,
+        mutable=["cache"],
+        **rngs_kw,
+    )
+
+    new_cache = None
+    if enable_kv_cache and "cache" in mutated and layer_name in mutated["cache"]:
+        new_cache = mutated["cache"][layer_name]
+    return y, new_cache

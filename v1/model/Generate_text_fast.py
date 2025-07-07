@@ -20,7 +20,7 @@ from functools import partial
 from omegaconf import OmegaConf
 Config = OmegaConf.load("Config.yml")
 
-from GiantGPT import GiantGPT, giant_gpt_apply  # ← import the JIT helper
+from GiantGPT import GiantGPT, giant_gpt_apply  # patched signature
 
 def build_model() -> GiantGPT:
     if Config.use_custom_tokenizer:
@@ -97,7 +97,7 @@ def make_step_fn(temperature: float, top_k: Optional[int]):
         rng,
     ):
         # ← call the JIT-compiled model helper instead of model.apply
-        logits, cache = giant_gpt_apply(
+        logits, cache = giant_gpt_apply(model, 
             params,
             cache,
             prev_token,
@@ -224,4 +224,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

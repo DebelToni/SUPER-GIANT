@@ -39,9 +39,8 @@ class GiantGPT(nn.Module):
                                                  deterministic=deterministic)
 
         for idx in range(self.n_layers):
-            layer_params = self.scope.get_variable("params",
-                                                   f"layer_{idx}",
-                                                   None)
+            layer_name  = f"layer_{idx}"
+            layer_params = self.scope.get_variable("params", layer_name, None)
             if layer_params is None:
                 block = TinyTransformerBlock(
                     d_model=self.d_model,
@@ -49,9 +48,9 @@ class GiantGPT(nn.Module):
                     d_ff=self.d_ff,
                     dropout_rate=self.dropout_rate,
                     dtype=Config.compute_dtype,
-                    name=f"layer_{idx}",
+                    name=layer_name,
                 )
-                init_out = block.init(
+                init_out     = block.init(
                     self.make_rng("params"),
                     x,
                     deterministic=deterministic,
@@ -59,87 +58,149 @@ class GiantGPT(nn.Module):
                     cur_index=cur_index,
                 )
                 layer_params = init_out["params"]
-                self.scope.put_variable("params",
-                                        f"layer_{idx}",
-                                        layer_params)
+                self.scope.put_variable("params", layer_name, layer_params)
 
-            # layer_rng = self.make_rng("dropout")
-            # x = transformer_block_apply(
-            #     layer_params,
-            #     x,
-            #     rng=layer_rng,
-            #     deterministic=deterministic,
-            #     enable_kv_cache=enable_kv_cache,
-            #     cur_index=cur_index,
-            # )
-                # if deterministic:            # inference → no dropout → no rng needed
-                #     x = transformer_block_apply(
-                #         layer_params, x,
-                #         rng=None,                # no dropout, so no rng
-                #         deterministic=True,
-                #         enable_kv_cache=enable_kv_cache,
-                #         cur_index=cur_index,
-                #     )
-                # else:                        # training → need a fresh sub-key
-                #     layer_rng = self.make_rng("dropout")
-                #     x = transformer_block_apply(
-                #         layer_params, x,
-                #         rng=layer_rng,
-                #         deterministic=False,
-                #         enable_kv_cache=enable_kv_cache,
-                #         cur_index=cur_index,
-                #     )
-            # ───────────────────────────────────────── cache handling
-                layer_cache = self.scope.get_variable("cache", f"layer_{idx}", None)
-                # jax.debug.print("Layer {idx}")
+            # pull out whatever cache we have (None or an array)
+            layer_cache = self.scope.get_variable("cache", layer_name, None)
 
-                # if deterministic:             # inference – no dropout key needed
-                #     x, new_cache = transformer_block_apply(
-                #         layer_params, layer_cache, x,
-                #         layer_name=f"layer_{idx}",
-                #         deterministic=True,
-                #         enable_kv_cache=enable_kv_cache,
-                #         cur_index=cur_index,
-                #     )
-                # else:                         # training – supply a fresh key
-                #     layer_rng = self.make_rng("dropout")
-                #     x, new_cache = transformer_block_apply(
-                #         layer_params, layer_cache, x,
-                #         layer_name=f"layer_{idx}",
-                #         rng=layer_rng,
-                #         deterministic=False,
-                #         enable_kv_cache=enable_kv_cache,
-                #         cur_index=cur_index,
-                #     )
+            # jit-compile this block instance once
+            apply_fn = jax.jit(
+                block.apply,
+                static_argnames=("deterministic", "enable_kv_cache")
+            )
 
-                # Instead of calling the standalone jitted fn,
-                # just call the block you already created:
-                apply_fn = jax.jit(
-                    block.apply,
-                    static_argnames=("deterministic", "enable_kv_cache")
+            # build the “variables” dict properly
+            vars = {"params": layer_params}
+            if enable_kv_cache and layer_cache is not None:
+                vars["cache"] = { layer_name: layer_cache }
+
+            # call it
+            if deterministic:
+                x, mutated = apply_fn(
+                    vars,
+                    x,
+                    deterministic= True,
+                    enable_kv_cache= enable_kv_cache,
+                    cur_index= cur_index,
                 )
-                if deterministic:
-                    x, new_cache = apply_fn(
-                        {"params": layer_params, "cache": layer_cache},
-                        x,
-                        deterministic=True,
-                        enable_kv_cache=enable_kv_cache,
-                        cur_index=cur_index,
-                    )
-                else:
-                    layer_rng = self.make_rng("dropout")
-                    x, new_cache = apply_fn(
-                        {"params": layer_params, "cache": layer_cache},
-                        x,
-                        rngs={"dropout": layer_rng},
-                        deterministic=False,
-                        enable_kv_cache=enable_kv_cache,
-                        cur_index=cur_index,
-                    )
+            else:
+                layer_rng = self.make_rng("dropout")
+                x, mutated = apply_fn(
+                    vars,
+                    x,
+                    rngs={"dropout": layer_rng},
+                    deterministic= False,
+                    enable_kv_cache= enable_kv_cache,
+                    cur_index= cur_index,
+                )
 
-                # write the cache back so it’s available next token
-                if enable_kv_cache and new_cache is not None:
-                    self.scope.put_variable("cache", f"layer_{idx}", new_cache)
+            # pull out the updated cache for this layer and store it
+            if enable_kv_cache:
+                new_cache = mutated["cache"][layer_name]
+                self.scope.put_variable("cache", layer_name, new_cache)
+
+        # for idx in range(self.n_layers):
+        #     layer_params = self.scope.get_variable("params",
+        #                                            f"layer_{idx}",
+        #                                            None)
+        #     if layer_params is None:
+        #         block = TinyTransformerBlock(
+        #             d_model=self.d_model,
+        #             n_heads=self.n_heads,
+        #             d_ff=self.d_ff,
+        #             dropout_rate=self.dropout_rate,
+        #             dtype=Config.compute_dtype,
+        #             name=f"layer_{idx}",
+        #         )
+        #         init_out = block.init(
+        #             self.make_rng("params"),
+        #             x,
+        #             deterministic=deterministic,
+        #             enable_kv_cache=enable_kv_cache,
+        #             cur_index=cur_index,
+        #         )
+        #         layer_params = init_out["params"]
+        #         self.scope.put_variable("params",
+        #                                 f"layer_{idx}",
+        #                                 layer_params)
+        #
+        #     # layer_rng = self.make_rng("dropout")
+        #     # x = transformer_block_apply(
+        #     #     layer_params,
+        #     #     x,
+        #     #     rng=layer_rng,
+        #     #     deterministic=deterministic,
+        #     #     enable_kv_cache=enable_kv_cache,
+        #     #     cur_index=cur_index,
+        #     # )
+        #         # if deterministic:            # inference → no dropout → no rng needed
+        #         #     x = transformer_block_apply(
+        #         #         layer_params, x,
+        #         #         rng=None,                # no dropout, so no rng
+        #         #         deterministic=True,
+        #         #         enable_kv_cache=enable_kv_cache,
+        #         #         cur_index=cur_index,
+        #         #     )
+        #         # else:                        # training → need a fresh sub-key
+        #         #     layer_rng = self.make_rng("dropout")
+        #         #     x = transformer_block_apply(
+        #         #         layer_params, x,
+        #         #         rng=layer_rng,
+        #         #         deterministic=False,
+        #         #         enable_kv_cache=enable_kv_cache,
+        #         #         cur_index=cur_index,
+        #         #     )
+        #     # ───────────────────────────────────────── cache handling
+        #         layer_cache = self.scope.get_variable("cache", f"layer_{idx}", None)
+        #         # jax.debug.print("Layer {idx}")
+        #
+        #         # if deterministic:             # inference – no dropout key needed
+        #         #     x, new_cache = transformer_block_apply(
+        #         #         layer_params, layer_cache, x,
+        #         #         layer_name=f"layer_{idx}",
+        #         #         deterministic=True,
+        #         #         enable_kv_cache=enable_kv_cache,
+        #         #         cur_index=cur_index,
+        #         #     )
+        #         # else:                         # training – supply a fresh key
+        #         #     layer_rng = self.make_rng("dropout")
+        #         #     x, new_cache = transformer_block_apply(
+        #         #         layer_params, layer_cache, x,
+        #         #         layer_name=f"layer_{idx}",
+        #         #         rng=layer_rng,
+        #         #         deterministic=False,
+        #         #         enable_kv_cache=enable_kv_cache,
+        #         #         cur_index=cur_index,
+        #         #     )
+        #
+        #         # Instead of calling the standalone jitted fn,
+        #         # just call the block you already created:
+        #         apply_fn = jax.jit(
+        #             block.apply,
+        #             static_argnames=("deterministic", "enable_kv_cache")
+        #         )
+        #         if deterministic:
+        #             x, new_cache = apply_fn(
+        #                 {"params": layer_params, "cache": layer_cache},
+        #                 x,
+        #                 deterministic=True,
+        #                 enable_kv_cache=enable_kv_cache,
+        #                 cur_index=cur_index,
+        #             )
+        #         else:
+        #             layer_rng = self.make_rng("dropout")
+        #             x, new_cache = apply_fn(
+        #                 {"params": layer_params, "cache": layer_cache},
+        #                 x,
+        #                 rngs={"dropout": layer_rng},
+        #                 deterministic=False,
+        #                 enable_kv_cache=enable_kv_cache,
+        #                 cur_index=cur_index,
+        #             )
+        #
+        #         # write the cache back so it’s available next token
+        #         if enable_kv_cache and new_cache is not None:
+        #             self.scope.put_variable("cache", f"layer_{idx}", new_cache)
 
 
         logits = jnp.einsum(

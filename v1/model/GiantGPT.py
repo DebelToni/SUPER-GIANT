@@ -72,7 +72,7 @@ class GiantGPT(nn.Module):
             vars = {"params": layer_params}
             if enable_kv_cache and layer_cache is not None:
                 # cache collection must be a dict of {layer_name: array}
-                vars["cache"] = { layer_name: layer_cache }
+                vars["cache"] =  layer_cache
 
             # 5) call it
             if enable_kv_cache:
@@ -220,7 +220,7 @@ class GiantGPT(nn.Module):
 
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache", "mutable"),  # cur_index NOT static
+    static_argnames=("deterministic", "enable_kv_cache"),  # cur_index NOT static
 )
 def giant_gpt_apply(
     params,

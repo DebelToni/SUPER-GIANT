@@ -90,39 +90,11 @@ class NativeJaxSelfAttention(nn.Module):
                 implementation="cudnn",
             )
 
-            # try:
-            #     y = jax.nn.dot_product_attention(
-            #             q, k, v,
-            #             bias=attn_bias,
-            #             is_causal=True,
-            #             implementation="flash",
-            #     )
-            #     jax.debug.print("Using flash attention for kv cache")
-            # except Exception:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         bias=attn_bias,
-            #         is_causal=False,
-            #         implementation="cudnn",
-            #     )
 
             y = y.reshape(b, 1, self.qkv_features)
 
         else:
             y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
-            # try:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         is_causal=True,
-            #         implementation="flash",
-            #     )
-            #     jax.debug.print("Using flash attention")
-            # except Exception:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         is_causal=False,
-            #         implementation="cudnn",
-            #     )
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)
@@ -175,78 +147,64 @@ class TinyTransformerBlock(nn.Module):
 
         return _block(self, x)
 
-# ---------------------------------------------------------------------------
-# JIT-compiled entry point ---------------------------------------------------
-# ---------------------------------------------------------------------------
-
-# d_model / n_heads / d_ff / dropout_rate can come from Config
-# (or pass them in directly if you prefer).
-
-# @functools.partial(
-#     jax.jit,
-#     # static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
-#     static_argnames=("deterministic", "enable_kv_cache"),
-# )
-# def transformer_block_apply(
-#     params,
-#     x: jnp.ndarray,
-#     *,
-#     rng,
-#     deterministic: bool,
-#     enable_kv_cache: bool = False,
-#     cur_index: Optional[int] = None,
-# ):
-#     """Forward pass for TinyTransformerBlock, compiled once with XLA.
-#
-#     Static argnames prevent needless recompiles when only batch data or RNGs
-#     change between calls.
-#     """
-#     return TinyTransformerBlock(
-#         d_model=Config.embedding_size,
-#         n_heads=Config.num_heads,
-#         d_ff=Config.feed_forward_size,
-#         dropout_rate=Config.dropout_rate,
-#         dtype=Config.compute_dtype,
-#     ).apply(
-#         {"params": params},
-#         x,
-#         deterministic=deterministic,
-#         enable_kv_cache=enable_kv_cache,
-#         cur_index=cur_index,
-#         rngs={"dropout": rng},
-#     )
-# Transformer_block.py
+# -----------------------------------------------------------------------------#
+# Fast JIT‑compiled helper for a single block
+# -----------------------------------------------------------------------------#
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache")  # cur_index NOT static
+    static_argnames=("deterministic", "enable_kv_cache", "layer_index")
 )
 def transformer_block_apply(
     params,
-    cache,                  # ← NEW
+    cache,
     x,
     *,
     rng=None,
     deterministic: bool,
     enable_kv_cache: bool = False,
     cur_index: Optional[int] = None,
+    layer_index: int,
 ):
-    # build variables dict
+    """Apply **one** Transformer block (layer_index-th) with its own params/cache.
+
+    Parameters
+    ----------
+    params
+        Param tree for the given layer (root key must be ``layer_{layer_index}``).
+    cache
+        Previous KV cache for this layer (or ``None``).
+    x
+        [batch, seq_len, d_model] hidden states.
+    rng
+        JAX PRNGKey for dropout, or ``None`` when deterministic.
+    deterministic
+        Same meaning as in the parent model.
+    enable_kv_cache
+        Whether to read/update ``cache``.
+    cur_index
+        Index of **current** token when streaming/decoding with KV‑cache.
+    layer_index
+        Integer identifying the layer; ensures the module name matches the param tree.
+    """
+    # Reconstruct the variables dict expected by Flax
     variables = {"params": params}
-    if cache is not None:                # may be None during training
+    if cache is not None:
         variables["cache"] = cache
 
     rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
-    if enable_kv_cache:
-        # ─ inference / generation ─
-        y, mutated = TinyTransformerBlock(          # *single layer*
+    # Important: use the SAME **name** as when the params were created
+    block = TinyTransformerBlock(
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
         d_ff=Config.feed_forward_size,
         dropout_rate=Config.dropout_rate,
         dtype=Config.compute_dtype,
-        name="layer",                           # name is irrelevant here
-    ).apply(
+        name=f"layer_{layer_index}",
+    )
+
+    if enable_kv_cache:
+        y, mutated = block.apply(
             variables,
             x,
             deterministic=deterministic,
@@ -257,23 +215,14 @@ def transformer_block_apply(
         )
         new_cache = mutated["cache"]
     else:
-        # ─ training / plain forward ─
-        y = TinyTransformerBlock(          # *single layer*
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        dropout_rate=Config.dropout_rate,
-        dtype=Config.compute_dtype,
-        name="layer",                           # name is irrelevant here
-    ).apply(
+        y = block.apply(
             variables,
             x,
             deterministic=deterministic,
             enable_kv_cache=False,
             cur_index=cur_index,
-            **rng_kw,          # mutable omitted
+            **rng_kw,
         )
         new_cache = None
 
-    new_cache = mutated["cache"] if enable_kv_cache else None
     return y, new_cache

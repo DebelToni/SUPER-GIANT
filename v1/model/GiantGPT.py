@@ -87,7 +87,7 @@ class GiantGPT(nn.Module):
                     kw["rngs"] = {"dropout": self.make_rng("dropout")}
                 y, mutated = apply_fn(vars, x, **kw)
                 # extract and store back
-                new_cache = mutated["cache"][layer_name]
+                new_cache = mutated["cache"]
                 self.scope.put_variable("cache", layer_name, new_cache)
                 x = y
             else:
@@ -104,7 +104,7 @@ class GiantGPT(nn.Module):
 
             # pull out the updated cache for this layer and store it
             if enable_kv_cache:
-                new_cache = mutated["cache"][layer_name]
+                new_cache = mutated["cache"]
                 self.scope.put_variable("cache", layer_name, new_cache)
 
         # for idx in range(self.n_layers):

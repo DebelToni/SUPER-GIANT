@@ -152,7 +152,7 @@ class TinyTransformerBlock(nn.Module):
 # -----------------------------------------------------------------------------#
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache", "layer_index")
+    static_argnames=("deterministic", "enable_kv_cache", "block_index")
 )
 def transformer_block_apply(
     params,
@@ -163,14 +163,14 @@ def transformer_block_apply(
     deterministic: bool,
     enable_kv_cache: bool = False,
     cur_index: Optional[int] = None,
-    layer_index: int,
+    block_index: int,
 ):
-    """Apply **one** Transformer block (layer_index-th) with its own params/cache.
+    """Apply **one** Transformer block (block_index-th) with its own params/cache.
 
     Parameters
     ----------
     params
-        Param tree for the given layer (root key must be ``layer_{layer_index}``).
+        Param tree for the given layer (root key must be ``layer_{block_index}``).
     cache
         Previous KV cache for this layer (or ``None``).
     x
@@ -183,7 +183,7 @@ def transformer_block_apply(
         Whether to read/update ``cache``.
     cur_index
         Index of **current** token when streaming/decoding with KV‑cache.
-    layer_index
+    block_index
         Integer identifying the layer; ensures the module name matches the param tree.
     """
     # Reconstruct the variables dict expected by Flax
@@ -200,7 +200,7 @@ def transformer_block_apply(
         d_ff=Config.feed_forward_size,
         dropout_rate=Config.dropout_rate,
         dtype=Config.compute_dtype,
-        name=f"layer_{layer_index}",
+        name=f"block_{block_index}",
     )
 
     if enable_kv_cache:

@@ -41,7 +41,7 @@ class GiantGPT(nn.Module):
         # --- transformer layers ---------------------------------------------
         for idx in range(self.n_layers):
             # 1. Fetch parameters (initialise on first call)
-            layer_params = self.scope.get_variable("params", f"layer_{idx}", None)
+            layer_params = self.scope.get_variable("params", f"block_{idx}", None)
             if layer_params is None:
                 block = TinyTransformerBlock(
                     d_model=self.d_model,
@@ -49,7 +49,7 @@ class GiantGPT(nn.Module):
                     d_ff=self.d_ff,
                     dropout_rate=self.dropout_rate,
                     dtype=Config.compute_dtype,
-                    name=f"layer_{idx}",
+                    name=f"block_{idx}",
                 )
                 init_out = block.init(
                     self.make_rng("params"),
@@ -59,10 +59,10 @@ class GiantGPT(nn.Module):
                     cur_index=cur_index,
                 )
                 layer_params = init_out["params"]
-                self.scope.put_variable("params", f"layer_{idx}", layer_params)
+                self.scope.put_variable("params", f"block_{idx}", layer_params)
 
             # 2. Fetch per‑layer KV‑cache (if any)
-            layer_cache = self.scope.get_variable("cache", f"layer_{idx}", None)
+            layer_cache = self.scope.get_variable("cache", f"block_{idx}", None)
 
             # 3. Apply the *compiled* block
             if deterministic:
@@ -90,7 +90,7 @@ class GiantGPT(nn.Module):
 
             # 4. Store updated cache
             if enable_kv_cache and new_cache is not None:
-                self.scope.put_variable("cache", f"layer_{idx}", new_cache)
+                self.scope.put_variable("cache", f"block_{idx}", new_cache)
 
         # --- final projection to logits --------------------------------------
         logits = jnp.einsum(
@@ -101,8 +101,7 @@ class GiantGPT(nn.Module):
         return logits
 
 
-# -------------------------------------------------------------------------- #
-# Convenience wrapper – jitted forward pass (optional)
+ – jitted forward pass (optional)
 # -------------------------------------------------------------------------- #
 @functools.partial(
     jax.jit,
@@ -166,3 +165,63 @@ def giant_gpt_apply(
             **rng_kw,
         )
         return logits
+
+
+# -------------------------------------------------------------------------- #
+# Convenience wrapper – jitted forward pass (training & inference)
+# -------------------------------------------------------------------------- #
+def build_apply_fn(model):
+    """Create a JIT‑compiled `apply_fn` bound to *model*.
+
+    The returned function has the signature::
+
+        (params, cache, tokens, *, rng=None,
+         deterministic=False, enable_kv_cache=False, cur_index=None)
+
+    It is safe to close over *model* because the object itself is treated as a
+    **static** argument by XLA – it is captured only once during compilation
+    (fix #4).
+    """
+    @functools.partial(
+        jax.jit,
+        static_argnames=("deterministic", "enable_kv_cache")
+    )
+    def _apply_fn(
+        params,
+        cache,
+        tokens,
+        *,
+        rng=None,
+        deterministic: bool = False,
+        enable_kv_cache: bool = False,
+        cur_index: Optional[int] = None,
+    ):
+        variables = {"params": params}
+        if enable_kv_cache and cache is not None:
+            variables["cache"] = cache
+
+        rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
+
+        if enable_kv_cache:
+            logits, mutated = model.apply(
+                variables,
+                tokens,
+                deterministic=deterministic,
+                enable_kv_cache=True,
+                cur_index=cur_index,
+                mutable=["cache"],
+                **rng_kw,
+            )
+            return logits, mutated["cache"]
+        else:
+            logits = model.apply(
+                variables,
+                tokens,
+                deterministic=deterministic,
+                enable_kv_cache=False,
+                cur_index=cur_index,
+                **rng_kw,
+            )
+            return logits
+
+    return _apply_fn

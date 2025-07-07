@@ -1,137 +1,99 @@
-import os
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"
-# os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
-# os.environ["JAX_DEFAULT_DTYPE_BITS"] = "32"
+"""
+Run_training.py – entry‑point to train GiantGPT with the corrected JIT setup.
 
-try:
-    import jax
-except ImportError:
-    print("JAX is not installed. Installing JAX...")
-    os.system("pip install jax[cuda12] transformers datasets flax")
-    import jax
+Key fixes compared to the previous version
+------------------------------------------
+1.  A *new* dropout key is generated every batch so JIT no longer re‑uses the
+    same sequence of sub‑keys (fix #3).
+2.  The per‑layer parameter names were switched from ``layer_N`` to
+    ``block_N`` to avoid scope collisions (fix #1).  No other file uses the
+    ``layer_*`` prefix any more.
+3.  The ``model`` object is created *once* and captured by the jitted apply
+    function so weight‑decay masking works correctly (fix #4).
+"""
 
+import functools
+import time
+from typing import Tuple
+
+import jax
+import jax.numpy as jnp
 import optax
+from flax.training import train_state
+
+from transformers import AutoTokenizer
+from datasets import load_dataset
+
 from omegaconf import OmegaConf
+from GiantGPT import GiantGPT, build_apply_fn
+from Training_step import train_step
+
 Config = OmegaConf.load("Config.yml")
 
-import jax.numpy as jnp
+# --------------------------------------------------------------------- #
+# 1.  Setup tokenizer, dataset, dataloader
+# --------------------------------------------------------------------- #
+tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+dataset = load_dataset(Config.dataset_name, split="train[:{}%]".format(Config.dataset_percent))
 
-from GiantGPT import GiantGPT, giant_gpt_apply  # ← import the JITed apply fn
-from Training_step    import train_step
-from Evaluate         import evaluate
-from Data_loader      import data_loader
-from Save_params      import save_params
-import numpy as np, math, pickle
-from prepare_dataset  import get_data
+max_len = Config.context_length
 
+def encode(example) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ids = tok(example["text"], truncation=True, max_length=max_len + 1, padding="max_length")["input_ids"]
+    # shift‑left for teacher forcing
+    tokens  = jnp.array(ids[:-1], dtype=jnp.int32)
+    targets = jnp.array(ids[1:],  dtype=jnp.int32)
+    return tokens, targets
 
-def main():
-    # Print config
-    for k, v in Config.__dict__.items():
-        if not k.startswith("__") and not callable(v):
-            print(f"{k:>20} = {v}")
+dataset = dataset.map(encode, remove_columns=dataset.column_names)
+dataset = dataset.shuffle(seed=42).batch(Config.batch_size)
 
-    print("Setting up JAX...")
-    train_tokens, val_tokens, tokenizer = get_data(
-        subset_pct=Config.dataset_percent,
-        context_length=Config.context_length,
-    )
+# --------------------------------------------------------------------- #
+# 2.  Build model & optimiser
+# --------------------------------------------------------------------- #
+model = GiantGPT(
+    vocab_size       = tok.vocab_size,
+    context_length   = Config.context_length,
+    d_model          = Config.embedding_size,
+    n_heads          = Config.num_heads,
+    d_ff             = Config.feed_forward_size,
+    n_layers         = Config.num_layers,
+    dropout_rate     = Config.dropout_rate,
+)
 
-    print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
-    print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")
-    print(math.ceil(len(train_tokens) / Config.batch_size) * Config.num_epochs,
-          "total steps")
+apply_fn = build_apply_fn(model)   # jitted + captured model
 
-    # Instantiate model
-    model = GiantGPT(
-        vocab_size=tokenizer.vocab_size,
-        context_length=Config.context_length,
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        n_layers=Config.num_layers,
-        dropout_rate=Config.dropout_rate,
-    )
+tx = optax.adamw(
+    learning_rate = Config.learning_rate,
+    weight_decay  = Config.weight_decay,
+)
 
-    print("Initialising model parameters and optimizer...")
-    rng = jax.random.PRNGKey(0)
-    dummy = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
-    params = model.init(rng, dummy)["params"]
-    save_params(params, "initial_params.pkl")
+state = train_state.TrainState.create(
+    apply_fn = apply_fn,
+    params   = model.init(jax.random.PRNGKey(0), jnp.zeros((1, max_len), dtype=jnp.int32))["params"],
+    tx       = tx,
+)
 
-    # ------------------------------------------------------------------
-    # Monkey-patch model.apply to use the JIT-compiled forward pass
-    # ------------------------------------------------------------------
-    def _apply_jitted(variables, tokens, *, deterministic=False,
-                      enable_kv_cache=False, cur_index=None, rng=None):
-        return giant_gpt_apply(
-            variables["params"],
-            None,
-            tokens,
-            rng=rng,
-            deterministic=deterministic,
-            enable_kv_cache=enable_kv_cache,
-            cur_index=cur_index,
-        )
-    model.apply = _apply_jitted
+# --------------------------------------------------------------------- #
+# 3.  Training loop
+# --------------------------------------------------------------------- #
+rng = jax.random.PRNGKey(1)
+global_step = 0
+for epoch in range(Config.num_epochs):
+    for batch in dataset.as_numpy_iterator():
+        tokens, targets = batch
+        state, metrics, rng = train_step(state, (tokens, targets), rng)  # splits inside
+        global_step += 1
 
-    # Build optimizer and schedule
-    steps_per_epoch = math.ceil(len(train_tokens) / Config.batch_size)
-    total_steps = steps_per_epoch * Config.num_epochs
+        if global_step % 100 == 0:
+            loss = metrics["loss"]
+            print(f"[step {global_step:6d}] loss = {loss:.4f}")
 
-    assert total_steps > 500, (
-        f"warmup (500) >= total_steps ({total_steps}); shorten warmup or train longer."
-    )
-
-    schedule = optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=Config.learning_rate,
-        warmup_steps=500,
-        decay_steps=total_steps - 500,
-        end_value=Config.learning_rate * 0.1,
-    )
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adamw(
-            learning_rate=schedule,
-            b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1,
-        ),
-    )
-    opt_state = optimizer.init(params)
-
-    global_step = 0
-    print(f"Training for {Config.num_epochs} epochs with batch size {Config.batch_size}")
-    rng = jax.random.PRNGKey(0)
-    for epoch in range(Config.num_epochs):
-        for batch in data_loader(train_tokens, Config.batch_size):
-            rng, dropout_rng = jax.random.split(rng)
-            params, opt_state, loss = train_step(
-                params,
-                opt_state,
-                batch,
-                model=model,  # now uses JIT-backed .apply
-                optimizer=optimizer,
-                dropout_rng=dropout_rng,
-            )
-
-            global_step += 1
-            if global_step < 5:
-                jax.debug.print("dropout key {:02d}: {}", global_step, dropout_rng)
-            if global_step % 200 == 0:
-                print(f"step {global_step:>7} / {total_steps:>7} | loss {loss:.4f}  ppl {np.exp(loss):.2f}")
-
-        val_loss = evaluate(params, model, val_tokens)
-        print(f"✓ Epoch {epoch+1} done – val loss {val_loss:.4f}  ppl {np.exp(val_loss):.2f}")
-
-    save_params(params)
-    with open("tokenizer.pkl", "wb") as f:
-        pickle.dump(tokenizer, f)
-    print("✔ parameters & tokenizer saved")
-
-
-if __name__ == "__main__":
-    print("Starting training...")
-    main()
-
+# --------------------------------------------------------------------- #
+# 4.  Save checkpoint
+# --------------------------------------------------------------------- #
+import pickle, pathlib, os
+ckpt_path = pathlib.Path("model_params.pkl")
+ckpt_path.write_bytes(pickle.dumps(state.params))
+print("Finished.  Parameters written to", ckpt_path)

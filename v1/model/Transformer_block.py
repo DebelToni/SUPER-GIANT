@@ -177,7 +177,8 @@ class TinyTransformerBlock(nn.Module):
 
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache")  # cur_index NOT static
+    # static_argnames=("deterministic", "enable_kv_cache")  # cur_index NOT static
+    static_argnames=("deterministic", "enable_kv_cache", "layer_name")
 )
 def transformer_block_apply(
     params,

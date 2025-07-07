@@ -94,7 +94,7 @@ class GiantGPT(nn.Module):
 
                 if deterministic:             # inference – no dropout key needed
                     x, new_cache = transformer_block_apply(
-                        layer_params, layer_cache, x,
+                        layer_params, layer_cache, x, layer_name=f"layer_{idx}",
                         deterministic=True,
                         enable_kv_cache=enable_kv_cache,
                         cur_index=cur_index,
@@ -102,7 +102,7 @@ class GiantGPT(nn.Module):
                 else:                         # training – supply a fresh key
                     layer_rng = self.make_rng("dropout")
                     x, new_cache = transformer_block_apply(
-                        layer_params, layer_cache, x,
+                        layer_params, layer_cache, x, layer_name=f"layer_{idx}",
                         rng=layer_rng,
                         deterministic=False,
                         enable_kv_cache=enable_kv_cache,
@@ -173,56 +173,6 @@ def giant_gpt_apply(
         return logits, mutated["cache"]
     else:
         # ── Training/Eval: no cache → only logits ─────────────────
-        logits = model.apply(
-            variables,
-            tokens,
-            deterministic=deterministic,
-            enable_kv_cache=False,
-            cur_index=cur_index,
-            **rngs_kw,
-        )
-        return logits
-
-
-# -----------------------------------------------------------------------------
-# Jitted helper for generation – *model is now a static arg* so we don't recreate
-# it inside the compiled graph.  That keeps the optimiser masks intact and
-# avoids needless recompilation.
-# -----------------------------------------------------------------------------
-@functools.partial(
-    jax.jit,
-    static_argnames=("model", "deterministic", "enable_kv_cache"),
-)
-def giant_gpt_apply(
-    model,
-    params,
-    cache,
-    tokens,
-    *,
-    rng=None,
-    deterministic: bool = False,
-    enable_kv_cache: bool = False,
-    cur_index: Optional[int] = None,
-):
-    # Prepare variable collections
-    variables = {"params": params}
-    if enable_kv_cache and cache is not None:
-        variables["cache"] = cache
-
-    rngs_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
-
-    if enable_kv_cache:
-        logits, mutated = model.apply(
-            variables,
-            tokens,
-            deterministic=deterministic,
-            enable_kv_cache=True,
-            cur_index=cur_index,
-            mutable=["cache"],
-            **rngs_kw,
-        )
-        return logits, mutated["cache"]
-    else:
         logits = model.apply(
             variables,
             tokens,

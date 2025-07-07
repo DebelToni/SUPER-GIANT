@@ -39,7 +39,6 @@ class NativeJaxSelfAttention(nn.Module):
         self.k_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="k_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
         self.v_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="v_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
 
-
         self.o_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
@@ -66,12 +65,10 @@ class NativeJaxSelfAttention(nn.Module):
         sin, cos = sin[None, :, None, :], cos[None, :, None, :]
         q, k = apply_rope(q, sin, cos), apply_rope(k, sin, cos)
 
-
         if enable_kv_cache:
             assert cur_index is not None, "Need cur_index when enable_kv_cache=True"
             cached_k = self.variable( "cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
             cached_v = self.variable( "cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
-
 
             cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k.squeeze(1))
             cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v.squeeze(1))
@@ -129,7 +126,6 @@ class NativeJaxSelfAttention(nn.Module):
         y = self.dropout(y, deterministic=deterministic)
         return y
 
-
 class TinyTransformerBlock(nn.Module):
     """Decoder‑style transformer block (GPT) with checkpointing."""
 
@@ -179,43 +175,6 @@ class TinyTransformerBlock(nn.Module):
 # JIT-compiled entry point ---------------------------------------------------
 # ---------------------------------------------------------------------------
 
-# d_model / n_heads / d_ff / dropout_rate can come from Config
-# (or pass them in directly if you prefer).
-
-# @functools.partial(
-#     jax.jit,
-#     # static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
-#     static_argnames=("deterministic", "enable_kv_cache"),
-# )
-# def transformer_block_apply(
-#     params,
-#     x: jnp.ndarray,
-#     *,
-#     rng,
-#     deterministic: bool,
-#     enable_kv_cache: bool = False,
-#     cur_index: Optional[int] = None,
-# ):
-#     """Forward pass for TinyTransformerBlock, compiled once with XLA.
-#
-#     Static argnames prevent needless recompiles when only batch data or RNGs
-#     change between calls.
-#     """
-#     return TinyTransformerBlock(
-#         d_model=Config.embedding_size,
-#         n_heads=Config.num_heads,
-#         d_ff=Config.feed_forward_size,
-#         dropout_rate=Config.dropout_rate,
-#         dtype=Config.compute_dtype,
-#     ).apply(
-#         {"params": params},
-#         x,
-#         deterministic=deterministic,
-#         enable_kv_cache=enable_kv_cache,
-#         cur_index=cur_index,
-#         rngs={"dropout": rng},
-#     )
-# Transformer_block.py
 @functools.partial(
     jax.jit,
     static_argnames=("deterministic", "enable_kv_cache")  # cur_index NOT static
@@ -229,6 +188,7 @@ def transformer_block_apply(
     deterministic: bool,
     enable_kv_cache: bool = False,
     cur_index: Optional[int] = None,
+    layer_name: str = "layer",       # ← NEW
 ):
     # build variables dict
     variables = {"params": params}
@@ -240,13 +200,13 @@ def transformer_block_apply(
     if enable_kv_cache:
         # ─ inference / generation ─
         y, mutated = TinyTransformerBlock(          # *single layer*
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        dropout_rate=Config.dropout_rate,
-        dtype=Config.compute_dtype,
-        name="layer",                           # name is irrelevant here
-    ).apply(
+            d_model=Config.embedding_size,
+            n_heads=Config.num_heads,
+            d_ff=Config.feed_forward_size,
+            dropout_rate=Config.dropout_rate,
+            dtype=Config.compute_dtype,
+            name=layer_name,                      # <--- PATCHED
+        ).apply(
             variables,
             x,
             deterministic=deterministic,
@@ -259,13 +219,13 @@ def transformer_block_apply(
     else:
         # ─ training / plain forward ─
         y = TinyTransformerBlock(          # *single layer*
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        dropout_rate=Config.dropout_rate,
-        dtype=Config.compute_dtype,
-        name="layer",                           # name is irrelevant here
-    ).apply(
+            d_model=Config.embedding_size,
+            n_heads=Config.num_heads,
+            d_ff=Config.feed_forward_size,
+            dropout_rate=Config.dropout_rate,
+            dtype=Config.compute_dtype,
+            name=layer_name,                  # <--- PATCHED
+        ).apply(
             variables,
             x,
             deterministic=deterministic,
@@ -275,5 +235,6 @@ def transformer_block_apply(
         )
         new_cache = None
 
-    new_cache = mutated["cache"] if enable_kv_cache else None
+    # new_cache already set above
     return y, new_cache
+

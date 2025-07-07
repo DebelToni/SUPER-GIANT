@@ -87,39 +87,11 @@ class NativeJaxSelfAttention(nn.Module):
                 implementation="cudnn",
             )
 
-            # try:
-            #     y = jax.nn.dot_product_attention(
-            #             q, k, v,
-            #             bias=attn_bias,
-            #             is_causal=True,
-            #             implementation="flash",
-            #     )
-            #     jax.debug.print("Using flash attention for kv cache")
-            # except Exception:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         bias=attn_bias,
-            #         is_causal=False,
-            #         implementation="cudnn",
-            #     )
 
             y = y.reshape(b, 1, self.qkv_features)
 
         else:
             y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
-            # try:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         is_causal=True,
-            #         implementation="flash",
-            #     )
-            #     jax.debug.print("Using flash attention")
-            # except Exception:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         is_causal=False,
-            #         implementation="cudnn",
-            #     )
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)
@@ -171,42 +143,36 @@ class TinyTransformerBlock(nn.Module):
 
         return _block(self, x)
 
-# ---------------------------------------------------------------------------
-# JIT-compiled entry point ---------------------------------------------------
-# ---------------------------------------------------------------------------
 
 @functools.partial(
     jax.jit,
-    # static_argnames=("deterministic", "enable_kv_cache")  # cur_index NOT static
     static_argnames=("deterministic", "enable_kv_cache", "layer_name")
 )
 def transformer_block_apply(
     params,
-    cache,                  # ← NEW
+    cache,
     x,
     *,
     rng=None,
     deterministic: bool,
     enable_kv_cache: bool = False,
     cur_index: Optional[int] = None,
-    layer_name: str = "layer",       # ← NEW
+    layer_name: str = "layer",
 ):
-    # build variables dict
     variables = {"params": params}
-    if cache is not None:                # may be None during training
+    if cache is not None:
         variables["cache"] = cache
 
     rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
     if enable_kv_cache:
-        # ─ inference / generation ─
-        y, mutated = TinyTransformerBlock(          # *single layer*
+        y, mutated = TinyTransformerBlock(
             d_model=Config.embedding_size,
             n_heads=Config.num_heads,
             d_ff=Config.feed_forward_size,
             dropout_rate=Config.dropout_rate,
             dtype=Config.compute_dtype,
-            name=layer_name,                      # <--- PATCHED
+            name=layer_name,
         ).apply(
             variables,
             x,
@@ -218,24 +184,22 @@ def transformer_block_apply(
         )
         new_cache = mutated["cache"]
     else:
-        # ─ training / plain forward ─
-        y = TinyTransformerBlock(          # *single layer*
+        y = TinyTransformerBlock(
             d_model=Config.embedding_size,
             n_heads=Config.num_heads,
             d_ff=Config.feed_forward_size,
             dropout_rate=Config.dropout_rate,
             dtype=Config.compute_dtype,
-            name=layer_name,                  # <--- PATCHED
+            name=layer_name,
         ).apply(
             variables,
             x,
             deterministic=deterministic,
             enable_kv_cache=False,
             cur_index=cur_index,
-            **rng_kw,          # mutable omitted
+            **rng_kw,
         )
         new_cache = None
 
-    # new_cache already set above
     return y, new_cache
 

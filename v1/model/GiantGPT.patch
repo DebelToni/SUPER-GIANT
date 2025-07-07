@@ -1,0 +1,62 @@
+--- a/GiantGPT.py
++++ b/GiantGPT.py
+@@
+@@
+-        for i in range(self.num_layers):
+-            layer_name = f"layer_{i}"
+-            layer_params = params.get(layer_name) if params is not None else None
+-            layer_cache = cache.get(layer_name) if cache is not None else None
+-
+-            # fast path every time
+-            x, new_cache = transformer_block_apply_jitted(
+-                x,
+-                layer_params,
+-                layer_cache,
+-                deterministic=deterministic,
+-                layer_name=layer_name,
+-                hidden_size=self.hidden_size,
+-                num_heads=self.num_heads,
+-                mlp_size=self.mlp_size,
+-                dropout_rate=self.dropout_rate,
+-                dtype=self.dtype,
+-            )
+-
+-            self.put_variable("cache", layer_name, new_cache)
++        for i in range(self.num_layers):
++            layer_name = f"layer_{i}"
++
++            # Does the param subtree for this layer already exist?
++            if self.has_variable("params", layer_name):
++                layer_params = self.get_variable("params", layer_name)
++                layer_cache = self.get_variable("cache", layer_name) if self.has_variable("cache", layer_name) else None
++
++                # ---------- fast path (JIT) ----------
++                x, new_cache = transformer_block_apply_jitted(
++                    x,
++                    layer_params,
++                    layer_cache,
++                    deterministic=deterministic,
++                    layer_name=layer_name,
++                    hidden_size=self.hidden_size,
++                    num_heads=self.num_heads,
++                    mlp_size=self.mlp_size,
++                    dropout_rate=self.dropout_rate,
++                    dtype=self.dtype,
++                )
++            else:
++                # ---------- first pass: create params ----------
++                block = TinyTransformerBlock(
++                    hidden_size=self.hidden_size,
++                    num_heads=self.num_heads,
++                    mlp_size=self.mlp_size,
++                    dropout_rate=self.dropout_rate,
++                    dtype=self.dtype,
++                    name=layer_name,
++                )
++                x, new_cache = block(
++                    x,
++                    deterministic=deterministic,
++                )
++
++            # always store / update cache so generation sees it
++            self.put_variable("cache", layer_name, new_cache)

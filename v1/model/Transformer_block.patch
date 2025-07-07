@@ -1,0 +1,63 @@
+--- a/Transformer_block.py
++++ b/Transformer_block.py
+@@
+-# Original implementation lines above remain unchanged
++# -----------------------------------------------------------
++# Fast layer helper (JIT‑compiled).  **Requires** an existing
++# parameter subtree for the layer and therefore must *not*
++# be invoked during the very first model.init().
++# -----------------------------------------------------------
++
++from functools import partial
++import jax
++
++@partial(jax.jit,
++         static_argnames=("layer_name", "hidden_size", "num_heads", "mlp_size", "dropout_rate", "dtype"))
++def transformer_block_apply_jitted(
++        x,
++        params,
++        cache,
++        deterministic,
++        *,
++        layer_name,
++        hidden_size,
++        num_heads,
++        mlp_size,
++        dropout_rate,
++        dtype):
++    """Run *one* TinyTransformerBlock with its own param & cache subtree.
++
++    Args:
++        x:  [batch, seq, hidden]   – input activations.
++        params:  param subtree that belongs to *this* layer.  **Must not be None**.
++        cache:   kv‑cache subtree for the layer (may be None the first time).
++        deterministic:  bool – `True` disables dropout.
++
++    Returns:  (y, new_cache)
++    """
++    if params is None:
++        raise ValueError(
++            f"transformer_block_apply_jitted called with params=None for {layer_name};  " 
++            "this helper is only valid after parameters have been created.")
++
++    if cache is None:
++        cache = {}
++
++    variables = {"params": {layer_name: params}, "cache": {layer_name: cache}}
++
++    y, mutated = TinyTransformerBlock(
++        hidden_size=hidden_size,
++        num_heads=num_heads,
++        mlp_size=mlp_size,
++        dropout_rate=dropout_rate,
++        dtype=dtype,
++        name=layer_name,
++    ).apply(
++        variables,
++        x,
++        deterministic=deterministic,
++        mutable=["cache"],
++    )
++
++    new_cache = mutated["cache"][layer_name]
++    return y, new_cache

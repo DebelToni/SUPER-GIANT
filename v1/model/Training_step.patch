@@ -1,0 +1,12 @@
+--- a/Training_step.py
++++ b/Training_step.py
+@@
+-        logits, _ = state.apply_fn(
+-            variables,
+-            deterministic=False,
+-        )
++        logits, _ = state.apply_fn(
++            variables,
++            deterministic=False,
++            rngs={"dropout": dropout_rng},
++        )

@@ -39,7 +39,8 @@ class GiantGPT(nn.Module):
                                                  deterministic=deterministic)
 
         for idx in range(self.n_layers):
-            layer_name  = f"layer_{idx}"
+            layer_name = f"layer_{idx}"
+            # 1) lazy-init params exactly once
             layer_params = self.scope.get_variable("params", layer_name, None)
             if layer_params is None:
                 block = TinyTransformerBlock(
@@ -50,7 +51,7 @@ class GiantGPT(nn.Module):
                     dtype=Config.compute_dtype,
                     name=layer_name,
                 )
-                init_out     = block.init(
+                init_out = block.init(
                     self.make_rng("params"),
                     x,
                     deterministic=deterministic,
@@ -59,40 +60,48 @@ class GiantGPT(nn.Module):
                 )
                 layer_params = init_out["params"]
                 self.scope.put_variable("params", layer_name, layer_params)
-
-            # pull out whatever cache we have (None or an array)
+            # 2) grab existing cache (or None)
             layer_cache = self.scope.get_variable("cache", layer_name, None)
 
-            # jit-compile this block instance once
+            # 3) jit the exact same block.apply, now marking `mutable` as static too
             apply_fn = jax.jit(
                 block.apply,
-                static_argnames=("deterministic", "enable_kv_cache")
+                static_argnames=("deterministic", "enable_kv_cache", "mutable"),
             )
 
-            # build the “variables” dict properly
+            # 4) build the proper variables dict
             vars = {"params": layer_params}
             if enable_kv_cache and layer_cache is not None:
+                # cache collection must be a dict of {layer_name: array}
                 vars["cache"] = { layer_name: layer_cache }
 
-            # call it
-            if deterministic:
-                x, mutated = apply_fn(
-                    vars,
-                    x,
-                    deterministic= True,
-                    enable_kv_cache= enable_kv_cache,
-                    cur_index= cur_index,
-                )
+            # 5) call it
+            if enable_kv_cache:
+                # with cache, request mutated state
+                kw = {
+                    "deterministic": deterministic,
+                    "enable_kv_cache": True,
+                    "cur_index": cur_index,
+                    "mutable": ["cache"],
+                }
+                if not deterministic:
+                    kw["rngs"] = {"dropout": self.make_rng("dropout")}
+                y, mutated = apply_fn(vars, x, **kw)
+                # extract and store back
+                new_cache = mutated["cache"][layer_name]
+                self.scope.put_variable("cache", layer_name, new_cache)
+                x = y
             else:
-                layer_rng = self.make_rng("dropout")
-                x, mutated = apply_fn(
-                    vars,
-                    x,
-                    rngs={"dropout": layer_rng},
-                    deterministic= False,
-                    enable_kv_cache= enable_kv_cache,
-                    cur_index= cur_index,
-                )
+                # without cache, no mutable, so only one return
+                kw = {
+                    "deterministic": deterministic,
+                    "enable_kv_cache": False,
+                    "cur_index": cur_index,
+                }
+                if not deterministic:
+                    kw["rngs"] = {"dropout": self.make_rng("dropout")}
+                x = apply_fn(vars, x, **kw)
+
 
             # pull out the updated cache for this layer and store it
             if enable_kv_cache:

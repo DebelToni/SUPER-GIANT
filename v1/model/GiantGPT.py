@@ -42,26 +42,29 @@ class GiantGPT(nn.Module):
             layer_params = self.scope.get_variable("params",
                                                    f"layer_{idx}",
                                                    None)
-            if layer_params is None:
-                block = TinyTransformerBlock(
-                    d_model=self.d_model,
-                    n_heads=self.n_heads,
-                    d_ff=self.d_ff,
-                    dropout_rate=self.dropout_rate,
-                    dtype=Config.compute_dtype,
-                    name=f"layer_{idx}",
-                )
-                init_out = block.init(
-                    self.make_rng("params"),
-                    x,
-                    deterministic=deterministic,
+            layer_cache = self.scope.get_variable("cache", f"layer_{idx}", None)
+
+            if deterministic:
+                x, new_cache = transformer_block_apply(
+                    layer_params, layer_cache, x,
+                    layer_name=f"layer_{idx}",
+                    rng=None,
+                    deterministic=True,
                     enable_kv_cache=enable_kv_cache,
                     cur_index=cur_index,
                 )
-                layer_params = init_out["params"]
-                self.scope.put_variable("params",
-                                        f"layer_{idx}",
-                                        layer_params)
+            else:
+                layer_rng = self.make_rng("dropout")
+                x, new_cache = transformer_block_apply(
+                    layer_params, layer_cache, x,
+                    layer_name=f"layer_{idx}",
+                    rng=layer_rng,
+                    deterministic=False,
+                    enable_kv_cache=enable_kv_cache,
+                    cur_index=cur_index,
+                )
+            if enable_kv_cache and new_cache is not None:
+                self.scope.put_variable("cache", f"layer_{idx}", new_cache)
 
             # layer_rng = self.make_rng("dropout")
             # x = transformer_block_apply(

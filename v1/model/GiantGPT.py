@@ -95,6 +95,7 @@ class GiantGPT(nn.Module):
                 if deterministic:             # inference – no dropout key needed
                     x, new_cache = transformer_block_apply(
                         layer_params, layer_cache, x,
+                        layer_name=f"layer_{idx}",
                         deterministic=True,
                         enable_kv_cache=enable_kv_cache,
                         cur_index=cur_index,
@@ -103,6 +104,7 @@ class GiantGPT(nn.Module):
                     layer_rng = self.make_rng("dropout")
                     x, new_cache = transformer_block_apply(
                         layer_params, layer_cache, x,
+                        layer_name=f"layer_{idx}",
                         rng=layer_rng,
                         deterministic=False,
                         enable_kv_cache=enable_kv_cache,

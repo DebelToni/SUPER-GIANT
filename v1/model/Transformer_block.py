@@ -153,76 +153,67 @@ class TinyTransformerBlock(nn.Module):
 @functools.partial(
     jax.jit,
     static_argnames=("deterministic", "enable_kv_cache", "block_index")
-)
-def transformer_block_apply(
-    params,
-    cache,
-    x,
-    *,
-    rng=None,
-    deterministic: bool,
-    enable_kv_cache: bool = False,
-    cur_index: Optional[int] = None,
-    block_index: int,
-):
-    """Apply **one** Transformer block (block_index-th) with its own params/cache.
+)# ─── Transformer_block.py ──────────────────────────────────────────────────────
+# OLD signature
+# def transformer_block_apply(params, cache, x, *, deterministic=False,
+#                             enable_kv_cache=False, cur_index=None, rng=None):
 
-    Parameters
-    ----------
-    params
-        Param tree for the given layer (root key must be ``layer_{block_index}``).
-    cache
-        Previous KV cache for this layer (or ``None``).
-    x
-        [batch, seq_len, d_model] hidden states.
-    rng
-        JAX PRNGKey for dropout, or ``None`` when deterministic.
-    deterministic
-        Same meaning as in the parent model.
-    enable_kv_cache
-        Whether to read/update ``cache``.
-    cur_index
-        Index of **current** token when streaming/decoding with KV‑cache.
-    block_index
-        Integer identifying the layer; ensures the module name matches the param tree.
+# NEW signature  ➜ add layer_index with a sensible default
+def transformer_block_apply(
+        params,
+        cache,
+        x,
+        *,
+        deterministic: bool = False,
+        enable_kv_cache: bool = False,
+        cur_index: int | None = None,
+        rng: jax.random.KeyArray | None = None,
+        layer_index: int | None = None,          # ← added
+):
     """
-    # Reconstruct the variables dict expected by Flax
+    Runs a single TinyTransformerBlock with unique scope name block_<idx>.
+    """
+    block = TinyTransformerBlock(
+        d_model=params["attn"]["qkv"].shape[-1],
+        n_heads=params["attn"]["qkv"].shape[-2],
+        d_ff=params["mlp"]["w1"].shape[-1],
+        dropout_rate=0.1,
+        name=None if layer_index is None else f"block_{layer_index}",
+    )
+
     variables = {"params": params}
     if cache is not None:
         variables["cache"] = cache
 
-    rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
-
-    # Important: use the SAME **name** as when the params were created
-    block = TinyTransformerBlock(
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        dropout_rate=Config.dropout_rate,
-        dtype=Config.compute_dtype,
-        name=f"block_{block_index}",
+    y, new_cache = block.apply(
+        variables,
+        x,
+        deterministic=deterministic,
+        enable_kv_cache=enable_kv_cache,
+        cur_index=cur_index,
+        rngs={"dropout": rng} if rng is not None else None,
     )
-
-    if enable_kv_cache:
-        y, mutated = block.apply(
-            variables,
-            x,
-            deterministic=deterministic,
-            enable_kv_cache=True,
-            cur_index=cur_index,
-            mutable=["cache"],
-            **rng_kw,
-        )
-        new_cache = mutated["cache"]
-    else:
-        y = block.apply(
-            variables,
-            x,
-            deterministic=deterministic,
-            enable_kv_cache=False,
-            cur_index=cur_index,
-            **rng_kw,
-        )
-        new_cache = None
-
     return y, new_cache
+
+
+    # if enable_kv_cache:
+    #     y, mutated = block.apply(
+    #         variables,
+    #         x,
+    #         deterministic=deterministic,
+    #         enable_kv_cache=True,
+    #         cur_index=cur_index,
+    #         mutable=["cache"],
+    #         **rng_kw,
+    #     )
+    #     new_cache = mutated["cache"]
+    # else:
+    #     y = block.apply(
+    #         variables,
+    #         x,
+    #         deterministic=deterministic,
+    #         enable_kv_cache=False,
+    #         cur_index=cur_index,
+    #         **rng_kw,
+    #     )
+    #     new_cache = None

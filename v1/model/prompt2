@@ -1,0 +1,784 @@
+I have made a custom transformer decoder-only style GPT model written in JAX. 
+It was performing well but for some reason I tryed wrapping as much as I could in JIT compiled modules. 
+Before that the main training and inference was JITed but there were still things that could be done do minimize python interpreting and improve efficiency and speed. 
+
+It took quite a big refactor but from tests I think i managed to make it work. 
+
+The was a big problem tho - refactoring so much the JIT logic I made huge mistakes that made my LLM not function and perform as intended at all. 
+
+I somehow managed to introduce more problems than fixes with this refactor, so I gave it to openai o3 model to try to find the problems and it managed to list a few. 
+
+What i want from you is to help me implement the fixes suggested by the examination of the code. For that i will provide you in a text format the files that have the probelms (not my hole code structure because that is not needed). Here they are:
+
+1. My transformer block code:
+```Transformer_block.py
+from __future__ import annotations
+
+from typing import Optional
+
+import jax
+from jax._src.core import mutable_array
+import jax.numpy as jnp
+from flax import linen as nn
+from flax.linen import RMSNorm
+
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
+import functools
+
+def _rotate_every_two(x):
+    x1, x2 = jnp.split(x, 2, axis=-1)
+    return jnp.concatenate((-x2, x1), axis=-1)
+
+def apply_rope(q_or_k, sin, cos):
+    return (q_or_k * cos) + (_rotate_every_two(q_or_k) * sin)
+
+class NativeJaxSelfAttention(nn.Module):
+    """Multi‑head self‑attention using jax.nn.dot_product_attention (cuDNN)."""
+
+    num_heads: int
+    qkv_features: int
+    dropout_rate: float = 0.0
+    num_kv: int = 1
+    dtype: jnp.dtype = Config.compute_dtype
+
+    def setup(self):
+        assert (
+            self.qkv_features % self.num_heads == 0
+        ), "qkv_features must be divisible by num_heads"
+        self.head_dim = self.qkv_features // self.num_heads
+
+        self.q_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
+        self.k_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="k_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
+        self.v_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="v_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
+
+
+        self.o_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
+
+        self.dropout = nn.Dropout(rate=self.dropout_rate)
+
+    @nn.compact
+    def __call__(self, x, *, deterministic: bool, enable_kv_cache: bool = False, cur_index: Optional[int] = None):
+        b, l, _ = x.shape
+        head_dim = self.qkv_features // self.num_heads
+
+        q = self.q_proj(x).reshape(b, l, self.num_heads, head_dim)
+
+        k = self.k_proj(x).reshape(b, l, self.num_kv, head_dim)
+        v = self.v_proj(x).reshape(b, l, self.num_kv, head_dim)
+
+        k = jnp.repeat(k, self.num_heads // self.num_kv, axis=2)
+        v = jnp.repeat(v, self.num_heads // self.num_kv, axis=2)
+
+        rot_dim = head_dim
+        inv_freq = 1.0 / (10000 ** (jnp.arange(0, rot_dim, 2) / rot_dim))
+        seq      = jnp.array([cur_index]) if enable_kv_cache else jnp.arange(l)
+        angles   = jnp.einsum('i,j->ij', seq, inv_freq)
+        emb      = jnp.repeat(angles, 2, axis=-1)
+        sin, cos = jnp.sin(emb).astype(self.dtype), jnp.cos(emb).astype(self.dtype)
+        sin, cos = sin[None, :, None, :], cos[None, :, None, :]
+        q, k = apply_rope(q, sin, cos), apply_rope(k, sin, cos)
+
+
+        if enable_kv_cache:
+            assert cur_index is not None, "Need cur_index when enable_kv_cache=True"
+            cached_k = self.variable( "cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
+            cached_v = self.variable( "cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
+
+
+            cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k.squeeze(1))
+            cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v.squeeze(1))
+            k = jnp.swapaxes(cached_k.value, 1, 2)
+            v = jnp.swapaxes(cached_v.value, 1, 2)
+
+            key_len   = k.shape[1]
+            valid     = jnp.arange(key_len) <= cur_index
+            attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
+            attn_bias = attn_bias[None, None, None, :]
+
+            try:
+                y = jax.nn.dot_product_attention( q, k, v, bias=attn_bias, is_causal=True, implementation="cudnn")
+            except Exception:
+                y = jax.nn.dot_product_attention( q, k, v, bias=attn_bias, is_causal=True, implementation="xla")
+
+
+            y = y.reshape(b, 1, self.qkv_features)
+
+        else:
+            try:
+                y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
+            except Exception:
+                y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="xla")
+            y = y.reshape(b, l, self.qkv_features)
+
+        y = self.o_proj(y)
+        y = self.dropout(y, deterministic=deterministic)
+        return y
+
+
+class TinyTransformerBlock(nn.Module):
+    """Decoder‑style transformer block (GPT) with checkpointing."""
+
+    d_model: int
+    n_heads: int
+    d_ff: int
+    dropout_rate: float = 0.1
+    dtype: jnp.dtype = Config.compute_dtype
+
+    @nn.compact
+    def __call__(self, x, *, deterministic: bool, enable_kv_cache: bool = False, cur_index: Optional[int] = None):
+        @nn.remat
+        def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
+            residual = h
+            h_norm = RMSNorm(name="rms1", dtype=self.dtype)(h)
+            h_attn = NativeJaxSelfAttention(
+                num_heads=module.n_heads,
+                qkv_features=module.d_model,
+                dropout_rate=module.dropout_rate,
+                dtype=module.dtype,
+            )(h_norm, deterministic=deterministic, enable_kv_cache=enable_kv_cache, cur_index=cur_index)
+            h = residual + h_attn
+
+            residual = h
+            h_norm = RMSNorm(name="rms2", dtype=self.dtype)(h)
+
+            gate_dim = module.d_ff // 3
+            proj_dim = gate_dim * 2
+
+            h_proj = nn.Dense(
+                proj_dim,
+                name="fc1",
+                dtype=module.dtype,
+                param_dtype=Config.param_dtype,
+            )(h_norm)
+
+            u, v = jnp.split(h_proj, 2, axis=-1)
+            h_ffn = nn.silu(u) * v
+
+            h_ffn = nn.Dense(module.d_model, name="fc2", dtype=module.dtype, param_dtype=Config.param_dtype)(h_ffn)
+            h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)
+            return residual + h_ffn
+
+        return _block(self, x)
+
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=("deterministic", "enable_kv_cache")
+)
+def transformer_block_apply(
+    params,
+    cache,
+    x,
+    *,
+    rng=None,
+    deterministic: bool,
+    enable_kv_cache: bool = False,
+    cur_index: Optional[int] = None,
+):
+    variables = {"params": params}
+    if cache is not None:
+        variables["cache"] = cache
+
+    rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
+
+    if enable_kv_cache:
+        y, mutated = TinyTransformerBlock(
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        dropout_rate=Config.dropout_rate,
+        dtype=Config.compute_dtype,
+        name="layer",
+    ).apply(
+            variables,
+            x,
+            deterministic=deterministic,
+            enable_kv_cache=True,
+            cur_index=cur_index,
+            mutable=["cache"],
+            **rng_kw,
+        )
+        new_cache = mutated["cache"]
+    else:
+        y = TinyTransformerBlock(
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        dropout_rate=Config.dropout_rate,
+        dtype=Config.compute_dtype,
+        name="layer",
+    ).apply(
+            variables,
+            x,
+            deterministic=deterministic,
+            enable_kv_cache=False,
+            cur_index=cur_index,
+            **rng_kw,
+        )
+        new_cache = None
+
+    new_cache = mutated["cache"] if enable_kv_cache else None
+    return y, new_cache
+```
+
+Here is my model wrapper:
+```GiantGPT.py
+from typing import Optional
+import functools
+import jax
+
+import jax.numpy as jnp
+from flax import linen as nn
+from Transformer_block import TinyTransformerBlock, transformer_block_apply
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
+class GiantGPT(nn.Module):
+    vocab_size:     int
+    context_length: int
+    d_model:        int
+    n_heads:        int
+    d_ff:           int
+    n_layers:       int
+    dropout_rate:   float = 0.1
+
+    @nn.compact
+    def __call__(self,
+                 tokens,
+                 *,
+                 deterministic: bool = False,
+                 enable_kv_cache: bool = False,
+                 cur_index: Optional[int] = None):
+        embed = nn.Embed(
+            num_embeddings=self.vocab_size,
+            features=self.d_model,
+            embedding_init=nn.initializers.normal(stddev=0.02),
+            dtype=Config.compute_dtype,
+            param_dtype=Config.param_dtype,
+        )
+        x = embed(tokens)
+
+        x = nn.Dropout(rate=self.dropout_rate)(x,
+                                                 deterministic=deterministic)
+
+        for idx in range(self.n_layers):
+            layer_params = self.scope.get_variable("params",
+                                                   f"layer_{idx}",
+                                                   None)
+            if layer_params is None:
+                block = TinyTransformerBlock(
+                    d_model=self.d_model,
+                    n_heads=self.n_heads,
+                    d_ff=self.d_ff,
+                    dropout_rate=self.dropout_rate,
+                    dtype=Config.compute_dtype,
+                    name=f"layer_{idx}",
+                )
+                init_out = block.init(
+                    self.make_rng("params"),
+                    x,
+                    deterministic=deterministic,
+                    enable_kv_cache=enable_kv_cache,
+                    cur_index=cur_index,
+                )
+                layer_params = init_out["params"]
+                self.scope.put_variable("params",
+                                        f"layer_{idx}",
+                                        layer_params)
+
+                layer_cache = self.scope.get_variable("cache", f"layer_{idx}", None)
+
+                if deterministic:
+                    x, new_cache = transformer_block_apply(
+                        layer_params, layer_cache, x,
+                        deterministic=True,
+                        enable_kv_cache=enable_kv_cache,
+                        cur_index=cur_index,
+                    )
+                else:
+                    layer_rng = self.make_rng("dropout")
+                    x, new_cache = transformer_block_apply(
+                        layer_params, layer_cache, x,
+                        rng=layer_rng,
+                        deterministic=False,
+                        enable_kv_cache=enable_kv_cache,
+                        cur_index=cur_index,
+                    )
+
+                if enable_kv_cache and new_cache is not None:
+                    self.scope.put_variable("cache", f"layer_{idx}", new_cache)
+
+
+        logits = jnp.einsum(
+            "bld,vd->blv",
+            x.astype(jnp.float32),
+            embed.embedding
+        )
+        return logits
+
+@functools.partial(
+    jax.jit,
+    static_argnames=("deterministic", "enable_kv_cache"),
+)
+def giant_gpt_apply(
+    params,
+    cache,
+    tokens,
+    *,
+    rng=None,
+    deterministic: bool = False,
+    enable_kv_cache: bool = False,
+    cur_index: Optional[int] = None,
+):
+    if Config.use_custom_tokenizer:
+        tok = PreTrainedTokenizerFast.from_pretrained(
+            Config.custom_tokenizer_path)
+    else:
+        tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+
+    model = GiantGPT(
+        vocab_size=tok.vocab_size,
+        context_length=Config.context_length,
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        n_layers=Config.num_layers,
+        dropout_rate=Config.dropout_rate,
+    )
+    variables = {"params": params}
+    if enable_kv_cache and cache is not None:
+        variables["cache"] = cache
+
+    rngs_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
+
+    if enable_kv_cache:
+        logits, mutated = model.apply(
+            variables,
+            tokens,
+            deterministic=deterministic,
+            enable_kv_cache=True,
+            cur_index=cur_index,
+            mutable=["cache"],
+            **rngs_kw,
+        )
+        return logits, mutated["cache"]
+    else:
+        logits = model.apply(
+            variables,
+            tokens,
+            deterministic=deterministic,
+            enable_kv_cache=False,
+            cur_index=cur_index,
+            **rngs_kw,
+        )
+        return logits
+```
+
+My training loop script and training step script:
+```Training_step.py
+import jax, jax.numpy as jnp, optax
+from functools import partial
+
+@partial(jax.jit,static_argnames=['model', 'optimizer'])
+def train_step(params, opt_state, batch, *, model, optimizer, dropout_rng):
+    def loss_fn(p):
+        logits = model.apply(
+            {"params": p},
+            batch["input"],
+            rng=dropout_rng,
+            deterministic=False,
+        )
+        loss = optax.softmax_cross_entropy_with_integer_labels(
+            logits, batch["target"])
+        loss = (loss * batch["mask"]).sum() / batch["mask"].sum()
+        return loss
+
+    (loss, grads) = jax.value_and_grad(loss_fn)(params)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+    return new_params, opt_state, loss
+```
+
+```Run_training.py
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"
+
+
+try:
+    import jax
+except ImportError:
+    print("JAX is not installed. Installing JAX...")
+    os.system("pip install jax[cuda12] transformers datasets flax")
+    import jax
+
+import optax
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
+import jax.numpy as jnp
+
+from GiantGPT import GiantGPT, giant_gpt_apply
+from Training_step    import train_step
+from Evaluate         import evaluate
+from Data_loader      import data_loader
+from Save_params      import save_params
+import numpy as np, math, pickle
+from prepare_dataset  import get_data
+
+
+def main():
+    for k, v in Config.__dict__.items():
+        if not k.startswith("__") and not callable(v):
+            print(f"{k:>20} = {v}")
+
+    print("Setting up JAX...")
+    train_tokens, val_tokens, tokenizer = get_data(
+        subset_pct=Config.dataset_percent,
+        context_length=Config.context_length,
+    )
+
+    print(f"train batches: {len(train_tokens)}  val batches: {len(val_tokens)}")
+    print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")
+    print(math.ceil(len(train_tokens) / Config.batch_size) * Config.num_epochs,
+          "total steps")
+
+    model = GiantGPT(
+        vocab_size=tokenizer.vocab_size,
+        context_length=Config.context_length,
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        n_layers=Config.num_layers,
+        dropout_rate=Config.dropout_rate,
+    )
+
+    print("Initialising model parameters and optimizer...")
+    rng = jax.random.PRNGKey(0)
+    dummy = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
+    params = model.init(rng, dummy)["params"]
+    save_params(params, "initial_params.pkl")
+
+    def _apply_jitted(variables, tokens, *, deterministic=False,
+                      enable_kv_cache=False, cur_index=None, rng=None):
+        return giant_gpt_apply(
+            variables["params"],
+            None,
+            tokens,
+            rng=rng,
+            deterministic=deterministic,
+            enable_kv_cache=enable_kv_cache,
+            cur_index=cur_index,
+        )
+    model.apply = _apply_jitted
+
+    steps_per_epoch = math.ceil(len(train_tokens) / Config.batch_size)
+    total_steps = steps_per_epoch * Config.num_epochs
+
+    assert total_steps > 500, (
+        f"warmup (500) >= total_steps ({total_steps}); shorten warmup or train longer."
+    )
+
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=Config.learning_rate,
+        warmup_steps=500,
+        decay_steps=total_steps - 500,
+        end_value=Config.learning_rate * 0.1,
+    )
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(
+            learning_rate=schedule,
+            b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1,
+        ),
+    )
+    opt_state = optimizer.init(params)
+
+    global_step = 0
+    print(f"Training for {Config.num_epochs} epochs with batch size {Config.batch_size}")
+    rng = jax.random.PRNGKey(0)
+    for epoch in range(Config.num_epochs):
+        for batch in data_loader(train_tokens, Config.batch_size):
+            rng, dropout_rng = jax.random.split(rng)
+            params, opt_state, loss = train_step(
+                params,
+                opt_state,
+                batch,
+                model=model,
+                optimizer=optimizer,
+                dropout_rng=dropout_rng,
+            )
+
+            global_step += 1
+            if global_step < 5:
+                jax.debug.print("dropout key {:02d}: {}", global_step, dropout_rng)
+            if global_step % 200 == 0:
+                print(f"step {global_step:>7} / {total_steps:>7} | loss {loss:.4f}  ppl {np.exp(loss):.2f}")
+
+        val_loss = evaluate(params, model, val_tokens)
+        print(f"✓ Epoch {epoch+1} done – val loss {val_loss:.4f}  ppl {np.exp(val_loss):.2f}")
+
+    save_params(params)
+    with open("tokenizer.pkl", "wb") as f:
+        pickle.dump(tokenizer, f)
+    print("✔ parameters & tokenizer saved")
+
+
+if __name__ == "__main__":
+    print("Starting training...")
+    main()
+```
+
+Finally my inference script:
+```Generate_text_fast.py
+from __future__ import annotations
+
+import argparse
+import pickle
+from pathlib import Path
+from typing import Optional
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from checkpoint_io import load_npz
+
+import jax.lax as lax
+
+from functools import partial
+
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
+from GiantGPT import GiantGPT, giant_gpt_apply
+
+def build_model() -> GiantGPT:
+    if Config.use_custom_tokenizer:
+        tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+    else:
+        tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+
+    return GiantGPT(
+        vocab_size=tok.vocab_size,
+        context_length=Config.context_length,
+        d_model=Config.embedding_size,
+        n_heads=Config.num_heads,
+        d_ff=Config.feed_forward_size,
+        n_layers=Config.num_layers,
+        dropout_rate=0.0,
+    )
+
+def _numpy_or_jax_array(x):
+    """Ensure leaves are JAX arrays – helpful if checkpoint stored NumPy."""
+    return jnp.asarray(x) if not isinstance(x, jax.Array) else x
+
+def load_checkpoint(path: Path):
+    """Return a PyTree of JAX arrays living on *CPU* (device_put later)."""
+    ext = path.suffix.lower()
+    if ext in {".pkl", ".pickle"}:
+        with path.open("rb") as f:
+            params = pickle.load(f)
+    elif ext == ".npz":
+        params = load_npz(path)
+    else:
+        arr = np.load(path, allow_pickle=True)
+        params = arr.item() if hasattr(arr, "item") else arr
+    return jax.tree_util.tree_map(_numpy_or_jax_array, params)
+
+def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
+    """Initialise empty `cache` collection with correct shapes on device."""
+    dummy_token = jnp.ones((batch_size, 1), jnp.int32)
+    variables = model.init(
+        jax.random.PRNGKey(0),
+        dummy_token,
+        deterministic=True,
+        enable_kv_cache=True,
+        cur_index=0,
+    )
+    return variables["cache"]
+
+def preprocess_prompt_no_EOS(tokenizer, prompt: str, max_len: int):
+    ids = tokenizer.encode(prompt, add_special_tokens=False)
+
+    if ids and ids[-1] == tokenizer.eos_token_id:
+        ids = ids[:-1]
+
+    if len(ids) >= max_len:
+        ids = ids[-max_len:]
+    return np.array(ids, dtype="int32")
+
+def preprocess_prompt(tokenizer, prompt: str, max_len: int):
+    ids = tokenizer(prompt, return_tensors="np").input_ids[0]
+    if ids.shape[0] >= max_len:
+        ids = ids[-max_len:]
+    return ids.astype("int32")
+
+def make_step_fn(temperature: float, top_k: Optional[int]):
+    """Returns a *pure* JIT-able step function closed over params/constants."""
+
+    @partial(jax.jit, donate_argnums=(1,))
+    def step_fn(
+        params: dict,
+        cache: dict,
+        prev_token: jnp.ndarray,
+        cur_index: jnp.ndarray,
+        rng,
+    ):
+        logits, cache = giant_gpt_apply(
+            params,
+            cache,
+            prev_token,
+            rng=rng,
+            deterministic=True,
+            enable_kv_cache=True,
+            cur_index=cur_index,
+        )
+        logits = logits[:, 0]
+
+        if temperature == 0.0:
+            next_token = jnp.argmax(logits, axis=-1)
+        else:
+            logits = logits / temperature
+            if top_k and top_k > 0:
+                values, _ = jax.lax.top_k(logits, top_k)
+                kth = values[:, -1][:, None]
+                logits = jnp.where(logits < kth, -jnp.inf, logits)
+            next_token = jax.random.categorical(rng, logits, axis=-1)
+        next_token = next_token.astype(jnp.int32)[:, None]
+        return next_token, cache
+
+    return step_fn
+
+def generate(
+    params: dict,
+    model: GiantGPT,
+    tokenizer,
+    prompt_ids: jnp.ndarray,
+    max_new_tokens: int,
+    temperature: float,
+    top_k: Optional[int],
+):
+
+    try:
+        device = jax.devices("gpu")[0]
+    except (IndexError, RuntimeError):
+        device = jax.devices("cpu")[0]
+    params = jax.tree_util.tree_map(lambda x: jax.device_put(x, device), params)
+
+
+    cache = init_caches(model, params)
+    tokens = prompt_ids[None, :]
+    rng = jax.random.PRNGKey(42)
+
+    step_fn = make_step_fn(temperature, top_k)
+
+    if tokens.shape[1] > 1:
+        def warm_body(state, token_and_idx):
+            cache, _ = state
+            tok, idx = token_and_idx
+            _, cache = step_fn(params, cache, tok[None, None], idx, rng)
+            return (cache, None), None
+
+        idxs = jnp.arange(tokens.shape[1]-1, dtype=jnp.int32)
+        toks = tokens[:, :-1].squeeze(0)
+        (cache, _), _ = jax.lax.scan(
+            warm_body,
+            (cache, None),
+            (toks, idxs),
+        )
+
+    pad_len = max_new_tokens
+    max_len = tokens.shape[1] + pad_len
+    tokens = jnp.pad(tokens, ((0, 0), (0, pad_len)))
+
+    def generation_body(state, _):
+        tokens_buf, cache, rng, idx = state
+        rng, step_rng = jax.random.split(rng)
+
+        prev_token = lax.dynamic_slice_in_dim(tokens_buf, idx - 1, 1, axis=1)
+        next_token, cache = step_fn(params, cache, prev_token, idx - 1, step_rng)
+        tokens_buf = lax.dynamic_update_slice(tokens_buf, next_token, (0, idx))
+
+        return (tokens_buf, cache, rng, idx + 1), None
+
+    start_idx = jnp.array(tokens.shape[1] - pad_len, dtype=jnp.int32)
+    init_state = (tokens, cache, rng, start_idx)
+    (tokens, _, _, _), _ = jax.lax.scan(
+        generation_body,
+        init_state,
+        None,
+        length=max_new_tokens,
+    )
+
+    return tokenizer.decode(
+        tokens[0, : tokens.shape[1] - pad_len + max_new_tokens],
+        skip_special_tokens=True,
+    )
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--checkpoint", type=Path, required=True)
+    ap.add_argument("--prompt", type=str, required=True)
+    ap.add_argument("--steps", type=int, default=64)
+    ap.add_argument("--temperature", type=float, default=0.8)
+    ap.add_argument("--top_k", type=int, default=None)
+    ap.add_argument("--greedy", action="store_true")
+    args = ap.parse_args()
+
+    temperature = 0.0 if args.greedy else args.temperature
+
+    print("\nLoading checkpoint…")
+    params_cpu = load_checkpoint(args.checkpoint)
+
+    print("Building model…")
+    model = build_model()
+    if Config.use_custom_tokenizer:
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+
+    prompt_ids = preprocess_prompt(tokenizer, args.prompt, Config.context_length)
+
+    print("Generating… (first call will JIT-compile)")
+    text = generate(
+        params_cpu,
+        model,
+        tokenizer,
+        prompt_ids,
+        args.steps,
+        temperature,
+        args.top_k,
+    )
+
+    print("\n" + "="*20 + " RESULT " + "="*20)
+    print(text)
+    print("="*48)
+
+if __name__ == "__main__":
+    main()
+```
+
+
+Now i will show you what are the possible probelms for huge performance losses:
+---
+1. Flax scope / parameter names
+transformer_block_apply now instantiates a new TinyTransformerBlock on every call with the hard-coded name "layer". All blocks therefore share the same path params → layer → …. During training every call to the helper writes back into the same set of weights, so after the first update all N layers collapse into a single shared set of parameters. You have, in effect, a 1-layer network. Repetition such as “Once uponOnce once upon” is a classic symptom.
+---
+2. Monkey-patched model.apply
+Run_training.py replaces model.apply with _apply_jitted, whose signature is (…, rng=None) – but train_step.py still calls model.apply(..., rngs={"dropout": key}). Python lets the call go through (because the extra keyword is silently swallowed by Flax’s internal wrapper), but inside _apply_jitted the dropout key is lost, so dropout is always disabled (deterministic=True from the module’s perspective). No dropout → over-fit-then-collapse.
+---
+3. Dropout key re-use inside the model
+Even when you do pass a key, giant_gpt_apply forwards a single root key to the whole network, then each block draws sub-keys in a deterministic sequence. Because train_step is jitted, that sequence is identical for every batch after the first compile unless you feed a new root key on every step. The old version did; the new one does not (it always forwards rng=None from _apply_jitted). Training therefore becomes almost deterministic.
+---
+4. Weight-decay mask
+The helper builds a fresh GiantGPT inside the jitted function. Optax weight-decay masking is applied to the param tree you hand to the optimiser, not to the tree recreated inside giant_gpt_apply; layers added later with self.scope.put_variable get no decay at all, so they drift and amplify the above problems.
+---
+
+Now your job is to patch these probelms. What i want from you is to approach this one by one - start with 1 file and carefully think about what needs to change, then write the file, go over it by reading it and then give to me. After that i will ask you again for the remaining files. 

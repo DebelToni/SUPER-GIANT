@@ -176,78 +176,44 @@ class TinyTransformerBlock(nn.Module):
 
         return _block(self, x)
 
-# ---------------------------------------------------------------------------
-# JIT-compiled entry point ---------------------------------------------------
-# ---------------------------------------------------------------------------
+# Transformer_block.py   (only the relevant bottom part shown – the rest is unchanged)
 
-# d_model / n_heads / d_ff / dropout_rate can come from Config
-# (or pass them in directly if you prefer).
-
-# @functools.partial(
-#     jax.jit,
-#     # static_argnames=("deterministic", "enable_kv_cache", "cur_index"),
-#     static_argnames=("deterministic", "enable_kv_cache"),
-# )
-# def transformer_block_apply(
-#     params,
-#     x: jnp.ndarray,
-#     *,
-#     rng,
-#     deterministic: bool,
-#     enable_kv_cache: bool = False,
-#     cur_index: Optional[int] = None,
-# ):
-#     """Forward pass for TinyTransformerBlock, compiled once with XLA.
-#
-#     Static argnames prevent needless recompiles when only batch data or RNGs
-#     change between calls.
-#     """
-#     return TinyTransformerBlock(
-#         d_model=Config.embedding_size,
-#         n_heads=Config.num_heads,
-#         d_ff=Config.feed_forward_size,
-#         dropout_rate=Config.dropout_rate,
-#         dtype=Config.compute_dtype,
-#     ).apply(
-#         {"params": params},
-#         x,
-#         deterministic=deterministic,
-#         enable_kv_cache=enable_kv_cache,
-#         cur_index=cur_index,
-#         rngs={"dropout": rng},
-#     )
-# Transformer_block.py
+# ----------------------------------------------------------------------
+# A JIT‑wrapped helper that runs one TinyTransformerBlock with caching
+# ----------------------------------------------------------------------
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache")  # cur_index NOT static
+    static_argnames=("deterministic", "enable_kv_cache", "layer_name"),
 )
 def transformer_block_apply(
     params,
-    cache,                  # ← NEW
+    cache,
     x,
     *,
     rng=None,
     deterministic: bool,
     enable_kv_cache: bool = False,
     cur_index: Optional[int] = None,
+    layer_name: str = "layer",           # NEW: caller supplies a unique name
 ):
-    # build variables dict
+    """Run a single transformer block with its own params & (optional) KV‑cache."""
     variables = {"params": params}
-    if cache is not None:                # may be None during training
+    if cache is not None:
         variables["cache"] = cache
 
     rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
-    if enable_kv_cache:
-        # ─ inference / generation ─
-        y, mutated = TinyTransformerBlock(          # *single layer*
+    block = TinyTransformerBlock(
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
         d_ff=Config.feed_forward_size,
         dropout_rate=Config.dropout_rate,
         dtype=Config.compute_dtype,
-        name="layer",                           # name is irrelevant here
-    ).apply(
+        name=layer_name,                 # <- the crucial change
+    )
+
+    if enable_kv_cache:
+        y, mutated = block.apply(
             variables,
             x,
             deterministic=deterministic,
@@ -258,23 +224,15 @@ def transformer_block_apply(
         )
         new_cache = mutated["cache"]
     else:
-        # ─ training / plain forward ─
-        y = TinyTransformerBlock(          # *single layer*
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        dropout_rate=Config.dropout_rate,
-        dtype=Config.compute_dtype,
-        name="layer",                           # name is irrelevant here
-    ).apply(
+        y = block.apply(
             variables,
             x,
             deterministic=deterministic,
             enable_kv_cache=False,
             cur_index=cur_index,
-            **rng_kw,          # mutable omitted
+            **rng_kw,
         )
         new_cache = None
 
-    new_cache = mutated["cache"] if enable_kv_cache else None
     return y, new_cache
+

@@ -1,16 +1,23 @@
+# GiantGPT.py
+from __future__ import annotations
+
 from typing import Optional
 import functools
-import jax
 
+import jax
 import jax.numpy as jnp
 from flax import linen as nn
+
 from Transformer_block import TinyTransformerBlock, transformer_block_apply
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
-
 from omegaconf import OmegaConf
+
 Config = OmegaConf.load("Config.yml")
 
+
 class GiantGPT(nn.Module):
+    """Decoder‑only GPT‑style model composed of TinyTransformerBlocks."""
+
     vocab_size:     int
     context_length: int
     d_model:        int
@@ -19,13 +26,21 @@ class GiantGPT(nn.Module):
     n_layers:       int
     dropout_rate:   float = 0.1
 
+    # ------------------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------------------
     @nn.compact
-    def __call__(self,
-                 tokens,
-                 *,
-                 deterministic: bool = False,
-                 enable_kv_cache: bool = False,
-                 cur_index: Optional[int] = None):
+    def __call__(
+        self,
+        tokens: jnp.ndarray,
+        *,
+        deterministic: bool = False,
+        enable_kv_cache: bool = False,
+        cur_index: Optional[int] = None,
+    ) -> jnp.ndarray:
+        """Tokens → logits.  Works both with & without KV‑cache."""
+
+        # 1. Token embeddings + dropout
         embed = nn.Embed(
             num_embeddings=self.vocab_size,
             features=self.d_model,
@@ -34,111 +49,90 @@ class GiantGPT(nn.Module):
             param_dtype=Config.param_dtype,
         )
         x = embed(tokens)
+        x = nn.Dropout(rate=self.dropout_rate)(
+            x, deterministic=deterministic
+        )
 
-        x = nn.Dropout(rate=self.dropout_rate)(x,
-                                                 deterministic=deterministic)
-
+        # 2. Transformer layers ------------------------------------------------
         for idx in range(self.n_layers):
-            layer_params = self.scope.get_variable("params",
-                                                   f"layer_{idx}",
-                                                   None)
+            layer_name = f"layer_{idx}"
+
+            # Grab parameters & (if active) cache for this layer
+            layer_params = self.scope.get_variable("params", layer_name, None)
             if layer_params is None:
+                # First run (typically inside model.init): create parameters
                 block = TinyTransformerBlock(
                     d_model=self.d_model,
                     n_heads=self.n_heads,
                     d_ff=self.d_ff,
                     dropout_rate=self.dropout_rate,
                     dtype=Config.compute_dtype,
-                    name=f"layer_{idx}",
+                    name=layer_name,
                 )
-                init_out = block.init(
+                init_vars = block.init(
                     self.make_rng("params"),
                     x,
                     deterministic=deterministic,
                     enable_kv_cache=enable_kv_cache,
                     cur_index=cur_index,
                 )
-                layer_params = init_out["params"]
-                self.scope.put_variable("params",
-                                        f"layer_{idx}",
-                                        layer_params)
+                layer_params = init_vars["params"]
+                self.scope.put_variable("params", layer_name, layer_params)
 
-            # layer_rng = self.make_rng("dropout")
-            # x = transformer_block_apply(
-            #     layer_params,
-            #     x,
-            #     rng=layer_rng,
-            #     deterministic=deterministic,
-            #     enable_kv_cache=enable_kv_cache,
-            #     cur_index=cur_index,
-            # )
-                # if deterministic:            # inference → no dropout → no rng needed
-                #     x = transformer_block_apply(
-                #         layer_params, x,
-                #         rng=None,                # no dropout, so no rng
-                #         deterministic=True,
-                #         enable_kv_cache=enable_kv_cache,
-                #         cur_index=cur_index,
-                #     )
-                # else:                        # training → need a fresh sub-key
-                #     layer_rng = self.make_rng("dropout")
-                #     x = transformer_block_apply(
-                #         layer_params, x,
-                #         rng=layer_rng,
-                #         deterministic=False,
-                #         enable_kv_cache=enable_kv_cache,
-                #         cur_index=cur_index,
-                #     )
-            # ───────────────────────────────────────── cache handling
-                layer_cache = self.scope.get_variable("cache", f"layer_{idx}", None)
+            layer_cache = self.scope.get_variable("cache", layer_name, None)
 
-                if deterministic:             # inference – no dropout key needed
-                    x, new_cache = transformer_block_apply(
-                        layer_params, layer_cache, x,
-                        deterministic=True,
-                        enable_kv_cache=enable_kv_cache,
-                        cur_index=cur_index,
-                    )
-                else:                         # training – supply a fresh key
-                    layer_rng = self.make_rng("dropout")
-                    x, new_cache = transformer_block_apply(
-                        layer_params, layer_cache, x,
-                        rng=layer_rng,
-                        deterministic=False,
-                        enable_kv_cache=enable_kv_cache,
-                        cur_index=cur_index,
-                    )
+            # Per‑layer dropout key (only when not deterministic)
+            if deterministic:
+                layer_rng = None
+            else:
+                layer_rng = self.make_rng("dropout")
 
-                # write the cache back so it’s available next token
-                if enable_kv_cache and new_cache is not None:
-                    self.scope.put_variable("cache", f"layer_{idx}", new_cache)
+            # ---------- Call the **jitted** helper ---------------------------
+            x, new_cache = transformer_block_apply(
+                layer_params,
+                layer_cache,
+                x,
+                rng=layer_rng,
+                deterministic=deterministic,
+                enable_kv_cache=enable_kv_cache,
+                cur_index=cur_index,
+                layer_name=layer_name,           # <-- UNIQUE NAME PER LAYER
+            )
 
+            if enable_kv_cache and new_cache is not None:
+                self.scope.put_variable("cache", layer_name, new_cache)
 
+        # 3. Unembedding
         logits = jnp.einsum(
             "bld,vd->blv",
             x.astype(jnp.float32),
-            embed.embedding
+            embed.embedding,
         )
         return logits
 
+
+# ----------------------------------------------------------------------
+# A convenience wrapper (remains mostly unchanged)
+# ----------------------------------------------------------------------
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache"),  # cur_index NOT static
+    static_argnames=("deterministic", "enable_kv_cache"),
 )
 def giant_gpt_apply(
     params,
-    cache,                   # ← NEW positional arg
+    cache,
     tokens,
-    *,                       # keyword-only from here
+    *,
     rng=None,
     deterministic: bool = False,
     enable_kv_cache: bool = False,
     cur_index: Optional[int] = None,
 ):
-    # ── 1. Get vocab size (unchanged) ───────────────────────────
+    """Stateless helper: params + (optional) cache → logits (+new cache)."""
+
+    # Build tokenizer only once per JIT trace
     if Config.use_custom_tokenizer:
-        tok = PreTrainedTokenizerFast.from_pretrained(
-            Config.custom_tokenizer_path)
+        tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
     else:
         tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 
@@ -151,16 +145,14 @@ def giant_gpt_apply(
         n_layers=Config.num_layers,
         dropout_rate=Config.dropout_rate,
     )
-    # ── 1) Prepare variable collections ─────────────────────────
+
     variables = {"params": params}
     if enable_kv_cache and cache is not None:
         variables["cache"] = cache
 
-    # ── 2) RNG dict if needed ───────────────────────────────────
     rngs_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
     if enable_kv_cache:
-        # ── Inference: return logits + updated cache ─────────────
         logits, mutated = model.apply(
             variables,
             tokens,
@@ -172,7 +164,6 @@ def giant_gpt_apply(
         )
         return logits, mutated["cache"]
     else:
-        # ── Training/Eval: no cache → only logits ─────────────────
         logits = model.apply(
             variables,
             tokens,
@@ -182,3 +173,4 @@ def giant_gpt_apply(
             **rngs_kw,
         )
         return logits
+

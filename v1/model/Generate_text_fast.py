@@ -131,8 +131,16 @@ def generate(
     temperature: float,
     top_k: Optional[int],
 ):
-    device = jax.devices("gpu")[0] if jax.devices("gpu") else jax.devices()[0]
+    # device = jax.devices("gpu")[0] if jax.devices("gpu") else jax.devices()[0]
+    # params = jax.tree_util.tree_map(lambda x: jax.device_put(x, device), params)
+
+    # cpu
+    try:
+        device = jax.devices("gpu")[0]
+    except (IndexError, RuntimeError):
+        device = jax.devices("cpu")[0]
     params = jax.tree_util.tree_map(lambda x: jax.device_put(x, device), params)
+
 
     cache = init_caches(model, params)
     tokens = prompt_ids[None, :]

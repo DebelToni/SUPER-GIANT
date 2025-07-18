@@ -83,12 +83,10 @@ class NativeJaxSelfAttention(nn.Module):
             attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
             attn_bias = attn_bias[None, None, None, :]
 
-            y = jax.nn.dot_product_attention(
-                q, k, v,
-                bias=attn_bias,
-                is_causal=True,
-                implementation="cudnn",
-            )
+            try:
+                y = jax.nn.dot_product_attention( q, k, v, bias=attn_bias, is_causal=True, implementation="cudnn")
+            except Exception:
+                y = jax.nn.dot_product_attention( q, k, v, bias=attn_bias, is_causal=True, implementation="xla")
 
             # try:
             #     y = jax.nn.dot_product_attention(
@@ -109,7 +107,10 @@ class NativeJaxSelfAttention(nn.Module):
             y = y.reshape(b, 1, self.qkv_features)
 
         else:
-            y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
+            try: 
+                y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
+            except Exception:
+                y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="xla")
             # try:
             #     y = jax.nn.dot_product_attention(
             #         q, k, v,

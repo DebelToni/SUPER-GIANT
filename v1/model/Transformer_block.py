@@ -176,14 +176,12 @@ class TinyTransformerBlock(nn.Module):
 
         return _block(self, x)
 
-# Transformer_block.py   (only the relevant bottom part shown – the rest is unchanged)
-
 # ----------------------------------------------------------------------
-# A JIT‑wrapped helper that runs one TinyTransformerBlock with caching
+# Run one TinyTransformerBlock with optional KV‑cache (JIT‑compiled)
 # ----------------------------------------------------------------------
 @functools.partial(
     jax.jit,
-    static_argnames=("deterministic", "enable_kv_cache", "layer_name"),
+    static_argnames=("deterministic", "enable_kv_cache"),   # layer_name removed
 )
 def transformer_block_apply(
     params,
@@ -194,22 +192,19 @@ def transformer_block_apply(
     deterministic: bool,
     enable_kv_cache: bool = False,
     cur_index: Optional[int] = None,
-    layer_name: str = "layer",           # NEW: caller supplies a unique name
 ):
-    """Run a single transformer block with its own params & (optional) KV‑cache."""
     variables = {"params": params}
     if cache is not None:
         variables["cache"] = cache
-
     rng_kw = {"rngs": {"dropout": rng}} if rng is not None else {}
 
+    # ⚠️  NO explicit name for the root module – avoids collision
     block = TinyTransformerBlock(
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,
         d_ff=Config.feed_forward_size,
         dropout_rate=Config.dropout_rate,
         dtype=Config.compute_dtype,
-        name=layer_name,                 # <- the crucial change
     )
 
     if enable_kv_cache:

@@ -40,6 +40,6 @@ acc_steps: 2
 
 # other:
 use_remat: true
-dataset_percent: 1
+dataset_percent: 10
 chunk_percent: 10
 default_device: cuda

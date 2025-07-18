@@ -95,8 +95,9 @@ class GiantGPT(nn.Module):
                 rng=layer_rng,
                 deterministic=deterministic,
                 enable_kv_cache=enable_kv_cache,
+                # cur_index=cur_index,
+                # layer_name=layer_name,           # <-- UNIQUE NAME PER LAYER
                 cur_index=cur_index,
-                layer_name=layer_name,           # <-- UNIQUE NAME PER LAYER
             )
 
             if enable_kv_cache and new_cache is not None:

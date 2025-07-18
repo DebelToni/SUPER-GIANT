@@ -1,3 +1,4 @@
+# Evaluate.py
 import optax
 import jax
 from functools import partial
@@ -7,10 +8,18 @@ from Data_loader import data_loader
 
 @partial(jax.jit, static_argnames="model")
 def _loss_on_batch(params, batch, *, model):
-    logits = model.apply({"params": params}, batch["input"], deterministic=True, rng=jax.random.PRNGKey(0))
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch["target"])
+    # No dropout during evaluation → no RNG needed
+    logits = model.apply(
+        {"params": params},
+        batch["input"],
+        deterministic=True,
+    )
+    loss = optax.softmax_cross_entropy_with_integer_labels(
+        logits, batch["target"]
+    )
     loss = (loss * batch["mask"]).sum() / batch["mask"].sum()
     return loss
+
 
 def evaluate(params, model, dataset_tokens, batch_size=32, *, use_scan=False):
     batches = list(data_loader(dataset_tokens, batch_size, shuffle=False))
@@ -33,6 +42,6 @@ def evaluate(params, model, dataset_tokens, batch_size=32, *, use_scan=False):
     total, n = 0.0, 0
     for batch in batches:
         loss = _loss_on_batch(params, batch, model=model)
-        total += float(loss);  n += 1
+        total += float(loss); n += 1
     return total / n
 

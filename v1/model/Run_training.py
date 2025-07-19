@@ -26,6 +26,15 @@ from Save_params      import save_params
 import numpy as np, math, pickle
 from prepare_dataset  import get_data
 
+def decay_mask(params):
+    def needs_decay(path, _):
+        name = "/".join(path)
+        return (
+            "kernel" in name         # weights
+            and "embed" not in name  # no token embeddings
+            and "rms"   not in name  # no norm scales
+        )
+    return jax.tree_util.tree_map_with_path(needs_decay, params)
 
 def main():
     # Print config
@@ -85,6 +94,7 @@ def main():
         optax.adamw(
             learning_rate=schedule,
             b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1,
+            mask=decay_mask(params),
         ),
     )
     opt_state = optimizer.init(params)

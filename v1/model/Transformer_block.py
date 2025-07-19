@@ -212,7 +212,7 @@ def transformer_block_apply(
             variables,
             x,
             deterministic=deterministic,
-            enable_kv_cache=True,
+            enable_kv_cache=enable_kv_cache,
             cur_index=cur_index,
             mutable=["cache"],
             **rng_kw,

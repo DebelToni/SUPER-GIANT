@@ -7,6 +7,7 @@ import functools
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
+from flax.linen import RMSNorm
 
 from Transformer_block import TinyTransformerBlock, transformer_block_apply
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
@@ -102,6 +103,8 @@ class GiantGPT(nn.Module):
 
             if enable_kv_cache and new_cache is not None:
                 self.scope.put_variable("cache", layer_name, new_cache)
+
+        x = RMSNorm(dtype=Config.compute_dtype, name="rms_final")(x)
 
         # 3. Unembedding
         logits = jnp.einsum(

@@ -24,22 +24,22 @@ dataset_path: math_dataset_arrow
 
 
 # model:
-embedding_size: 256
-context_length: 257
-num_heads: 2
-num_layers: 2
-feed_forward_size: 1024
+embedding_size: 384
+context_length: 385
+num_heads: 4
+num_layers: 4
+feed_forward_size: 1536
 dropout_rate: 0.1
 
 # training:
-learning_rate: 2e-4
-weight_decay: 1e-2
-batch_size: 8
-num_epochs: 1
+learning_rate: 1e-4
+weight_decay: 1e-4
+batch_size: 6
+num_epochs: 3
 acc_steps: 2
 
 # other:
 use_remat: true
-dataset_percent: 10
+dataset_percent: 30
 chunk_percent: 10
 default_device: cuda

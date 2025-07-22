@@ -1,9 +1,9 @@
 # dtype: bfloat16
 # compute_dtype: bfloat16
+# param_dtype: float32
 param_dtype: float32
-dtype: float16
-compute_dtype: float16
-# param_dtype: float16
+dtype: float32
+compute_dtype: float32
 
 tokenizer_name: EleutherAI/gpt-neo-125M
 tokenizer_path: tiny_cached
@@ -13,12 +13,12 @@ custom_tokenizer_path: math_tokenizer_data
 
 # DATASET_VENDOR = "Salesforce/wikitext"
 # DATASET_NAME   = "wikitext-2-raw-v1"
-dataset_name: wikitext-2-raw-v1
-dataset_has_vendor: false
-dataset_vendor: Salesforce
-# dataset_name: roneneldan/TinyStories
+# dataset_name: wikitext-2-raw-v1
 # dataset_has_vendor: false
-# dataset_vendor: roneneldan
+# dataset_vendor: Salesforce
+dataset_name: roneneldan/TinyStories
+dataset_has_vendor: false
+dataset_vendor: roneneldan
 use_custom_dataset: false
 dataset_path: math_dataset_arrow
 
@@ -40,6 +40,6 @@ acc_steps: 2
 
 # other:
 use_remat: true
-dataset_percent: 10
+dataset_percent: 0.5
 chunk_percent: 10
 device: cpu

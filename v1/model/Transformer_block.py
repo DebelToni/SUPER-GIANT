@@ -96,7 +96,7 @@ class NativeJaxSelfAttention(nn.Module):
                     q, k, v,
                     bias=attn_bias,
                     is_causal=True,
-                    implementation="flax",
+                    implementation="xla",
                 )
 
             y = y.reshape(b, 1, self.qkv_features)
@@ -108,7 +108,7 @@ class NativeJaxSelfAttention(nn.Module):
             if Config.device == "gpu":
                 y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
             else:
-                y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="flax")
+                y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="xla")
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)
@@ -159,4 +159,4 @@ class TinyTransformerBlock(nn.Module):
             h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)
             return residual + h_ffn
 
-    return _block(self, x)
+        return _block(self, x)

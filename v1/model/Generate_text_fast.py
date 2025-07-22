@@ -63,7 +63,7 @@ def init_caches(model: GiantGPT, params: dict, batch_size: int = 1):
         jax.random.PRNGKey(0),
         dummy_token,
         deterministic=True,
-        decode=True,
+        use_kv_cache=True,
         cur_index=jnp.array(0, jnp.int32),
     )
     # return variables.pop("params")  
@@ -102,7 +102,7 @@ def make_step_fn(model: GiantGPT, temperature: float, top_k: Optional[int]):
             {"params": params, "cache": cache},
             prev_token,
             deterministic=True,
-            decode=True,
+            use_kv_cache=True,
             cur_index=cur_index,
             rngs={"dropout": rng},  
             mutable=["cache"],

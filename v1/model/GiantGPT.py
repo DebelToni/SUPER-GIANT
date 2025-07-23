@@ -16,7 +16,7 @@ class GiantGPT(nn.Module):
     dropout_rate:   float = 0.1
 
     @nn.compact
-    def __call__(self, tokens, *, deterministic: bool = False, use_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(self, tokens, *, deterministic: bool = False, decode: bool = False, cur_index: Optional[int] = None):
         embed = nn.Embed(
             num_embeddings=self.vocab_size,
             features=self.d_model,
@@ -35,7 +35,7 @@ class GiantGPT(nn.Module):
                     d_ff=self.d_ff,
                     dropout_rate=self.dropout_rate,
                     dtype=Config.compute_dtype,
-            )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
+            )(x, deterministic=deterministic, decode=decode, cur_index=cur_index)
 
 
         logits = jnp.einsum("bld,vd->blv",

@@ -43,7 +43,7 @@ class NativeJaxSelfAttention(nn.Module):
         self.dropout = nn.Dropout(rate=self.dropout_rate)
 
     @nn.compact
-    def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(self, x, *, deterministic: bool, decode: bool = False, cur_index: Optional[int] = None):
         b, l, _ = x.shape
         head_dim = self.qkv_features // self.num_heads
 
@@ -57,7 +57,7 @@ class NativeJaxSelfAttention(nn.Module):
 
         rot_dim = head_dim
         inv_freq = 1.0 / (10000 ** (jnp.arange(0, rot_dim, 2) / rot_dim))
-        seq      = jnp.array([cur_index]) if use_kv_cache else jnp.arange(l)
+        seq      = jnp.array([cur_index]) if decode else jnp.arange(l)
         angles   = jnp.einsum('i,j->ij', seq, inv_freq)
         emb      = jnp.repeat(angles, 2, axis=-1)
         sin, cos = jnp.sin(emb).astype(self.dtype), jnp.cos(emb).astype(self.dtype)
@@ -65,8 +65,8 @@ class NativeJaxSelfAttention(nn.Module):
         q, k = apply_rope(q, sin, cos), apply_rope(k, sin, cos)
 
 
-        if use_kv_cache:
-            assert cur_index is not None, "Need cur_index when use_kv_cache=True"
+        if decode:
+            assert cur_index is not None, "Need cur_index when decode=True"
             cached_k = self.variable( "cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
             cached_v = self.variable( "cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
 
@@ -91,6 +91,7 @@ class NativeJaxSelfAttention(nn.Module):
                     is_causal=True,
                     implementation="cudnn",
                 )
+                jax.debug.print("\n using cudnn")
             else:
                 y = jax.nn.dot_product_attention(
                     q, k, v,
@@ -107,6 +108,7 @@ class NativeJaxSelfAttention(nn.Module):
 
             if Config.device == "gpu":
                 y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
+                jax.debug.print("\n using cudnn for inference aswell")
             else:
                 y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="xla")
             y = y.reshape(b, l, self.qkv_features)
@@ -126,7 +128,7 @@ class TinyTransformerBlock(nn.Module):
     dtype: jnp.dtype = Config.compute_dtype
 
     @nn.compact
-    def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(self, x, *, deterministic: bool, decode: bool = False, cur_index: Optional[int] = None):
         @nn.remat
         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
             residual = h
@@ -136,7 +138,7 @@ class TinyTransformerBlock(nn.Module):
                 qkv_features=module.d_model,
                 dropout_rate=module.dropout_rate,
                 dtype=module.dtype,
-            )(h_norm, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
+            )(h_norm, deterministic=deterministic, decode=decode, cur_index=cur_index)
             h = residual + h_attn
 
             residual = h

@@ -2,8 +2,8 @@
 # compute_dtype: bfloat16
 # param_dtype: float32
 param_dtype: float32
-dtype: float32
-compute_dtype: float32
+dtype: float16
+compute_dtype: float16
 
 tokenizer_name: EleutherAI/gpt-neo-125M
 tokenizer_path: tiny_cached
@@ -42,4 +42,4 @@ acc_steps: 2
 use_remat: true
 dataset_percent: 0.5
 chunk_percent: 10
-device: cpu
+device: gpu

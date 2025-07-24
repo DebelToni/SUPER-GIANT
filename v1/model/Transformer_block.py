@@ -88,14 +88,14 @@ class NativeJaxSelfAttention(nn.Module):
                 y = jax.nn.dot_product_attention(
                     q, k, v,
                     bias=attn_bias,
-                    is_causal=True,
+                    is_causal=False,
                     implementation="cudnn",
                 )
             else:
                 y = jax.nn.dot_product_attention(
                     q, k, v,
                     bias=attn_bias,
-                    is_causal=True,
+                    is_causal=False,
                     implementation="xla",
                 )
 

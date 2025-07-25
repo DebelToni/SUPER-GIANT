@@ -192,6 +192,9 @@ def generate(
 
     return tokenizer.decode(tokens[0, :tokens.shape[1]-pad_len + max_new_tokens], skip_special_tokens=True)
 
+
+generate_jit = jax.jit(generate, static_argnames=("model", "tokenizer", "temperature", "top_k"))
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", type=Path, required=True)

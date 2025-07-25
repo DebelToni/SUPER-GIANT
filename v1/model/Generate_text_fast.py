@@ -137,7 +137,7 @@ def generate(
     top_k: Optional[int],
 ):
     device = jax.devices(Config.device)[0]
-    params = jax.tree_util.tree_map(lambda x: jax.device_put(x, device), params)
+    params = jax.device_put(params, device)
 
     cache = init_caches(model, params)
 
@@ -162,7 +162,6 @@ def generate(
         )
 
     pad_len = max_new_tokens
-    max_len = tokens.shape[1] + pad_len
     tokens = jnp.pad(tokens, ((0, 0), (0, pad_len)))  
 
     def generation_body(state, _):

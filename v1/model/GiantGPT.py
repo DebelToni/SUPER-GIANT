@@ -15,60 +15,30 @@ class GiantGPT(nn.Module):
     n_layers:       int
     dropout_rate:   float = 0.1
 
-    # @nn.compact
-    # def __call__(self, tokens, *, deterministic: bool = False, use_kv_cache: bool = False, cur_index: Optional[int] = None):
-    #     embed = nn.Embed(
-    #         num_embeddings=self.vocab_size,
-    #         features=self.d_model,
-    #         embedding_init=nn.initializers.normal(stddev=0.02),
-    #         dtype=Config.compute_dtype,
-    #         param_dtype=Config.param_dtype,
-    #     )
-    #     x = embed(tokens)
-    #
-    #     x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
-    #
-    #     for _ in range(self.n_layers):
-    #         x = TinyTransformerBlock(
-    #                 d_model=self.d_model,
-    #                 n_heads=self.n_heads,
-    #                 d_ff=self.d_ff,
-    #                 dropout_rate=self.dropout_rate,
-    #                 dtype=Config.compute_dtype,
-    #         )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
-    #
-    #
-    #     logits = jnp.einsum("bld,vd->blv",
-    #                         x.astype(jnp.float32),
-    #                         embed.embedding)
-    #     return logits
     @nn.compact
     def __call__(self, tokens, *, deterministic: bool = False, use_kv_cache: bool = False, cur_index: Optional[int] = None):
-        # input embed
-        embed = nn.Embed(self.vocab_size, self.d_model,
-                         embedding_init=nn.initializers.normal(stddev=0.02),
-                         dtype=Config.compute_dtype)
+        embed = nn.Embed(
+            num_embeddings=self.vocab_size,
+            features=self.d_model,
+            embedding_init=nn.initializers.normal(stddev=0.02),
+            dtype=Config.compute_dtype,
+            param_dtype=Config.param_dtype,
+        )
         x = embed(tokens)
 
-        # scan through layers in one jitted loop
-        LayerScan = nn.scan(
-            TinyTransformerBlock,
-            variable_broadcast="params",
-            split_rngs={"params": False},
-            in_axes=None,
-            out_axes=None,
-            length=self.n_layers,
-        )
-        x = LayerScan(
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            d_ff=self.d_ff,
-            dropout_rate=self.dropout_rate,
-            dtype=Config.compute_dtype,
-            name="layers"
-        )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
+        x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
 
-        # tied‐weights proj (avoid astype in the hot path)
-        emb_mat = embed.embedding  # [vocab, d_model]
-        logits = x @ emb_mat.T     # [batch, len, vocab]
+        for _ in range(self.n_layers):
+            x = TinyTransformerBlock(
+                    d_model=self.d_model,
+                    n_heads=self.n_heads,
+                    d_ff=self.d_ff,
+                    dropout_rate=self.dropout_rate,
+                    dtype=Config.compute_dtype,
+            )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
+
+
+        logits = jnp.einsum("bld,vd->blv",
+                            x.astype(jnp.float32),
+                            embed.embedding)
         return logits

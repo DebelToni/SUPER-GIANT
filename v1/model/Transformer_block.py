@@ -84,20 +84,21 @@ class NativeJaxSelfAttention(nn.Module):
             attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
             attn_bias = attn_bias[None, None, None, :]
 
-            if Config.device == "gpu":
-                y = jax.nn.dot_product_attention(
-                    q, k, v,
-                    bias=attn_bias,
-                    is_causal=False,
-                    implementation="cudnn",
-                )
-            else:
-                y = jax.nn.dot_product_attention(
-                    q, k, v,
-                    bias=attn_bias,
-                    is_causal=False,
-                    implementation="xla",
-                )
+            # if Config.device == "gpu":
+            #     y = jax.nn.dot_product_attention(
+            #         q, k, v,
+            #         bias=attn_bias,
+            #         is_causal=False,
+            #         implementation="cudnn",
+            #     )
+            # else:
+            #     y = jax.nn.dot_product_attention(
+            #         q, k, v,
+            #         bias=attn_bias,
+            #         is_causal=False,
+            #         implementation="xla",
+            #     )
+            y = jax.nn.dot_product_attention(q, k, v, bias=attn_bias, is_causal=False)
 
             y = y.reshape(b, 1, self.qkv_features)
 
@@ -105,10 +106,11 @@ class NativeJaxSelfAttention(nn.Module):
             if False:
                 q = q / jnp.sqrt(head_dim)
 
-            if Config.device == "gpu":
-                y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
-            else:
-                y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="xla")
+            # if Config.device == "gpu":
+            #     y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
+            # else:
+            #     y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="xla")
+            y = jax.nn.dot_product_attention(q, k, v, is_causal=True)
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)

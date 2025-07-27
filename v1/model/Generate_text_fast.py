@@ -197,10 +197,10 @@ generate_jit = jax.jit(generate, static_argnames=("model", "tokenizer", "tempera
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", type=Path, required=True)
-    ap.add_argument("--prompt", type=str, required=True)
-    ap.add_argument("--steps", type=int, default=64)
-    ap.add_argument("--temperature", type=float, default=0.8)
+    ap.add_argument("--checkpoint", type=Path, default="model_params.pkl")
+    ap.add_argument("--prompt", type=str, default="Once upon")
+    ap.add_argument("--steps", type=int, default=20)
+    ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top_k", type=int, default=None)
     ap.add_argument("--greedy", action="store_true")
     args = ap.parse_args()

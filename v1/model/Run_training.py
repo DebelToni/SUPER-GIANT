@@ -93,8 +93,8 @@ def main():
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=Config.learning_rate,
-        warmup_steps=500,
-        decay_steps=total_steps - 500,
+        warmup_steps=512,
+        decay_steps=total_steps - 512,
         end_value=Config.learning_rate * 0.1,   # optional but recommended
     )
 

@@ -12,3 +12,4 @@ logs/
 id_rsa
 node_modules/
 .env
+checkpoints/

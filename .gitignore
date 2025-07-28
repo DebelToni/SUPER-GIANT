@@ -13,3 +13,4 @@ id_rsa
 node_modules/
 .env
 checkpoints/
+neo-english-cust/

@@ -71,11 +71,25 @@ if Config.use_custom_tokenizer:
         Config.custom_tokenizer_path
     )
 else:
-    _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+    _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, use_fast=True)
+# if _tokenizer.pad_token is None:
+#     print("⚠ No pad token found, adding <|pad|> to tokenizer")
+#     _tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
 if _tokenizer.pad_token is None:
-    _tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    print("\nNo pad token found!\n")
+else:
+    print("Pad token:", _tokenizer.pad_token, _tokenizer.pad_token_id)
+if _tokenizer.bos_token is None:
+    print("\nNo BOS token found!\n")
+else:
+    print("BOS token:", _tokenizer.bos_token, _tokenizer.bos_token_id)
+if _tokenizer.eos_token is None:
+    print("\nNo EOS token found!\n")
+else:
+    print("EOS token:", _tokenizer.eos_token, _tokenizer.eos_token_id)
 PAD_TOKEN_ID = _tokenizer.pad_token_id
 
+print(" Tokenizer size:", _tokenizer.vocab_size)
 
 # ────────────────────────────────
 # Rolling‑buffer windowiser

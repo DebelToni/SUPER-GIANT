@@ -29,8 +29,7 @@ def build_model() -> GiantGPT:
         tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
 
     return GiantGPT(
-        # vocab_size=Config.vocab_size+1,
-        vocab_size=tok.vocab_size,
+        vocab_size=len(tok),
         context_length=Config.context_length,
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,

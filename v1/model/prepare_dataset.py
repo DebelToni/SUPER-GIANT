@@ -1,6 +1,3 @@
-# DATASET_NAME = "OpenWebText"
-# DATASET_NAME   = "roneneldan/TinyStories"
-
 """
 prepare_dataset.py – streaming packer with **chunk_pct** alias
 =============================================================
@@ -89,7 +86,7 @@ else:
     print("EOS token:", _tokenizer.eos_token, _tokenizer.eos_token_id)
 PAD_TOKEN_ID = _tokenizer.pad_token_id
 
-print(" Tokenizer size:", _tokenizer.vocab_size)
+print(" Tokenizer size:", len(_tokenizer))
 
 # ────────────────────────────────
 # Rolling‑buffer windowiser

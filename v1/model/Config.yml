@@ -6,6 +6,7 @@ dtype: float32
 compute_dtype: float32
 
 tokenizer_name: EleutherAI/gpt-neo-125M
+# tokenizer_name: neo-english-cust
 tokenizer_path: tiny_cached
 tokenizer_dtype: uint16
 use_custom_tokenizer: false

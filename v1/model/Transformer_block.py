@@ -18,6 +18,12 @@ def _rotate_every_two(x):
 def apply_rope(q_or_k, sin, cos):
     return (q_or_k * cos) + (_rotate_every_two(q_or_k) * sin)
 
+def apply_partial_rope(x, sin, cos, rot_dim):
+    """Apply RoPE to the first `rot_dim` scalars of `x` (… H, D)."""
+    x_rot, x_pass = jnp.split(x, [rot_dim], axis=-1)
+    x_rot = (x_rot * cos) + (_rotate_every_two(x_rot) * sin)
+    return jnp.concatenate([x_rot, x_pass], axis=-1)
+
 class NativeJaxSelfAttention(nn.Module):
     """Multi‑head self‑attention using jax.nn.dot_product_attention (cuDNN)."""
 
@@ -26,18 +32,20 @@ class NativeJaxSelfAttention(nn.Module):
     dropout_rate: float = 0.0
     num_kv: int = 1
     dtype: jnp.dtype = Config.compute_dtype
+    rotary_dim: Optional[int] = None
 
     def setup(self):
         assert (
             self.qkv_features % self.num_heads == 0
         ), "qkv_features must be divisible by num_heads"
         self.head_dim = self.qkv_features // self.num_heads
+        self.rotary_dim = (self.rotary_dim or self.head_dim)
+        assert(self.rotary_dim <= self.head_dim), "less than or equal to head_dim"
+        assert(self.rotary_dim % 2 == 0), "rotary_dim must be even"
 
         self.q_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
         self.k_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="k_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
         self.v_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="v_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
-
-
         self.o_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
@@ -48,21 +56,27 @@ class NativeJaxSelfAttention(nn.Module):
         head_dim = self.qkv_features // self.num_heads
 
         q = self.q_proj(x).reshape(b, l, self.num_heads, head_dim)
-
         k = self.k_proj(x).reshape(b, l, self.num_kv, head_dim)
         v = self.v_proj(x).reshape(b, l, self.num_kv, head_dim)
 
-        k = jnp.repeat(k, self.num_heads // self.num_kv, axis=2)
-        v = jnp.repeat(v, self.num_heads // self.num_kv, axis=2)
+        if self.num_kv != self.num_heads:
+            k = jnp.repeat(k, self.num_heads // self.num_kv, axis=2)
+            v = jnp.repeat(v, self.num_heads // self.num_kv, axis=2)
 
-        rot_dim = head_dim
-        inv_freq = 1.0 / (10000 ** (jnp.arange(0, rot_dim, 2) / rot_dim))
+        inv_freq = 1.0 / (10000 ** (jnp.arange(0, self.rotary_dim, 2) / self.rotary_dim))
         seq      = jnp.array([cur_index]) if use_kv_cache else jnp.arange(l)
         angles   = jnp.einsum('i,j->ij', seq, inv_freq)
         emb      = jnp.repeat(angles, 2, axis=-1)
-        sin, cos = jnp.sin(emb).astype(self.dtype), jnp.cos(emb).astype(self.dtype)
-        sin, cos = sin[None, :, None, :], cos[None, :, None, :]
-        q, k = apply_rope(q, sin, cos), apply_rope(k, sin, cos)
+
+        # sin, cos = jnp.sin(emb).astype(self.dtype), jnp.cos(emb).astype(self.dtype)
+        # sin, cos = sin[None, :, None, :], cos[None, :, None, :]
+        # q, k = apply_rope(q, sin, cos), apply_rope(k, sin, cos)
+
+        sin, cos = jnp.sin(emb)[None, :, None, :], jnp.cos(emb)[None, :, None, :]
+        sin = sin.astype(self.dtype); cos = cos.astype(self.dtype)
+
+        q = apply_partial_rope(q, sin, cos, self.rotary_dim)
+        k = apply_partial_rope(k, sin, cos, self.rotary_dim)
 
 
         if use_kv_cache:
@@ -135,6 +149,7 @@ class TinyTransformerBlock(nn.Module):
             h_norm = RMSNorm(name="rms1", dtype=self.dtype)(h)
             h_attn = NativeJaxSelfAttention(
                 num_heads=module.n_heads,
+                num_kv=Config.num_kv_heads,
                 qkv_features=module.d_model,
                 dropout_rate=module.dropout_rate,
                 dtype=module.dtype,

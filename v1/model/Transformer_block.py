@@ -32,14 +32,14 @@ class NativeJaxSelfAttention(nn.Module):
     dropout_rate: float = 0.0
     num_kv: int = 1
     dtype: jnp.dtype = Config.compute_dtype
-    rotary_dim: Optional[int] = None
+    # rotary_dim: Optional[int] = None
+    rotary_dim: int = Config.rope_dim
 
     def setup(self):
         assert (
             self.qkv_features % self.num_heads == 0
         ), "qkv_features must be divisible by num_heads"
         self.head_dim = self.qkv_features // self.num_heads
-        self.rotary_dim = (self.rotary_dim or self.head_dim)
         assert(self.rotary_dim <= self.head_dim), "less than or equal to head_dim"
         assert(self.rotary_dim % 2 == 0), "rotary_dim must be even"
 

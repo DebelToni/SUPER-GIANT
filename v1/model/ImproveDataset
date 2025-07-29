@@ -1,0 +1,39 @@
+how much data in terms of lets say GB or tokens would my newly coded llm need to output logical sequences of info?
+
+Right now this is its config:
+```yml
+param_dtype: float32
+dtype: float32
+compute_dtype: float32
+
+tokenizer_name: EleutherAI/gpt-neo-125M
+tokenizer_path: tiny_cached
+tokenizer_dtype: uint16
+
+dataset_name: roneneldan/TinyStories
+
+embedding_size: 256
+context_length: 257
+num_heads: 2
+num_layers: 2
+feed_forward_size: 1024
+dropout_rate: 0.1
+
+learning_rate: 2e-4
+weight_decay: 1e-2
+batch_size: 8
+num_epochs: 1
+
+dataset_percent: 3
+device: gpu
+```
+
+On just 3% of tiny stories dataset it can output coherent A1 English sentences, almost 3-4 sentance sories sometimes. 
+
+I can increase its FF, heads or anything making the model bigger and I can also train it first on something then continue the checkpoint on another dataset. 
+
+I am just on the step of needed to refactor my current dataset handling to make it maybe more modular. I will include in this message the script I use to train a model, and the script that tokenizes and prepares the dataset, plus maybe some helpers. 
+
+One problem I have right now is just how different databases can be - my scripts work on the TinyStories dataset plugged from the "datasets" hugging face library but with something like WikiText I don't think I really well handles the symbols, some paragraph breaks which sometimes results in huge filling by filler token or similar. 
+
+I use the neo 125m tokenizer as base and have added a distinct BoS EoS and PAD tokens to it, otherwise its the base that comes in huggingface.

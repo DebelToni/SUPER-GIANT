@@ -1,0 +1,12 @@
+I am making my own llm in JAX and i need some help with the tokenizer.
+
+Right now i use a pretrained tokenizer imported from hugging face transformers library - EleutherAI/gpt-neo-125M.
+
+I am not interested in training my own tokenizer but using a pretrained comes with some challenges like special token handling and so on. 
+
+Like a Start of Text/Sequence token - i dont have any idea if a given tokenizer would have that and how would it handle it, but such token will be valuable if i want to do something like sliding window attention. Maybe i can insert manually?
+
+I am only interested in English text so plugging a huge tokenizer would hurt performance. 
+
+What should i do? 
+Attaching some scripts i use for training and datasetpreparation.

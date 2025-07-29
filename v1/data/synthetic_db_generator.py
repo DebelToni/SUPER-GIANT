@@ -46,8 +46,8 @@ def extract_code(text: str) -> str:
 def main() -> None:
     cli = argparse.ArgumentParser("Synthetic dataset generator")
     cli.add_argument("--prompt", required=True, help="User prompt.")
-    cli.add_argument("-m", "--model", default="llama3", help="Model name.")
-    cli.add_argument("-n", "--num_samples", type=int, default=100,
+    cli.add_argument("-m", "--model", default="llama3.2:1b", help="Model name.")
+    cli.add_argument("-n", "--num_samples", type=int, default=1000,
                      help="How many rows to generate.")
     cli.add_argument("--out_dir", type=Path, default=Path("synthetic_ds"),
                      help="Destination directory (HF Arrow format).")
@@ -114,7 +114,7 @@ def main() -> None:
             "model": args.model,
             "base_url": args.base_url,
             "num_samples": args.num_samples,
-            "created_utc": datetime.utcnow().isoformat() + "Z"
+            "created_utc": datetime.now().isoformat() + "Z"
         }, fh, indent=2)
 
     print(f"✓ Saved {len(ds):,} rows to {args.out_dir}")

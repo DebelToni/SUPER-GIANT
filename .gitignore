@@ -8,7 +8,7 @@ prompts/
 __pycache__
 testing/
 logs/
-# *.pub
+*.pub
 id_rsa
 node_modules/
 .env

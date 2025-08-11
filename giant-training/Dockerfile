@@ -29,12 +29,15 @@ RUN pip install --upgrade pip && \
 
 # ── SSH server configuration ───────────────────────────────────────────────────
 #  * runs as root          (PermitRootLogin yes)
-#  * key-based only        (PasswordAuthentication no)
+# # * key-based only        (PasswordAuthentication no) LOL
+#  * password allowed      (PasswordAuthentication yes)
 #  * empty /root/.ssh that you’ll fill via a bind-mount or later COPY
 RUN mkdir /var/run/sshd && \
     mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
-    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/'  /etc/ssh/sshd_config
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    echo "root:changeme" | chpasswd 
+    # sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/'  /etc/ssh/sshd_config
 
 # If you want to bake your key straight into the image, uncomment:
 # COPY id_rsa.pub /root/.ssh/authorized_keys

@@ -17,8 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Python virtual-env
 ENV VENV_DIR=/opt/venv
-RUN python3.11 -m venv $VENV_DIR
-ENV PATH="$VENV_DIR/bin:$PATH" \
+RUN python3.11 -m venv $VENV_DIR && \
+    update-alternatives --install /usr/bin/python3 python3 /opt/venv/bin/python 1 && \
+    update-alternatives --install /usr/bin/pip3 pip3 /opt/venv/bin/pip 1
     VIRTUAL_ENV=$VENV_DIR
 
 # Deep-learning stack

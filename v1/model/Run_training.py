@@ -30,6 +30,10 @@ from checkpoint_manager import (
     latest as latest_ckpt,
 )
 
+from jax import config
+config.update("jax_default_matmul_precision", "tensorfloat32")
+
+
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #

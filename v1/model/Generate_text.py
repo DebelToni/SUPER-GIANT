@@ -16,6 +16,10 @@ Config = OmegaConf.load("Config.yml")
 
 from GiantGPT import GiantGPT  
 
+from jax import config
+config.update("jax_default_matmul_precision", "tensorfloat32")
+
+
 def load_params(path: Path):
     """Load Flax params dict pickled by `save_params`."""
     print(f"Attempting to load parameters from: {path.resolve()}")

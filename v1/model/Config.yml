@@ -1,9 +1,5 @@
-# dtype: bfloat16
-# compute_dtype: bfloat16
-# param_dtype: float32
 param_dtype: float32
-dtype: float32
-compute_dtype: float32
+compute_dtype: bfloat16
 
 # tokenizer_name: EleutherAI/gpt-neo-125M
 tokenizer_name: neo-english-cust

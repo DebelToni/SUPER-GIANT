@@ -22,6 +22,9 @@ Config = OmegaConf.load("Config.yml")
 
 from GiantGPT import GiantGPT
 
+from jax import config
+config.update("jax_default_matmul_precision", "tensorfloat32")
+
 def build_model() -> GiantGPT:
     if Config.use_custom_tokenizer:
         tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)

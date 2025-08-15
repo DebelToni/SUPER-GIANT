@@ -80,12 +80,6 @@ def build_model(cfg, tokenizer, device: torch.device) -> GiantGPT:
     
     model = GiantGPT(
         vocab_size=vocab_size,
-        n_layer=int(cfg.num_layers),
-        n_head=int(cfg.num_heads),
-        n_embd=int(cfg.embedding_size),
-        seq_len=int(cfg.context_length),
-        dropout=float(getattr(cfg, "dropout_rate", 0.0)),
-        bias=bool(getattr(cfg, "bias", False)),
     )
     model.to(device)
     return model

@@ -94,11 +94,13 @@ class NativeTorchSelfAttention(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
 
     def _repeat_kv(self, x: torch.Tensor) -> torch.Tensor:
+        """Repeat K/V heads without real copies when possible (view+expand)."""
         if self.num_kv == self.num_heads:
             return x
         assert self.num_heads % self.num_kv == 0
-        repeat = self.num_heads // self.num_kv
-        return x.repeat_interleave(repeat, dim=1)
+        B, K, L, Dh = x.shape
+        repeat = self.num_heads // K
+        return x.unsqueeze(2).expand(B, K, repeat, L, Dh).reshape(B, self.num_heads, L, Dh)
 
     def forward(
         self,
@@ -156,6 +158,7 @@ class NativeTorchSelfAttention(nn.Module):
         # Ensure projection input matches layer weight dtype to avoid sync/cast stalls
         y = y.to(x.dtype)
         y = self.o_proj(y)
+        y = self.dropout(y) if (self.training and not deterministic) else y
         return y
 
 

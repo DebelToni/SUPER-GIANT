@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
+from torch.amp import autocast
 
 from GiantGPT import GiantGPT
 from checkpoint_torch_io import load_any_checkpoint
@@ -48,6 +49,14 @@ def setup_torch_runtime(cfg) -> torch.device:
         torch.set_float32_matmul_precision("high")
     except Exception:
         pass
+    
+    # Prefer fast SDPA kernels when available
+    try:
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
+    except Exception:
+        pass
 
     return device
 
@@ -66,38 +75,35 @@ def build_tokenizer(cfg):
 
 
 def build_model(cfg, tokenizer, device: torch.device) -> GiantGPT:
-    vocab_size = int(getattr(cfg, "vocab_size",len(tokenizer)))
-
+    # IMPORTANT: use len(tokenizer) to include any added special tokens
+    vocab_size = int(getattr(cfg, "vocab_size", len(tokenizer)))
+    
     model = GiantGPT(
         vocab_size=vocab_size,
-        d_model=int(cfg.embedding_size),
-        n_layers=int(cfg.num_layers),
-        n_heads=int(cfg.num_heads),
-        d_ff=int(cfg.feed_forward_size),
-        dropout=float(cfg.dropout_rate),
-        num_kv=int(getattr(cfg, "num_kv_heads", 1)),
-        rotary_dim=int(getattr(cfg, "rope_dim", max(2, int(cfg.embedding_size) // int(cfg.num_heads)))),
-        param_dtype=str(getattr(cfg, "param_dtype", "float32")),
-        compute_dtype=str(getattr(cfg, "compute_dtype", "bfloat16")),
+        n_layer=int(cfg.n_layer),
+        n_head=int(cfg.n_head),
+        n_embd=int(cfg.n_embd),
+        seq_len=int(cfg.seq_len),
+        dropout=float(getattr(cfg, "dropout", 0.0)),
+        bias=bool(getattr(cfg, "bias", False)),
     )
-
-    # Move to device; keep params in param_dtype
-    param_dtype = get_dtype(getattr(cfg, "param_dtype", "float32"), torch.float32)
-    model = model.to(device=device, dtype=param_dtype)
-    model.eval()
+    model.to(device)
     return model
 
 
-# -----------------------------------------------------------------------------
-# Sampling utils
-# -----------------------------------------------------------------------------
-
 def top_k_logits(logits: torch.Tensor, k: int) -> torch.Tensor:
-    if k is None or k <= 0 or k >= logits.size(-1):
+    """Apply top-k filtering to logits."""
+    if k <= 0:
         return logits
-    values, _ = torch.topk(logits, k)
-    min_values = values[..., -1, None]
-    return torch.where(logits < min_values, torch.full_like(logits, float('-inf')), logits)
+    
+    # Get the top k values and indices
+    top_k_values, top_k_indices = torch.topk(logits, k, dim=-1)
+    
+    # Create a mask for the top k values
+    mask = torch.full_like(logits, float('-inf'))
+    mask.scatter_(-1, top_k_indices, top_k_values)
+    
+    return mask
 
 
 # -----------------------------------------------------------------------------
@@ -108,13 +114,12 @@ def generate(
     model: GiantGPT,
     tokenizer,
     prompt: str,
-    *,
-    max_new_tokens: int,
-    temperature: float,
-    top_k: Optional[int],
-    eos_token_id: Optional[int],
-    device: torch.device,
-    compute_dtype: torch.dtype,
+    max_new_tokens: int = 64,
+    temperature: float = 0.8,
+    top_k: Optional[int] = None,
+    eos_token_id: Optional[int] = None,
+    device: torch.device = torch.device("cpu"),
+    compute_dtype: torch.dtype = torch.bfloat16,
 ):
     model.eval()
 
@@ -126,38 +131,33 @@ def generate(
     max_len = L + max_new_tokens
     caches = model.init_kv_cache(batch_size=B, max_seq_len=max_len, device=device, dtype=compute_dtype)
 
-    # Prime the cache with all tokens except the last
-    with torch.no_grad():
-        if L > 1:
-            for t in range(L - 1):
-                cur = input_ids[:, t : t + 1]
-                _ = model(
-                    cur,
-                    deterministic=True,
-                    use_kv_cache=True,
-                    cur_index=t,
-                    kv_caches=caches,
-                )
+    # Prime + decode under a single autocast & inference context
+    with torch.inference_mode():
+        with (autocast("cuda", dtype=compute_dtype) if device.type == "cuda"
+              else torch.autocast("cpu", dtype=compute_dtype, enabled=False)):
+            # Prefill cache with prompt (except last token)
+            if L > 1:
+                for t in range(L - 1):
+                    cur = input_ids[:, t : t + 1]
+                    _ = model(
+                        cur,
+                        deterministic=True,
+                        use_kv_cache=True,
+                        cur_index=t,
+                        kv_caches=caches,
+                    )
 
-        # decoding loop
-        generated: List[int] = []
-        cur_token = input_ids[:, L - 1 : L]
-        cur_index = L - 1
+            # decoding loop (keep tokens on device; no .item() inside the loop)
+            gen = torch.empty(max_new_tokens, device=device, dtype=torch.long)
+            cur_token = input_ids[:, L - 1 : L]
+            cur_index = L - 1
 
-        # Timing just the decode portion
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        t0 = time.time()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.time()
 
-        for _ in range(max_new_tokens):
-            cur_index += 1
-            # Autocast for compute dtype on CUDA
-            ctx = (
-                torch.cuda.amp.autocast(dtype=compute_dtype)
-                if device.type == "cuda"
-                else torch.autocast("cpu", dtype=compute_dtype, enabled=False)
-            )
-            with ctx:
+            for i in range(max_new_tokens):
+                cur_index += 1
                 logits = model(
                     cur_token,
                     deterministic=True,
@@ -175,20 +175,24 @@ def generate(
                     probs = torch.softmax(next_logits, dim=-1)
                     next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
 
-            generated.append(next_token.item())
-            cur_token = next_token[:, None]
+                # B==1: write to buffer; keep on device
+                gen[i] = next_token
+                cur_token = next_token[:, None]
 
-            if eos_token_id is not None and next_token.item() == eos_token_id:
-                break
+                # Optional early stop: check EOS every 32 steps to amortize sync
+                if eos_token_id is not None and ((i & 31) == 31):
+                    if int(next_token.item()) == int(eos_token_id):
+                        gen = gen[: i + 1]
+                        break
 
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        t1 = time.time()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t1 = time.time()
 
-    total_new = len(generated)
+    total_new = int(gen.shape[0])
     tok_per_s = total_new / max(t1 - t0, 1e-8)
 
-    out_ids = torch.cat([input_ids[0], torch.tensor(generated, device=device, dtype=torch.long)])
+    out_ids = torch.cat([input_ids[0], gen])
     text = tokenizer.decode(out_ids.tolist(), skip_special_tokens=True)
     return text, total_new, tok_per_s
 
@@ -262,4 +266,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

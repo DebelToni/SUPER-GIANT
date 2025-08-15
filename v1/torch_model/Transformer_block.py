@@ -153,9 +153,9 @@ class NativeTorchSelfAttention(nn.Module):
             y = F.scaled_dot_product_attention(q, k, v, dropout_p=p, is_causal=True)
 
         y = y.transpose(1, 2).contiguous().view(B, L, D)
+        # Ensure projection input matches layer weight dtype to avoid sync/cast stalls
         y = y.to(x.dtype)
         y = self.o_proj(y)
-        y = self.dropout(y) if (self.training and not deterministic) else y
         return y
 
 

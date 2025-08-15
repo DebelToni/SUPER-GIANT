@@ -133,7 +133,7 @@ def _np_to_torch_tensor(arr: np.ndarray, dtype: Optional[torch.dtype] = None) ->
         # In some JAX saves values are object wrappers; try to coerce
         arr = np.array(arr)
     # JAX sometimes writes bfloat16 as uint16-encoded — assume float32 fallback
-    if arr.dtype == np.dtype("bfloat16"):
+    if arr.dtype == np.dtype("float16"):
         arr = arr.view(np.uint16).astype(np.float32)
     if dtype is None:
         return torch.from_numpy(arr.copy())

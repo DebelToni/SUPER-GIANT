@@ -66,17 +66,17 @@ def build_tokenizer(cfg):
 
 
 def build_model(cfg, tokenizer, device: torch.device) -> GiantGPT:
-    vocab_size = int(getattr(cfg, "vocab_size", tokenizer.vocab_size))
+    vocab_size = int(getattr(cfg, "vocab_size",len(tokenizer)))
 
     model = GiantGPT(
         vocab_size=vocab_size,
-        d_model=int(cfg.d_model),
-        n_layers=int(cfg.n_layers),
-        n_heads=int(cfg.n_heads),
-        d_ff=int(cfg.d_ff),
-        dropout=float(cfg.dropout),
-        num_kv=int(getattr(cfg, "num_kv", 1)),
-        rotary_dim=int(getattr(cfg, "rope_dim", max(2, int(cfg.d_model) // int(cfg.n_heads)))),
+        d_model=int(cfg.embedding_size),
+        n_layers=int(cfg.num_layers),
+        n_heads=int(cfg.num_heads),
+        d_ff=int(cfg.feed_forward_size),
+        dropout=float(cfg.dropout_rate),
+        num_kv=int(getattr(cfg, "num_kv_heads", 1)),
+        rotary_dim=int(getattr(cfg, "rope_dim", max(2, int(cfg.embedding_size) // int(cfg.num_heads)))),
         param_dtype=str(getattr(cfg, "param_dtype", "float32")),
         compute_dtype=str(getattr(cfg, "compute_dtype", "bfloat16")),
     )

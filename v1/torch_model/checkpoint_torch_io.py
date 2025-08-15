@@ -1,25 +1,19 @@
-from __future__ import annotations
+from  __future__ import annotations
 
 """
 checkpoint_torch_io.py — Translate JAX/Flax checkpoints to PyTorch and load them.
 
 Usage (CLI):
-
-  # Convert a JAX .npz checkpoint to a PyTorch .pt state_dict file
-  python checkpoint_torch_io.py translate \
-      --in ckpt_jax.npz --out ckpt_torch.pt
-
-  # Dry-run to see key mappings
+  python checkpoint_torch_io.py translate --in ckpt_jax.npz --out ckpt_torch.pt
   python checkpoint_torch_io.py translate --in ckpt_jax.npz --dry-run
 
 Library API:
-
-  from checkpoint_torch_io import load_jax_npz_to_torch_state_dict
+  from checkpoint_torch_io import load_jax_npz_to_torch_state_dict, load_any_checkpoint
   state = load_jax_npz_to_torch_state_dict("ckpt_jax.npz", model)
   model.load_state_dict(state, strict=True)
 
-This module is intentionally tolerant of small naming differences often seen in
-Flax checkpoints (e.g., "Embed_0/embedding" vs "embed/embedding").
+This version includes broader regexes to handle varied Flax naming styles
+(e.g., TinyTransformerBlock_0/NativeJaxSelfAttention_0/q_proj/kernel).
 """
 
 import argparse
@@ -27,15 +21,13 @@ import re
 from collections import OrderedDict
 from typing import Dict, Tuple, Optional
 
+from omegaconf import OmegaConf
+Config = OmegaConf.load("Config.yml")
+
 import numpy as np
 import torch
 
-# ------------------------------ helper predicates ------------------------------
-
-_LINEAR_SUFFIXES = ("/kernel", "kernel:0", ".kernel")
-_BIAS_SUFFIXES = ("/bias", "bias:0", ".bias")
-_SCALE_SUFFIXES = ("/scale", "scale:0", ".scale")
-_EMBED_SUFFIXES = ("/embedding", "embedding:0", ".embedding")
+# ------------------------------ helpers ------------------------------
 
 
 def _strip_prefix(k: str, prefix: str) -> str:
@@ -43,101 +35,78 @@ def _strip_prefix(k: str, prefix: str) -> str:
 
 
 def _normalize_key(k: str) -> str:
-    # Remove common wrappers
     k = _strip_prefix(k, "params/")
     k = _strip_prefix(k, "target/")
     k = _strip_prefix(k, "opt_state/")
-    # Unify separators
-    k = k.replace("\\", "/")
-    return k
-
-
-def _is_linear_weight(k: str) -> bool:
-    return k.endswith(_LINEAR_SUFFIXES)
-
-
-def _is_bias(k: str) -> bool:
-    return k.endswith(_BIAS_SUFFIXES)
-
-
-def _is_scale(k: str) -> bool:
-    return k.endswith(_SCALE_SUFFIXES)
-
-
-def _is_embedding(k: str) -> bool:
-    return k.endswith(_EMBED_SUFFIXES)
-
-
-# --------------------------- JAX -> Torch key mapping ---------------------------
-
-_BLOCK_PATTERNS = (
-    re.compile(r"(?:^|.*/)(?:Block|TransformerBlock)_(?P<idx>\d+)/(?P<name>.+)$"),
-)
-
-
-def _map_block_subkey(idx: int, name: str) -> Optional[str]:
-    """Map a subkey inside a Block_i to a PyTorch state_dict key.
-
-    Returns None if we don't recognize the pattern.
-    """
-    # Norms
-    if name in ("rms1/scale", "rms_1/scale", "ln1/scale"):
-        return f"blocks.{idx}.rms1.weight"
-    if name in ("rms2/scale", "rms_2/scale", "ln2/scale"):
-        return f"blocks.{idx}.rms2.weight"
-
-    # Attention projections
-    if name.endswith("q_proj/kernel"):
-        return f"blocks.{idx}.attn.q_proj.weight"
-    if name.endswith("k_proj/kernel"):
-        return f"blocks.{idx}.attn.k_proj.weight"
-    if name.endswith("v_proj/kernel"):
-        return f"blocks.{idx}.attn.v_proj.weight"
-    if name.endswith("o_proj/kernel") or name.endswith("out_proj/kernel"):
-        return f"blocks.{idx}.attn.o_proj.weight"
-
-    # FFN (gated: fc1 splits into u and v in forward, so a single weight here)
-    if name.endswith("fc1/kernel"):
-        return f"blocks.{idx}.fc1.weight"
-    if name.endswith("fc1/bias"):
-        return f"blocks.{idx}.fc1.bias"
-    if name.endswith("fc2/kernel"):
-        return f"blocks.{idx}.fc2.weight"
-    if name.endswith("fc2/bias"):
-        return f"blocks.{idx}.fc2.bias"
-
-    return None
-
-
-def _map_global_key(k: str) -> Optional[str]:
-    """Map non-block keys (e.g., embedding) to PyTorch names."""
-    # Embedding variants
-    if re.search(r"(?:^|.*/)(?:Embed(?:_0)?|embed|token_embed)(?:/)?embedding$", k):
-        return "embed.weight"
-    return None
-
-
-def _transpose_if_needed(t: np.ndarray, torch_key: str) -> np.ndarray:
-    # PyTorch Linear expects (out, in). Flax Dense kernel is (in, out).
-    if any(torch_key.endswith(s) for s in (".weight",)) and t.ndim == 2:
-        # Heuristic: only transpose for weights that correspond to Linear layers, not for embedding.
-        if ".attn." in torch_key or ".fc" in torch_key:
-            return t.T
-    return t
+    return k.replace("\\", "/")
 
 
 def _np_to_torch_tensor(arr: np.ndarray, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-    if isinstance(arr, np.ndarray):
-        pass
-    else:
-        # In some JAX saves values are object wrappers; try to coerce
+    if not isinstance(arr, np.ndarray):
         arr = np.array(arr)
-    # JAX sometimes writes bfloat16 as uint16-encoded — assume float32 fallback
+    #if arr.dtype == np.dtype(Config.compute_dtype):
     if arr.dtype == np.dtype("float16"):
         arr = arr.view(np.uint16).astype(np.float32)
-    if dtype is None:
-        return torch.from_numpy(arr.copy())
-    return torch.from_numpy(arr.copy()).to(dtype=dtype)
+    t = torch.from_numpy(arr.copy())
+    if dtype is not None:
+        t = t.to(dtype=dtype)
+    return t
+
+
+# --------------------------- key mapping ---------------------------
+
+_BLOCK_INDEX_RE = re.compile(
+    r"(?:(?:Block|Transformer_block|TransformerBlock|TinyTransformerBlock|layer|layers|h)_(?P<idx>\d+))"
+)
+_EMBED_RE = re.compile(r"(?:^|.*/)(?:Embed(?:_0)?|embed|token_embed)(?:/)?embedding$")
+
+_DEF_MAP = {
+    "attn.q_proj.weight": re.compile(r"/(?:q_proj)/(?:kernel)$"),
+    "attn.k_proj.weight": re.compile(r"/(?:k_proj)/(?:kernel)$"),
+    "attn.v_proj.weight": re.compile(r"/(?:v_proj)/(?:kernel)$"),
+    "attn.o_proj.weight": re.compile(r"/(?:o_proj|out_proj)/(?:kernel)$"),
+    "fc1.weight": re.compile(r"/(?:fc1)/(?:kernel)$"),
+    "fc1.bias": re.compile(r"/(?:fc1)/(?:bias)$"),
+    "fc2.weight": re.compile(r"/(?:fc2)/(?:kernel)$"),
+    "fc2.bias": re.compile(r"/(?:fc2)/(?:bias)$"),
+}
+
+_NORM1_RE = re.compile(r"/(?:rms1|rms_1|ln1|norm1|input_layernorm)/(?:scale)$")
+_NORM2_RE = re.compile(r"/(?:rms2|rms_2|ln2|norm2|post_attention_layernorm)/(?:scale)$")
+
+
+def _find_block_index(k: str) -> Optional[int]:
+    last = None
+    for m in _BLOCK_INDEX_RE.finditer(k):
+        last = m
+    return int(last.group("idx")) if last else None
+
+
+def _transpose_if_needed(arr: np.ndarray, torch_key: str) -> np.ndarray:
+    if arr.ndim == 2 and torch_key.endswith(".weight") and (".attn." in torch_key or ".fc" in torch_key):
+        return arr.T
+    return arr
+
+
+def _map_one_key(raw_key: str) -> Optional[Tuple[str, str, Optional[int]]]:
+    k = _normalize_key(raw_key)
+    if _EMBED_RE.search(k):
+        return ("embed", "embed.weight", None)
+
+    idx = _find_block_index(k)
+    if idx is None:
+        return None
+
+    if _NORM1_RE.search(k):
+        return ("block", f"blocks.{idx}.rms1.weight", idx)
+    if _NORM2_RE.search(k):
+        return ("block", f"blocks.{idx}.rms2.weight", idx)
+
+    for name, pat in _DEF_MAP.items():
+        if pat.search(k):
+            return ("block", f"blocks.{idx}.{name}", idx)
+
+    return None
 
 
 def load_jax_npz_to_torch_state_dict(
@@ -147,13 +116,8 @@ def load_jax_npz_to_torch_state_dict(
     default_dtype: Optional[torch.dtype] = torch.float32,
     verbose: bool = True,
 ) -> "OrderedDict[str, torch.Tensor]":
-    """Translate a JAX/Flax .npz checkpoint into a PyTorch state_dict.
-
-    If `model` is provided, we align dtypes with each parameter and report missing/unexpected keys.
-    """
     data = np.load(npz_path, allow_pickle=True)
 
-    # Build a dtype map from model if available
     param_dtype_map: Dict[str, torch.dtype] = {}
     if model is not None:
         for name, p in model.named_parameters():
@@ -162,43 +126,37 @@ def load_jax_npz_to_torch_state_dict(
     state = OrderedDict()
     used = set()
 
-    # First pass: block keys
     for raw_key in data.files:
-        k = _normalize_key(raw_key)
-        v = data[raw_key]
-        # Block mapping
-        mapped = False
-        for pat in _BLOCK_PATTERNS:
-            m = pat.match(k)
-            if m:
-                idx = int(m.group("idx"))
-                sub = m.group("name")
-                torch_key = _map_block_subkey(idx, sub)
-                if torch_key is not None:
-                    arr = v
-                    arr = _transpose_if_needed(arr, torch_key)
-                    dtype = param_dtype_map.get(torch_key, default_dtype)
-                    state[torch_key] = _np_to_torch_tensor(arr, dtype=dtype)
-                    used.add(raw_key)
-                    mapped = True
-                break
-        if mapped:
+        mapping = _map_one_key(raw_key)
+        if mapping is None:
             continue
-        # Global keys (embedding etc.)
-        gkey = _map_global_key(k)
-        if gkey is not None:
-            dtype = param_dtype_map.get(gkey, default_dtype)
-            state[gkey] = _np_to_torch_tensor(v, dtype=dtype)
-            used.add(raw_key)
+        _, torch_key, _ = mapping
+        arr = _transpose_if_needed(data[raw_key], torch_key)
+        dtype = param_dtype_map.get(torch_key, default_dtype)
+        state[torch_key] = _np_to_torch_tensor(arr, dtype=dtype)
+        used.add(raw_key)
+
+    if "embed.weight" not in state:
+        for raw_key in data.files:
+            k = _normalize_key(raw_key)
+            if k.endswith("/embedding") or k.endswith(".embedding"):
+                state["embed.weight"] = _np_to_torch_tensor(
+                    data[raw_key], dtype=param_dtype_map.get("embed.weight", default_dtype)
+                )
+                used.add(raw_key)
+                break
 
     if verbose:
+        total = len(data.files)
+        print(f"[checkpoint_torch_io] translated {len(used)}/{total} arrays into {len(state)} torch params")
         unmatched = [rk for rk in data.files if rk not in used]
         if unmatched:
-            print("[checkpoint_torch_io] Warning: Unmatched JAX keys (ignored):")
-            for u in unmatched:
+            print("[checkpoint_torch_io] Warning: unmatched JAX keys (ignored):")
+            for u in unmatched[:50]:
                 print("  -", u)
+            if len(unmatched) > 50:
+                print(f"  ... and {len(unmatched)-50} more")
 
-    # Optional: sanity check vs model
     if model is not None and verbose:
         msd = model.state_dict()
         missing = [k for k in msd.keys() if k not in state]
@@ -216,13 +174,7 @@ def load_jax_npz_to_torch_state_dict(
 
 
 def save_torch_state_dict_as_npz(state_dict: Dict[str, torch.Tensor], out_path: str) -> None:
-    """(Optional) Save a PyTorch state_dict back to a JAX-friendly .npz.
-
-    We invert the key mapping and transpose Linear weights back to (in, out).
-    Only a subset of keys are supported (embed, blocks.*.{attn,fc*,rms*}).
-    """
     arrays: Dict[str, np.ndarray] = {}
-
     for k, t in state_dict.items():
         if k == "embed.weight":
             arrays["Embed_0/embedding"] = t.detach().cpu().numpy()
@@ -260,10 +212,7 @@ def save_torch_state_dict_as_npz(state_dict: Dict[str, torch.Tensor], out_path: 
     np.savez_compressed(out_path, **arrays)
 
 
-# ------------------------------- high-level loader ------------------------------
-
 def load_any_checkpoint(model: torch.nn.Module, path: str, *, device: Optional[torch.device] = None) -> None:
-    """Load either a native PyTorch state_dict (.pt/.pth) or a JAX .npz into the model."""
     if device is None:
         device = next(model.parameters()).device
 
@@ -283,8 +232,6 @@ def load_any_checkpoint(model: torch.nn.Module, path: str, *, device: Optional[t
 
     raise ValueError(f"Unsupported checkpoint extension: {path}")
 
-
-# ------------------------------------- CLI -------------------------------------
 
 def _cmd_translate(args):
     state = load_jax_npz_to_torch_state_dict(args.input, model=None, verbose=not args.quiet)

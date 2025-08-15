@@ -41,4 +41,4 @@ acc_steps: 2
 # use_remat: true
 dataset_percent: 100
 chunk_percent: 10
-device: cpu
+device: cuda

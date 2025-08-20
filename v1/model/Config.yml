@@ -1,5 +1,5 @@
 param_dtype: float32
-compute_dtype: bfloat16
+compute_dtype: float32
 
 # tokenizer_name: EleutherAI/gpt-neo-125M
 tokenizer_name: neo-english-cust
@@ -19,14 +19,22 @@ dataset_path: math_dataset_arrow
 
 
 # model:
-embedding_size: 512
-context_length: 513
-num_heads: 8
-num_layers: 6
-feed_forward_size: 2048
-rope_dim: 8
+# embedding_size: 512
+# context_length: 513
+# num_heads: 8
+# num_layers: 6
+# feed_forward_size: 2048
+# rope_dim: 8
+#
+# num_kv_heads: 8
 
-num_kv_heads: 8
+embedding_size: 128
+context_length: 129
+num_heads: 2
+num_layers: 2
+feed_forward_size: 512
+rope_dim: 2
+num_kv_heads: 2
 
 
 # training:
@@ -39,6 +47,6 @@ acc_steps: 2
 
 # other:
 # use_remat: true
-dataset_percent: 100
+dataset_percent: 0.5
 chunk_percent: 10
 device: cpu

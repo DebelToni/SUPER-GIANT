@@ -46,9 +46,17 @@ class NativeJaxSelfAttention(nn.Module):
         assert(self.rotary_dim <= self.head_dim), "less than or equal to head_dim"
         assert(self.rotary_dim % 2 == 0), "rotary_dim must be even"
 
-        self.q_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
-        self.k_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="k_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
-        self.v_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="v_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
+        # self.q_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
+        # self.k_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="k_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
+        # self.v_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="v_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
+        total_out = self.qkv_features + 2 * self.num_kv * self.head_dim  # (num_heads*head_dim) + 2*(num_kv*head_dim)
+        self.qkv_proj = nn.Dense(
+            total_out,
+            use_bias=False,
+            name="qkv_proj",
+            dtype=self.dtype,
+            param_dtype=Config.param_dtype,
+        )
         self.o_proj = nn.Dense(self.qkv_features, use_bias=False, name="o_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
@@ -56,11 +64,21 @@ class NativeJaxSelfAttention(nn.Module):
     @nn.compact
     def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
         b, l, _ = x.shape
-        head_dim = self.qkv_features // self.num_heads
+        # head_dim = self.qkv_features // self.num_heads
+        
+        head_dim = self.head_dim
+        q_size   = self.num_heads * head_dim
+        kv_size  = self.num_kv * head_dim
 
-        q = self.q_proj(x).reshape(b, l, self.num_heads, head_dim)
-        k = self.k_proj(x).reshape(b, l, self.num_kv, head_dim)
-        v = self.v_proj(x).reshape(b, l, self.num_kv, head_dim)
+        # q = self.q_proj(x).reshape(b, l, self.num_heads, head_dim)
+        # k = self.k_proj(x).reshape(b, l, self.num_kv, head_dim)
+        # v = self.v_proj(x).reshape(b, l, self.num_kv, head_dim)
+        qkv = self.qkv_proj(x)  # (b, l, q_size + 2*kv_size)
+
+        q_chunk, k_chunk, v_chunk = jnp.split(qkv, [q_size, q_size + kv_size], axis=-1)
+        q = q_chunk.reshape(b, l, self.num_heads, head_dim)
+        k = k_chunk.reshape(b, l, self.num_kv,  head_dim)
+        v = v_chunk.reshape(b, l, self.num_kv,  head_dim)
 
         if self.num_kv != self.num_heads:
             k = jnp.repeat(k, self.num_heads // self.num_kv, axis=2)

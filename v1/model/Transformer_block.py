@@ -11,6 +11,9 @@ from flax.linen import RMSNorm
 from omegaconf import OmegaConf
 Config = OmegaConf.load("Config.yml")
 
+from jax import config as jax_config
+jax_config.update("jax_default_matmul_precision", Config.compute_dtype)  
+
 def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)
     return jnp.concatenate((-x2, x1), axis=-1)

@@ -1,12 +1,11 @@
-# checkpoint_io.py
 """
 Tiny utility to (de)serialize Flax/JAX parameter PyTrees
 to a single *.npz* file.  Works for both CPU and GPU tensors.
 
 Why not pickle?
 ---------------
-✓ portable between Python versions  
-✓ inspectable with 'np.load' if needed  
+✓ portable between Python versions
+✓ inspectable with 'np.load' if needed
 ✓ no security worries when sharing checkpoints
 """
 from typing import Dict, Tuple
@@ -20,9 +19,6 @@ def _as_numpy(x):
     return np.asarray(x, dtype=x.dtype)
 
 
-# --------------------------------------------------------------------------- #
-# Save
-# --------------------------------------------------------------------------- #
 def save_npz(params: Dict, path):
     """
     Save *params* (a PyTree/FrozenDict) to **path** with names like
@@ -30,7 +26,7 @@ def save_npz(params: Dict, path):
 
     """
     flat: Dict[Tuple[str, ...], np.ndarray] = flatten_dict(
-        jax.device_get(params)  # bring to host
+        jax.device_get(params)
     )
     np.savez_compressed(
         path,
@@ -38,9 +34,6 @@ def save_npz(params: Dict, path):
     )
 
 
-# --------------------------------------------------------------------------- #
-# Load
-# --------------------------------------------------------------------------- #
 def load_npz(path) -> Dict:
     """
     Load params back as a *nested* dict of NumPy arrays.

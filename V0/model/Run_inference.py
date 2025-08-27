@@ -115,11 +115,6 @@ def generate(model, params, tokenizer, prompt: str, steps: int = 1,
             next_id = int(_select_logits_sampling(last_logits, sub,
                                                 temperature, top_k))
         
-        # Optional: Print top-k predictions for debugging/interest
-        # top_vals, top_ids = jax.lax.top_k(last_logits.astype(jnp.float32), 10)
-        # top_tokens = tokenizer.convert_ids_to_tokens(np.array(top_ids))
-        # print("Top-10 preds:", list(zip(top_tokens, np.array(top_vals))))
-
         print(f"{tokenizer.decode([next_id])}")
         ids.append(next_id)
 

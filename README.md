@@ -44,6 +44,20 @@ V1 features:
 - Overall performance and architecture improvements
 (still in development - features are implemented but more training tests are needed)
 
+Level of v1 intelligence 0.100001#: 
+- not improved because still using the same dataset, but speed and performance is increased
+```bash
+Little Timmy. He was only three years old. He was very curious and wanted to explore the world.
+
+One day, he decided to go on an adventure. He put on his shoes and grabbed his bag. He walked and walked until he came to a big tree. He looked up and saw a big, beautiful tree. He wanted to climb it, but he was too scared.
+
+He started to climb the tree. He was so excited! He climbed up the tree and looked around.
+
+tokens_per_second_decode: 89.301928
+GPU: NVIDIA GeForce RTX 3060 
+```
+
+
 V2 goals:
 - ChatBOT training data and knowledge base
 

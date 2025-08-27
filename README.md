@@ -53,7 +53,7 @@ One day, he decided to go on an adventure. He put on his shoes and grabbed his b
 
 He started to climb the tree. He was so excited! He climbed up the tree and looked around.
 
-tokens_per_second_decode: 89.301928
+tokens_per_second_decode: 189.301928
 GPU: NVIDIA GeForce RTX 3060 
 ```
 

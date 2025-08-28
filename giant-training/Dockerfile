@@ -56,5 +56,5 @@ EXPOSE 22
 WORKDIR /workspace/app
 RUN mkdir -p /workspace/app
 
-# Start SSH daemon in the foreground
+# Start SSH daemon in the foreground 
 CMD ["/usr/sbin/sshd","-D"]

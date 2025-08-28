@@ -23,6 +23,11 @@ RUN pip install --upgrade pip && \
         "jax[cuda12]" \
         flax transformers datasets optax
 
+# Install latest Node.js (includes npm) via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_current.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
 # ── SSH server: password-only root login ────────────────────────────────────────
 RUN mkdir -p /var/run/sshd && \
     # Set root password

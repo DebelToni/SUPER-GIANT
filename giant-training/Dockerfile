@@ -23,6 +23,11 @@ RUN pip install --upgrade pip && \
         "jax[cuda12]" \
         flax transformers datasets optax
 
+# Install latest Node.js (includes npm) via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_current.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
 # ── SSH server: password-only root login ────────────────────────────────────────
 RUN mkdir -p /var/run/sshd && \
     # Set root password
@@ -42,7 +47,7 @@ RUN printf '%s\n' \
       'VIRTUAL_ENV=/opt/venv' \
       'PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
       >> /etc/environment
-# 2) For interactive shells: source the activate script
+# 2) For interactive shells: source the activate scrip
 RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activate-venv.sh
 
 EXPOSE 22
@@ -51,6 +56,5 @@ EXPOSE 22
 WORKDIR /workspace/app
 RUN mkdir -p /workspace/app
 
-# Start SSH daemon in the foreground
+# Start SSH daemon in the foreground 
 CMD ["/usr/sbin/sshd","-D"]
-

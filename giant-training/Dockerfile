@@ -47,7 +47,7 @@ RUN printf '%s\n' \
       'VIRTUAL_ENV=/opt/venv' \
       'PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
       >> /etc/environment
-# 2) For interactive shells: source the activate script
+# 2) For interactive shells: source the activate scrip
 RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activate-venv.sh
 
 EXPOSE 22

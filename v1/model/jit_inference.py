@@ -19,8 +19,8 @@ PyTree = Dict[str, Any]
 
 def init_inference_state(
     model: GiantGPT,
-    key_params: jax.random.KeyArray,
-    key_dropout: jax.random.KeyArray,
+    key_params: jax.Array,
+    key_dropout: jax.Array,
     batch_size: int,
     *,
     pad_token_id: int = 0,
@@ -83,15 +83,12 @@ def make_generate_fn(model: GiantGPT):
     """
 
     def _top_k_logits(logits: Array, k: int) -> Array:
+        """Mask everything below the kth largest logit."""
         if k <= 0:
             return logits
-        # Keep top-k, set others to -inf
-        kth = jnp.sort(logits, axis=-1)[..., -k:jnp.shape(logits)[-1]-k+1:-1]
-        # The threshold is the smallest of the top-k (i.e., index -k)
-        # Simpler: gather topk and build a mask
-        topk_vals = jax.lax.top_k(logits, k)[0][..., -1:]  # the kth largest
-        mask = logits < topk_vals
-        return jnp.where(mask, -jnp.inf, logits)
+        topk_vals, _ = jax.lax.top_k(logits, k)           # [..., k]
+        kth = topk_vals[..., -1, None]                    # [..., 1]
+        return jnp.where(logits < kth, -jnp.inf, logits)
 
     @partial(
         jax.jit,
@@ -107,7 +104,7 @@ def make_generate_fn(model: GiantGPT):
         do_sample: bool = False,
         top_k: int = 0,
         temperature: float = 1.0,
-        rng_key: Optional[jax.random.KeyArray] = None,
+        rng_key: Optional[jax.Array] = None,
     ) -> Tuple[Array, PyTree]:
         """
         Returns:
@@ -128,20 +125,17 @@ def make_generate_fn(model: GiantGPT):
         if Lp > 0:
             # xs for scan: [Lp, B, 1]
             xs = jnp.expand_dims(jnp.moveaxis(prompt_tokens, 1, 0), -1)
-            (nonparam, t), prefill_logits = jax.lax.scan(
+            (nonparam, t), _ = jax.lax.scan(
                 prefill_step,
                 init=(nonparam, jnp.array(0, jnp.int32)),
                 xs=xs,
             )
-            # last prefill token becomes the context for decoding
-            last_logits = prefill_logits[-1]  # [B, 1, V]
-            token_prev = jnp.argmax(last_logits[:, -1, :], axis=-1)  # [B]
+            # IMPORTANT: start decode from the *last prompt token*, not argmax(logits)
+            token_prev_2d = prompt_tokens[:, -1:]          # [B, 1]
         else:
-            # If there's no prompt, start from zeros token (or user should feed BOS via prompt)
+            # No prompt; start from PAD/BOS (caller can control by passing prompt_tokens=[[bos]])
             t = jnp.array(0, jnp.int32)
-            token_prev = jnp.zeros((B,), dtype=jnp.int32)
-
-        token_prev_2d = token_prev[:, None]  # [B, 1]
+            token_prev_2d = jnp.zeros((B, 1), dtype=jnp.int32)
 
         # -------------------------
         # Decode loop (generate)

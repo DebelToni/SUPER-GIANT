@@ -34,6 +34,3 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-

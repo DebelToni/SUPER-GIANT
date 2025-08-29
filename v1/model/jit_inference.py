@@ -1,5 +1,4 @@
 # jit_infer.py
-# Fully JIT-ed inference wrappers for GiantGPT (built from your /mnt/data/GiantGPT.py and /mnt/data/Transformer_block.py)
 # - Initializes params/nonparam state (incl. 'cache')
 # - Prefills a prompt into KV-cache
 # - Decodes with a single JIT-compiled lax.scan loop

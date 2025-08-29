@@ -1,4 +1,3 @@
-# jit_infer.py
 # - Initializes params/nonparam state (incl. 'cache')
 # - Prefills a prompt into KV-cache
 # - Decodes with a single JIT-compiled lax.scan loop
@@ -10,7 +9,6 @@ import jax.numpy as jnp
 
 # IMPORTANT: this imports your model from /mnt/data/GiantGPT.py
 from GiantGPT import GiantGPT
-
 
 Array = jnp.ndarray
 PyTree = Dict[str, Any]
@@ -39,11 +37,10 @@ def init_inference_state(
     )
     params = variables["params"]
     nonparam = {k: v for k, v in variables.items() if k != "params"}
-    # Ensure there's a 'cache' collection present when we plan to use_kv_cache
     if use_kv_cache and "cache" not in nonparam:
         raise ValueError(
             "Model did not create a 'cache' collection during init. "
-            "Check that GiantGPT uses Flax variable collection named 'cache' when use_kv_cache=True."
+            "Check that GiantGPT uses a Flax variable collection named 'cache' when use_kv_cache=True."
         )
     return params, nonparam
 
@@ -54,11 +51,11 @@ def _apply_with_cache(
     nonparam: PyTree,
     tokens_1: Array,          # [B, 1]
     cur_idx: Array,           # scalar int32
-) -> Tuple[Array, PyTree]:
+):
     """
     Single step forward with KV cache enabled (deterministic=True).
     Returns logits and updated nonparam with refreshed 'cache'.
-    Note: this function is intended to be used **inside** a jitted function.
+    Note: intended to be used **inside** a jitted function.
     """
     variables = {"params": params, **nonparam}
     logits, new_vars = model.apply(
@@ -73,100 +70,93 @@ def _apply_with_cache(
     return logits, nonparam_out
 
 
-def make_generate_fn(model: GiantGPT):
+def make_prefill_and_decode_fns(model: GiantGPT):
     """
-    Returns a single JIT-compiled function that:
-      * Prefills the prompt into the KV cache using scan
-      * Generates `max_new_tokens` tokens (greedy or sampled) using scan
+    Returns two JIT-compiled functions:
+      * prefill(params, nonparam, prompt_tokens) -> (nonparam, t, last_tok_2d)
+      * decode(params, nonparam, last_tok_2d, t, steps, do_sample, top_k, temperature, rng_key)
+          -> (tokens_new [B, steps], nonparam)
     We capture `model` in the closure (static to the JIT).
     """
 
-    def _top_k_logits(logits: Array, k: int) -> Array:
-        """Mask everything below the kth largest logit."""
-        if k <= 0:
-            return logits
-        topk_vals, _ = jax.lax.top_k(logits, k)           # [..., k]
-        kth = topk_vals[..., -1, None]                    # [..., 1]
-        return jnp.where(logits < kth, -jnp.inf, logits)
-
-    @partial(
-        jax.jit,
-        static_argnames=("max_new_tokens", "do_sample", "top_k"),
-        donate_argnums=(1,),  # donate `nonparam` (arg index 1) to reduce copies
-    )
-    def generate(
+    @jax.jit
+    def prefill(
         params: PyTree,
         nonparam: PyTree,
-        prompt_tokens: Array,              # [B, Lp] int32
-        *,
-        max_new_tokens: int,
-        do_sample: bool = False,
-        top_k: int = 0,
-        temperature: float = 1.0,
-        rng_key: Optional[jax.Array] = None,
-    ) -> Tuple[Array, PyTree]:
-        """
-        Returns:
-          tokens_new: [B, max_new_tokens] int32
-          nonparam:   updated nonparam (with final cache)
-        """
-        B = prompt_tokens.shape[0]
-        Lp = prompt_tokens.shape[1]
+        prompt_tokens: Array,           # [B, Lp]
+    ):
+        B, Lp = prompt_tokens.shape
+        t0 = jnp.array(0, jnp.int32)
 
-        # -------------------------
-        # Prefill the KV cache
-        # -------------------------
         def prefill_step(carry, tok_t_2d):
             nonparam, t = carry
             logits, nonparam = _apply_with_cache(model, params, nonparam, tok_t_2d, t)
             return (nonparam, t + 1), logits
 
         if Lp > 0:
-            # xs for scan: [Lp, B, 1]
-            xs = jnp.expand_dims(jnp.moveaxis(prompt_tokens, 1, 0), -1)
-            (nonparam, t), _ = jax.lax.scan(
-                prefill_step,
-                init=(nonparam, jnp.array(0, jnp.int32)),
-                xs=xs,
-            )
-            # IMPORTANT: start decode from the *last prompt token*, not argmax(logits)
-            token_prev_2d = prompt_tokens[:, -1:]          # [B, 1]
+            xs = jnp.expand_dims(jnp.swapaxes(prompt_tokens, 0, 1), -1)  # [Lp, B, 1]
+            (nonparam, t), _ = jax.lax.scan(prefill_step, init=(nonparam, t0), xs=xs)
+            last_tok_2d = prompt_tokens[:, -1:]
         else:
-            # No prompt; start from PAD/BOS (caller can control by passing prompt_tokens=[[bos]])
-            t = jnp.array(0, jnp.int32)
-            token_prev_2d = jnp.zeros((B, 1), dtype=jnp.int32)
+            nonparam, t = nonparam, t0
+            last_tok_2d = jnp.zeros((B, 1), dtype=jnp.int32)
 
-        # -------------------------
-        # Decode loop (generate)
-        # -------------------------
-        def decode_step(carry, _):
-            nonparam, t, tok_prev_2d, rng = carry
+        return nonparam, t, last_tok_2d
+
+    def _top_k_logits(logits: Array, k: int) -> Array:
+        """Mask everything below the kth largest logit."""
+        if k <= 0:
+            return logits
+        topk_vals, _ = jax.lax.top_k(logits, k)      # [..., k]
+        kth = topk_vals[..., -1, None]               # [..., 1]
+        return jnp.where(logits < kth, -jnp.inf, logits)
+
+    @partial(
+        jax.jit,
+        static_argnames=("steps", "do_sample", "top_k"),
+        donate_argnums=(1,),  # donate nonparam
+    )
+    def decode(
+        params: PyTree,
+        nonparam: PyTree,
+        last_tok_2d: Array,         # [B, 1] (the last prompt token or previous generated)
+        t: Array,                   # scalar int32, current position in sequence
+        *,
+        steps: int,                 # number of new tokens to generate
+        do_sample: bool = False,
+        top_k: int = 0,
+        temperature: float = 1.0,
+        rng_key: Optional[jax.Array] = None,
+    ):
+        B = last_tok_2d.shape[0]
+        # Preallocate output tokens [B, steps]
+        out = jnp.zeros((B, steps), dtype=jnp.int32)
+
+        def body(carry, i):
+            nonparam, t, tok_prev_2d, rng, out = carry
             logits, nonparam = _apply_with_cache(model, params, nonparam, tok_prev_2d, t)
-            step_logits = logits[:, -1, :]  # [B, V]
+            step_logits = logits[:, -1, :]
 
             if do_sample:
                 assert rng is not None, "rng_key must be provided when do_sample=True"
-                # Temperature + optional top-k
                 scaled = step_logits / jnp.maximum(temperature, 1e-6)
                 scaled = _top_k_logits(scaled, top_k) if top_k > 0 else scaled
-                next_tok = jax.random.categorical(rng, scaled, axis=-1)
-                rng, _ = jax.random.split(rng)
+                rng, sub = jax.random.split(rng)
+                next_tok = jax.random.categorical(sub, scaled, axis=-1)
             else:
                 next_tok = jnp.argmax(step_logits, axis=-1)
 
-            next_tok_2d = next_tok[:, None]  # [B, 1]
-            return (nonparam, t + 1, next_tok_2d, rng), next_tok
+            # write to output
+            out = jax.lax.dynamic_update_slice(out, next_tok[:, None], (0, i))
+            next_tok_2d = next_tok[:, None]
+            return (nonparam, t + 1, next_tok_2d, rng, out), None
 
-        init_rng = rng_key if do_sample else jnp.zeros((2,), dtype=jnp.uint32)
-        (nonparam, _t, _tok2d, _rng), tokens_new = jax.lax.scan(
-            decode_step,
-            init=(nonparam, t, token_prev_2d, init_rng),
-            xs=None,
-            length=max_new_tokens,
+        (nonparam, t, _tok2d, _rng, out), _ = jax.lax.scan(
+            body,
+            init=(nonparam, t, last_tok_2d, rng_key if do_sample else jnp.zeros((2,), jnp.uint32), out),
+            xs=jnp.arange(steps, dtype=jnp.int32),
         )
-        # tokens_new: [T, B] -> [B, T]
-        tokens_new = jnp.moveaxis(tokens_new, 0, 1)
-        return tokens_new, nonparam
+        return out, nonparam
 
-    return generate
+    return prefill, decode
 

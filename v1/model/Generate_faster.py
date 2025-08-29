@@ -16,10 +16,10 @@ from omegaconf import OmegaConf
 Config = OmegaConf.load("Config.yml")
 
 from GiantGPT import GiantGPT
-from jit_inference import init_inference_state, make_generate_fn
+from jit_inference import init_inference_state, make_prefill_and_decode_fns
 
-from jax import config
-config.update("jax_default_matmul_precision", "tensorfloat32")
+from jax import config as jax_config
+jax_config.update("jax_default_matmul_precision", "tensorfloat32")
 
 
 def build_model() -> GiantGPT:
@@ -62,10 +62,8 @@ def load_checkpoint(path: Path):
 def preprocess_prompt_no_EOS(tokenizer, prompt: str, max_len: int):
     """Tokenize prompt without EOS token, matching Generate_text_fast.py"""
     ids = tokenizer.encode(prompt, add_special_tokens=False)
-
     if ids and ids[-1] == tokenizer.eos_token_id:
         ids = ids[:-1]
-
     if len(ids) >= max_len:
         ids = ids[-max_len:]
     return np.array(ids, dtype="int32")
@@ -77,114 +75,6 @@ def preprocess_prompt(tokenizer, prompt: str, max_len: int):
     if ids.shape[0] >= max_len:
         ids = ids[-max_len:]
     return ids.astype("int32")
-
-
-def _block_until_ready_tree(x):
-    """Blocks on all JAX arrays inside a PyTree."""
-    leaves = jax.tree_util.tree_leaves(x)
-    for leaf in leaves:
-        if isinstance(leaf, jax.Array):
-            leaf.block_until_ready()
-
-
-def generate_text_jit(
-    model: GiantGPT,
-    params: dict,
-    nonparam: dict,
-    tokenizer,
-    prompt_ids: jnp.ndarray,  # (L,)
-    max_new_tokens: int,
-    temperature: float,
-    top_k: Optional[int],
-    do_sample: bool,
-    rng_key: Optional[jax.Array] = None,
-    *,
-    return_stats: bool = False,
-) -> str | Tuple[str, Dict[str, Any]]:
-    """
-    Generates text using JIT inference. If return_stats is True, also returns a dict with:
-      - prompt_tokens
-      - generated_tokens  
-      - prefill_time_s
-      - decode_time_s
-      - tokens_per_second_decode
-    """
-    device = jax.devices(Config.device)[0]
-    params = jax.device_put(params, device)
-    nonparam = jax.device_put(nonparam, device)
-
-    # Prepare prompt for JIT function
-    prompt_batch = prompt_ids[None, :]  # [1, L_prompt]
-    
-    # Get the JIT-compiled generate function
-    generate_fn = make_generate_fn(model)
-    
-    # --- Prefill timing: measure the first part (prompt processing) ---
-    prefill_time_s = 0.0
-    decode_time_s = 0.0
-    
-    if prompt_batch.shape[1] > 0:
-        # Start timing for full generation (including prefill)
-        t0 = time.perf_counter()
-        
-        # Generate tokens
-        tokens_new, final_nonparam = generate_fn(
-            params,
-            nonparam,
-            prompt_batch,
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample,
-            top_k=top_k,
-            temperature=temperature,
-            rng_key=rng_key,
-        )
-        
-        # Force device sync for accurate timing
-        tokens_new.block_until_ready()
-        total_time = time.perf_counter() - t0
-        
-        # For JIT inference, we approximate prefill time as a small fraction
-        # since the JIT function handles both prefill and decode together
-        prefill_time_s = total_time * 0.1  # Rough estimate
-        decode_time_s = total_time * 0.9
-    else:
-        # No prompt, just decode
-        t1 = time.perf_counter()
-        tokens_new, final_nonparam = generate_fn(
-            params,
-            nonparam,
-            jnp.array([[0]], dtype=jnp.int32),  # Start with pad token
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample,
-            top_k=top_k,
-            temperature=temperature,
-            rng_key=rng_key,
-        )
-        tokens_new.block_until_ready()
-        decode_time_s = time.perf_counter() - t1
-
-    # Combine prompt and generated tokens for decoding
-    if prompt_batch.shape[1] > 0:
-        full_tokens = jnp.concatenate([prompt_batch, tokens_new], axis=1)
-    else:
-        full_tokens = tokens_new
-    
-    # Decode to text
-    text = tokenizer.decode(
-        full_tokens[0],
-        skip_special_tokens=True,
-    )
-
-    if return_stats:
-        toks_per_s = (max_new_tokens / decode_time_s) if decode_time_s > 0 else float("inf")
-        return text, {
-            "prompt_tokens": int(prompt_ids.shape[0]),
-            "generated_tokens": int(max_new_tokens),
-            "prefill_time_s": float(prefill_time_s),
-            "decode_time_s": float(decode_time_s),
-            "tokens_per_second_decode": float(toks_per_s),
-        }
-    return text
 
 
 def main():
@@ -203,17 +93,14 @@ def main():
                     help="Force greedy decoding (temperature=0.0)")
     ap.add_argument("--verbose", action="store_true",
                     help="Print timing and tokens/sec for the decode phase")
-    
-    # Additional JIT-specific options
     ap.add_argument("--no_eos", action="store_true",
                     help="Remove EOS token from prompt preprocessing")
-    
+
     args = ap.parse_args()
 
     # Handle temperature/greedy settings
     temperature = 0.0 if args.greedy else args.temperature
     do_sample = temperature > 0.0
-    # Keep JIT static signature stable
     top_k_int = 0 if args.top_k is None else int(args.top_k)
 
     print("\nLoading checkpoint…")
@@ -221,7 +108,7 @@ def main():
 
     print("Building model…")
     model = build_model()
-    
+
     # Load tokenizer (matching Generate_text_fast.py exactly)
     if Config.use_custom_tokenizer:
         tokenizer = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
@@ -234,67 +121,61 @@ def main():
     else:
         prompt_ids = preprocess_prompt(tokenizer, args.prompt, Config.context_length)
 
-    # Initialize inference state for JIT
+    prompt = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)  # [1, Lp]
+
+    # Initialize inference state for JIT (creates cache structure)
     key = jax.random.PRNGKey(42)
     k_params, k_drop, k_sample = jax.random.split(key, 3)
-    
-    # Initialize with loaded params
-    _, nonparam = init_inference_state(
-        model, k_params, k_drop, batch_size=1, pad_token_id=0, use_kv_cache=True
-    )
-    
+    _, nonparam = init_inference_state(model, k_params, k_drop, batch_size=1, pad_token_id=0, use_kv_cache=True)
+
     # Replace dummy params with loaded params
-    # Note: params_cpu should be the actual trained parameters
     params = params_cpu
 
-    print("Generating… (first decode call may include JIT compile)")
-    
-    # Generate text
-    rng_for_sampling = k_sample if do_sample else None
-    
-    if args.verbose:
-        text, stats = generate_text_jit(
-            model,
-            params,
-            nonparam,
-            tokenizer,
-            prompt_ids,
-            args.steps,
-            temperature,
-            top_k_int,
-            do_sample,
-            rng_for_sampling,
-            return_stats=True,
-        )
-    else:
-        text = generate_text_jit(
-            model,
-            params,
-            nonparam,
-            tokenizer,
-            prompt_ids,
-            args.steps,
-            temperature,
-            top_k_int,
-            do_sample,
-            rng_for_sampling,
-            return_stats=False,
-        )
+    # Put state on default device once
+    params = jax.device_put(params)
+    nonparam = jax.device_put(nonparam)
 
-    # Output results (matching Generate_text_fast.py format exactly)
+    # Build JIT-ed prefill & decode functions (capture `model` statically)
+    prefill_fn, decode_fn = make_prefill_and_decode_fns(model)
+
+    # --- Compile both ahead-of-time for these exact shapes/flags ---
+    compiled_prefill = prefill_fn.lower(params, nonparam, prompt).compile()
+    compiled_decode = decode_fn.lower(
+        params, nonparam, jnp.zeros((1,1), jnp.int32), jnp.array(0, jnp.int32),
+        steps=args.steps, do_sample=do_sample, top_k=top_k_int, temperature=temperature,
+        rng_key=(k_sample if do_sample else None),
+    ).compile()
+
+    # --- Run prefill (not included in decode timing) ---
+    nonparam2, t_cur, last_tok_2d = compiled_prefill(params, nonparam, prompt)
+    # Ensure prefill finished
+    jax.tree_util.tree_leaves(nonparam2)[0].block_until_ready()
+
+    # --- Decode & time ---
+    t0 = time.perf_counter()
+    tokens_new, nonparam_out = compiled_decode(
+        params, nonparam2, last_tok_2d, t_cur,
+        temperature=temperature,
+        rng_key=(k_sample if do_sample else None),
+    )
+
+    tokens_new.block_until_ready()
+    dt = time.perf_counter() - t0
+
+    # Decode to text (not timed)
+    full_tokens = jnp.concatenate([prompt, tokens_new], axis=1)
+    text = tokenizer.decode(np.asarray(full_tokens[0]), skip_special_tokens=True)
+
     print("\n" + "="*20 + " RESULT " + "="*20)
     print(text)
     print("="*48)
 
     if args.verbose:
-        gen_tok = stats["generated_tokens"]
-        dec_s = stats["decode_time_s"]
-        toks_per_s = stats["tokens_per_second_decode"]
+        toks_per_s = args.steps / dt if dt > 0 else float("inf")
         print("\n[perf]")
-        print(f"prompt_tokens: {stats['prompt_tokens']}")
-        print(f"generated_tokens: {gen_tok}")
-        print(f"prefill_time_s: {stats['prefill_time_s']:.6f}")
-        print(f"decode_time_s:  {dec_s:.6f}")
+        print(f"prompt_tokens: {prompt.shape[1]}")
+        print(f"generated_tokens: {args.steps}")
+        print(f"decode_time_s:  {dt:.6f}")
         print(f"tokens_per_second_decode: {toks_per_s:.6f}")
 
 

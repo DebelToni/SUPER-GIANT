@@ -14,6 +14,19 @@ Config = OmegaConf.load("Config.yml")
 from jax import config as jax_config
 jax_config.update("jax_default_matmul_precision", Config.compute_dtype)  
 
+class EPU(nn.Module):
+    """Clipped exponential unit with learnable min, max, k (JAX/Flax).
+    Forward: exp(k * clip(x, min, max))"""
+    @nn.compact
+    def __call__(self, x):
+        # min in [-5,-2], max in [1,4], k in [0,1)
+        m = self.param("min", lambda key: jax.random.randint(key, shape=(), minval=-5, maxval=-1).astype(Config.param_dtype))
+        M = self.param("max", lambda key: jax.random.randint(key, shape=(), minval=1, maxval=5).astype(Config.param_dtype))
+        k = self.param("k",  lambda key: jax.random.uniform(key, shape=(), minval=0.0, maxval=1.0, dtype=jnp.dtype(Config.param_dtype)))
+        m, M, k = m.astype(x.dtype), M.astype(x.dtype), k.astype(x.dtype)
+        x_clamped = jnp.clip(x, a_min=m, a_max=M)
+        return jnp.exp(k * x_clamped)  
+
 def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)
     return jnp.concatenate((-x2, x1), axis=-1)
@@ -191,7 +204,14 @@ class TinyTransformerBlock(nn.Module):
             )(h_norm)
 
             u, v = jnp.split(h_proj, 2, axis=-1)
-            h_ffn = nn.silu(u) * v
+            # Choose activation per config (default SiLU).
+            # Supported: "silu" (SwiGLU: silu(u) * v), "epu" (EPU(u) * v)
+            act_name = str(getattr(Config, "ffn_activation", "silu")).lower()
+            if act_name == "epu":
+                h_gate = EPU(name="epu")(u)
+            else:
+                h_gate = nn.silu(u)
+            h_ffn = h_gate * v
 
             h_ffn = nn.Dense(module.d_model, name="fc2", dtype=module.dtype, param_dtype=Config.param_dtype)(h_ffn)
             h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)

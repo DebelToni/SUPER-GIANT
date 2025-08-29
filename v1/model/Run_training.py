@@ -112,7 +112,7 @@ def main() -> None:
         optax.clip_by_global_norm(1.0),
         optax.adamw(
             learning_rate = schedule,
-            b1 = 0.9, b2 = 0.95, eps = 1e-8, weight_decay = 0.1,
+            b1 = 0.9, b2 = 0.95, eps = 1e-8, weight_decay=Config.weight_decay,
         ),
     )
     opt_state    = optimizer.init(params)

@@ -44,6 +44,7 @@ weight_decay: 0.05
 batch_size: 8
 num_epochs: 3
 acc_steps: 2
+ffn_activation: epu #silu
 
 # other:
 # use_remat: true

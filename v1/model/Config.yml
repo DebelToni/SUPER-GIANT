@@ -18,7 +18,7 @@ use_custom_dataset: false
 dataset_path: math_dataset_arrow
 
 
-# model:
+# model: # USE THIS IF YOU TRAIN A BIGGER MODEL ON BETTER DATA:
 # embedding_size: 512
 # context_length: 513
 # num_heads: 8
@@ -28,6 +28,7 @@ dataset_path: math_dataset_arrow
 #
 # num_kv_heads: 8
 
+# SIMPLE MODEL TO TRAIN ON CPU TO REPLICATE MY RESULTS:
 embedding_size: 128
 context_length: 129
 num_heads: 2
@@ -44,10 +45,11 @@ weight_decay: 0.05
 batch_size: 8
 num_epochs: 3
 acc_steps: 2
-ffn_activation: epu #silu
+ffn_activation: silu # epu
 
 # other:
 # use_remat: true
 dataset_percent: 0.5
 chunk_percent: 10
-device: cpu
+# put cpu if you dont have gpu, jax may do that for you
+device: gpu

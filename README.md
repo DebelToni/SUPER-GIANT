@@ -70,3 +70,26 @@ V2 goals:
 
 [Read the model overview](Model_Overview.md)
 
+
+---
+
+## Installation
+
+I've created a base Dockerimage with all the dependencies installed for ease of use. You can run it with:
+```bash
+docker run -d \
+  --name giant-training \
+  --gpus all \
+  --pull always \
+  -p 2222:22 \
+  -v YOUR_DOCUMETS_DIRECTORY:/workspace/app \
+  bonanc/giant-training:latest
+```
+
+Then you can access the container with:
+```bash
+ssh -p 2222 root@127.0.0.1
+(password: dev)
+```
+
+(if the image did not come with the project just git clone it inside the container or in the mounted directory)

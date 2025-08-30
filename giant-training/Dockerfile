@@ -21,7 +21,7 @@ ENV PATH="$VENV_DIR/bin:$PATH" VIRTUAL_ENV="$VENV_DIR"
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir \
         "jax[cuda12]" \
-        flax transformers datasets optax
+        flax transformers datasets optax omegaconf
 
 # Install latest Node.js (includes npm) via NodeSource
 RUN curl -fsSL https://deb.nodesource.com/setup_current.x | bash - && \

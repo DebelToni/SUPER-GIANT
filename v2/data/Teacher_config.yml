@@ -1,0 +1,37 @@
+model_name: "clowman/Llama-3.2-3B-Instruct-AWQ-Int4"
+model_tokenizer: "clowman/Llama-3.2-3B-Instruct-AWQ-Int4"
+model_base_url: "http://100.115.166.115:8000/v1"
+api_key: "banangun3000"
+
+max_model_len: 4096
+temperature: 0.6
+top_p: 0.7
+top_logprobs: 5
+prompt_logprobs: 0
+
+out_dir: "teacher_out"
+questions_arrow: "teacher_out/questions.arrow"
+answers_arrow: "teacher_out/answers.arrow"
+
+student_tokenizer_dir: "neo-english-cust"
+
+user_token: "[USER]"
+ai_token: "[AI]"
+
+# for these make sure they match the neo tokenizer config, because saw it uses mask for pads and so on.
+write_loss_mask: true  
+write_role_ids: true
+
+# Generation:
+num_questions_total: 100
+questions_per_chunk: 10
+
+max_new_tokens_answer: 256
+
+parrallel_calls: 1
+
+# Prompts:
+question_system: "You are a teacher language model who is needed to generate diverse, realistic USER questions for training a base model, that means the complexity should be kindergarden english."
+question_user: "Generate a single user question about any topic, use clear wording. The topic could be about science, history, technology or simple query that can be answered in 1 shot - you can generate a greeting also. Make the question super simple tho"
+
+answer_system: "You are a helpful assistant. Answer clearly and concisely. If you are unsure, say you are unsure."

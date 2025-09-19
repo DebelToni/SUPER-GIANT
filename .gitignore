@@ -17,3 +17,4 @@ neo-english-cust/
 trained_models/
 .DS_Store
 *checkpoints/
+teacher_out/

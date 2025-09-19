@@ -163,12 +163,6 @@ def main() -> None:
                 ckpt_file = save_ckpt(params, global_step, checkpoint_dir)
                 print(f"💾 checkpoint → {ckpt_file}")
 
-        # End‑of‑epoch validation
-        val_loss = evaluate(params, model, val_tokens)
-        epoch_time = time.time() - t0
-        print(f"✓ Epoch {epoch+1}/{Config.num_epochs} "
-              f"done in {epoch_time/60:.1f} min – "
-              f"val loss {val_loss:.4f}  ppl {np.exp(val_loss):.2f}")
 
     # ------------------------------------------------------------------ #
     # Final save

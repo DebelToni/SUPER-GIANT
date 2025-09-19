@@ -55,7 +55,7 @@ CACHE_DIR      = Path(Config.tokenizer_path)
 VAL_EVERY_N_WIN = 33          # deterministic interleaving train/val
 STRIDE_FRAC     = 0.5         # 50 % overlap between successive windows
 SHARD_ROWS      = 10_000      # windows per compressed shard
-DTYPE           = np.uint16   # enough for vocab < 65 535
+DTYPE           = Config.tokenizer_dtype
 PAD_FRAC_LIMIT  = 0.05        # sanity‑check threshold
 
 

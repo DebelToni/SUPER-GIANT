@@ -1,10 +1,10 @@
 param_dtype: float32
-compute_dtype: float32
+compute_dtype: bfloat16
 
-# tokenizer_name: EleutherAI/gpt-neo-125M
-tokenizer_name: neo-english-cust
+tokenizer_name: "clowman/Llama-3.2-3B-Instruct-AWQ-Int4"
+# tokenizer_name: neo-english-cust
 tokenizer_path: tiny_cached
-tokenizer_dtype: uint16
+tokenizer_dtype: float32 #uint16
 use_custom_tokenizer: false
 custom_tokenizer_path: math_tokenizer_data
 
@@ -18,25 +18,15 @@ use_custom_dataset: false
 dataset_path: math_dataset_arrow
 
 
-# model: # USE THIS IF YOU TRAIN A BIGGER MODEL ON BETTER DATA:
-# embedding_size: 512
-# context_length: 513
-# num_heads: 8
-# num_layers: 6
-# feed_forward_size: 2048
-# rope_dim: 8
-#
-# num_kv_heads: 8
+model: # USE THIS IF YOU TRAIN A BIGGER MODEL ON BETTER DATA:
+embedding_size: 512
+context_length: 513
+num_heads: 8
+num_layers: 6
+feed_forward_size: 2048
+rope_dim: 8
 
-# SIMPLE MODEL TO TRAIN ON CPU TO REPLICATE MY RESULTS:
-embedding_size: 128
-context_length: 129
-num_heads: 2
-num_layers: 2
-feed_forward_size: 512
-rope_dim: 2
-num_kv_heads: 2
-
+num_kv_heads: 8
 
 # training:
 dropout_rate: 0.05

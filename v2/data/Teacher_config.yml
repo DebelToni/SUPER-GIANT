@@ -1,12 +1,12 @@
 model_name: "clowman/Llama-3.2-3B-Instruct-AWQ-Int4"
 model_tokenizer: "clowman/Llama-3.2-3B-Instruct-AWQ-Int4"
-model_base_url: "http://100.115.166.115:8000/v1"
+model_base_url: "http://0.0.0.0:8000/v1"
 api_key: "banangun3000"
 
-max_model_len: 4096
-temperature: 0.6
+max_model_len: 2048
+temperature: 1.2
 top_p: 0.7
-top_logprobs: 5
+top_logprobs: 100
 prompt_logprobs: 0
 
 out_dir: "teacher_out"
@@ -31,7 +31,10 @@ max_new_tokens_answer: 256
 parrallel_calls: 1
 
 # Prompts:
-question_system: "You are a teacher language model who is needed to generate diverse, realistic USER questions for training a base model, that means the complexity should be kindergarden english."
-question_user: "Generate a single user question about any topic, use clear wording. The topic could be about science, history, technology or simple query that can be answered in 1 shot - you can generate a greeting also. Make the question super simple tho"
+# question_system: "You are a teacher language model who is needed to generate diverse, realistic USER questions for training a base model, that means the complexity should be kindergarden english."
+question_system: "You are a teacher language model who is needed to generate super simple questions for a chat interaction based smaller model."
+# question_user: "Generate a single user question about any topic, use clear wording. The topic could be about science, history, technology or simple query that can be answered in 1 shot - you can generate a greeting also. Make the question super simple tho"
+question_user: "Generate a single user_question about any topic. The question can be as simple as what is 1+1, why is the sky blue or a greeting interaction."
 
-answer_system: "You are a helpful assistant. Answer clearly and concisely. If you are unsure, say you are unsure."
+# answer_system: "You are a helpful assistant. Answer clearly and concisely. If you are unsure, say you are unsure."
+answer_system: "Answer the user question shortly and simply. Use A1-A2 english language."

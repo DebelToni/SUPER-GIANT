@@ -82,8 +82,8 @@ def chat_complete(
 
     if response_format:
         payload["response_format"] = response_format
-    if seed is not None:
-        payload["seed"] = int(seed)
+    # if seed is not None:
+    #     payload["seed"] = int(seed)
 
     r = requests.post(url, headers=headers, data=_jdump(payload), timeout=timeout)
     r.raise_for_status()
@@ -245,7 +245,7 @@ def _make_question_request(cfg, seed=None) -> str:
             top_logprobs=int(cfg.top_logprobs),
             prompt_logprobs=int(cfg.prompt_logprobs),
             response_format=None,
-            seed=123,
+            # seed=123,
             timeout=180,
         )
         text = resp["choices"][0]["message"]["content"]
@@ -270,7 +270,7 @@ def _make_question_request(cfg, seed=None) -> str:
         logprobs=0,
         prompt_logprobs=int(cfg.prompt_logprobs),
         response_format=None,
-        seed=seed if seed is not None else 43,
+        # seed=seed if seed is not None else 43,
         timeout=120,
     )
     text = resp["choices"][0]["message"]["content"]
@@ -329,7 +329,7 @@ def _answer_one(cfg, tokenizer, user_tok, ai_tok, rec) -> Dict[str, Any]:
         logprobs=int(cfg.top_logprobs),
         prompt_logprobs=int(cfg.prompt_logprobs),
         response_format=None,
-        seed=123,
+        # seed=123,
         timeout=180,
     )
     ch = resp["choices"][0]

@@ -4,7 +4,7 @@ model_base_url: "http://0.0.0.0:8000/v1"
 api_key: "banangun3000"
 
 max_model_len: 2048
-temperature: 1.2
+temperature: 1.5
 top_p: 0.7
 top_logprobs: 100
 prompt_logprobs: 0
@@ -23,18 +23,19 @@ write_loss_mask: true
 write_role_ids: true
 
 # Generation:
-num_questions_total: 100
-questions_per_chunk: 10
+num_questions_total: 10000
+questions_per_chunk: 1000
 
 max_new_tokens_answer: 256
 
-parrallel_calls: 1
+parrallel_calls: 32
 
 # Prompts:
-# question_system: "You are a teacher language model who is needed to generate diverse, realistic USER questions for training a base model, that means the complexity should be kindergarden english."
-question_system: "You are a teacher language model who is needed to generate super simple questions for a chat interaction based smaller model."
-# question_user: "Generate a single user question about any topic, use clear wording. The topic could be about science, history, technology or simple query that can be answered in 1 shot - you can generate a greeting also. Make the question super simple tho"
-question_user: "Generate a single user_question about any topic. The question can be as simple as what is 1+1, why is the sky blue or a greeting interaction."
+question_system: "You are a teacher language model who is needed to generate questions for a chat interaction based smaller model."
+question_user: "Generate a single user_question about any topic. The question can be as simple as what is 1+1, why is the sky blue or a greeting interaction. These were just examples make the question a bit more unique."
+# question_user: "Generate a single user_question about any topic. Make it relatively simple."
+# question_user: "Generate a single user_question about any topic. Make it relatively simple but still the answer needs to require more than one sentance."
 
-# answer_system: "You are a helpful assistant. Answer clearly and concisely. If you are unsure, say you are unsure."
-answer_system: "Answer the user question shortly and simply. Use A1-A2 english language."
+# answer_system: "Answer the user question shortly and simply. Use A1-A2 english language."
+answer_system: "Answer the user question shortly and simply."
+# answer_system: "Answer the user question simply."

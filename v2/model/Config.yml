@@ -11,11 +11,11 @@ custom_tokenizer_path: math_tokenizer_data
 # dataset_name: wikitext-2-raw-v1
 # dataset_has_vendor: true
 # dataset_vendor: Salesforce/wikitext
-dataset_name: roneneldan/TinyStories
-dataset_has_vendor: false
-dataset_vendor: roneneldan
-use_custom_dataset: false
-dataset_path: math_dataset_arrow
+# dataset_name: roneneldan/TinyStories
+# dataset_has_vendor: false
+# dataset_vendor: roneneldan
+# use_custom_dataset: false
+# dataset_path: math_dataset_arrow
 
 
 model: # USE THIS IF YOU TRAIN A BIGGER MODEL ON BETTER DATA:
@@ -39,7 +39,22 @@ ffn_activation: silu # epu
 
 # other:
 # use_remat: true
-dataset_percent: 0.5
+dataset_percent: 5
 chunk_percent: 10
 # put cpu if you dont have gpu, jax may do that for you
 device: gpu
+
+# ---- Distillation knobs ----
+use_distillation: true
+distill_topk: 16           # how many top-k alternatives per token we keep
+distill_temperature: 2.0  # Hinton temperature
+distill_weight: 0.5       # lambda for KD vs CE
+
+# ---- Point to your teacher Arrow ----
+use_custom_dataset: true
+dataset_path: teacher_out
+teacher_answers_filename: answers.arrow            # file produced by teacher_generate.py
+
+# (optional) fast/robust reading
+arrow_memory_map: true
+

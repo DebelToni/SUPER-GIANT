@@ -28,6 +28,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_current.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
+# Ensure **latest** npm
+RUN npm install -g npm@latest
+
 # ── SSH server: password-only root login ────────────────────────────────────────
 RUN mkdir -p /var/run/sshd && \
     # Set root password
@@ -58,3 +61,4 @@ RUN mkdir -p /workspace/app
 
 # Start SSH daemon in the foreground 
 CMD ["/usr/sbin/sshd","-D"]
+

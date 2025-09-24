@@ -28,8 +28,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_current.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Ensure **latest** npm
-RUN npm install -g npm@latest
+# Ensure **latest** npm via Corepack (Node 18+)
+RUN corepack enable && corepack prepare npm@latest --activate
 
 # ── SSH server: password-only root login ────────────────────────────────────────
 RUN mkdir -p /var/run/sshd && \

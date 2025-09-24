@@ -71,16 +71,20 @@ def main() -> None:
     # Use smaller context length for distillation (conversations are short)
     distill_context_length = min(256, Config.context_length - 1)
     print(f"Using distillation context length: {distill_context_length}")
-    train_it, val_it, tokenizer = get_data(
+    train_factory, val_factory, tokenizer = get_data(
         subset_pct=Config.dataset_percent * 100 if Config.dataset_percent <= 1 else Config.dataset_percent,
         context_length=distill_context_length,
         batch_size=Config.batch_size,
     )
-    train_loader = data_loader(train_it)
+    # Iterator factories → create fresh iterators whenever needed
+    def make_train_loader():
+        return data_loader(train_factory())
+    def make_val_loader():
+        return data_loader(val_factory())
 
-    # Estimate dataset size for logging
-    train_batches = sum(1 for _ in train_loader)
-    val_batches = sum(1 for _ in data_loader(val_it)) if val_it else 0
+    # Estimate dataset size for logging (uses fresh iterators, does not exhaust)
+    train_batches = sum(1 for _ in make_train_loader())
+    val_batches   = sum(1 for _ in make_val_loader())
     print(f"train batches: {train_batches}   val batches: {val_batches}")
 
     # Debug: Check if we have any batches
@@ -156,7 +160,7 @@ def main() -> None:
 
     for epoch in range(Config.num_epochs):
         t0 = time.time()
-        for batch in train_loader:
+        for batch in make_train_loader():  # fresh streaming iterator per epoch
             rng, dropout_rng = jax.random.split(rng)
             params, opt_state, loss = train_step(
                 params, opt_state, batch,

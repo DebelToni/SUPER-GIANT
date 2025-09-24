@@ -68,9 +68,12 @@ def main() -> None:
     # Dataset
     # ------------------------------------------------------------------ #
     print("Preparing dataset …")
+    # Use smaller context length for distillation (conversations are short)
+    distill_context_length = min(256, Config.context_length - 1)
+    print(f"Using distillation context length: {distill_context_length}")
     train_it, val_it, tokenizer = get_data(
         subset_pct=Config.dataset_percent * 100 if Config.dataset_percent <= 1 else Config.dataset_percent,
-        context_length=Config.context_length - 1,
+        context_length=distill_context_length,
         batch_size=Config.batch_size,
     )
     train_loader = data_loader(train_it)
@@ -80,12 +83,19 @@ def main() -> None:
     val_batches = sum(1 for _ in data_loader(val_it)) if val_it else 0
     print(f"train batches: {train_batches}   val batches: {val_batches}")
 
+    # Debug: Check if we have any batches
+    if train_batches == 0:
+        print("⚠ WARNING: No training batches found!")
+        print("This suggests the context length may be too large for the dataset.")
+        print("Consider using a smaller context length for distillation training.")
+        return
+
     # ------------------------------------------------------------------ #
     # Model
     # ------------------------------------------------------------------ #
     model = GiantGPT(
         vocab_size     = len(tokenizer),
-        context_length = Config.context_length - 1,
+        context_length = Config.context_length - 1,  # Full model context
         d_model        = Config.embedding_size,
         n_heads        = Config.num_heads,
         d_ff           = Config.feed_forward_size,
@@ -93,6 +103,7 @@ def main() -> None:
         dropout_rate   = Config.dropout_rate,
     )
     rng     = jax.random.PRNGKey(0)
+    # Model expects full context length during initialization
     dummy   = jnp.zeros((Config.batch_size, Config.context_length - 1), dtype=jnp.int32)
     params  = model.init(rng, dummy, deterministic=True)["params"]
     save_params(params, "initial_params.pkl")     # optional convenience dump

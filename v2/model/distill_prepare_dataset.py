@@ -63,51 +63,51 @@ def _parse_topk_str(s: str, k: int) -> Tuple[List[int], List[float]]:
     toks = toks[:k]; lps = lps[:k]
     return toks, lps
 
-def _align_topk_for_record(
-    tokenizer, ids: List[int], loss_mask: List[int], topk_json_per_token: List[str], k: int
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Build per-position (len=seq_len) topk ids/logprobs.
-    For non-answer tokens (mask==0) fill with -1 / -inf.
-    topk_json_per_token is only for generated answer tokens and is iterated
-    in order across positions where loss_mask==1.
-    """
-    T = len(ids)
-    topk_ids = np.full((T, k), -1, dtype=np.int32)
-    topk_lp  = np.full((T, k), -np.inf, dtype=np.float32)
-
-    n = min(len(topk_json_per_token), len(answer_positions))
-    if n == 0:
-        return topk_ids, topk_lp  # nothing to align
-    for pos, json_str in zip(answer_positions[:n], topk_json_per_token[:n]):
-        toks, lps = _parse_topk_str(json_str, k)
-
-        toks, lps = _parse_topk_str(json_str, k)
-        if not toks:
-            continue
-        # Convert teacher tokens → student token ids (byte-level & merges already in tokenizer)
-        # NOTE: vLLM tokens are string pieces; AutoTokenizer.decode/encode may be needed.
-        # We try encode without special tokens; we also handle cases where 'toks' is already a single-piece token.
-        ids_k: List[int] = []
-        for t in toks:
-            if t == "":
-                continue
-            # robust path: encode the piece exactly as-is
-            enc = tokenizer.encode(t, add_special_tokens=False)
-            if len(enc) == 1:
-                ids_k.append(int(enc[0]))
-            else:
-                # If it maps to multiple pieces, we skip it (KD would be noisy).
-                continue
-        # cut/align to k
-        ids_k = ids_k[:k]
-        lps_k = lps[: len(ids_k)]
-        if not ids_k:
-            continue
-        topk_ids[pos, :len(ids_k)] = np.asarray(ids_k, dtype=np.int32)
-        topk_lp[pos, :len(ids_k)]  = np.asarray(lps_k, dtype=np.float32)
-
-    return topk_ids, topk_lp
+# def _align_topk_for_record(
+#     tokenizer, ids: List[int], loss_mask: List[int], topk_json_per_token: List[str], k: int
+# ) -> Tuple[np.ndarray, np.ndarray]:
+#     """
+#     Build per-position (len=seq_len) topk ids/logprobs.
+#     For non-answer tokens (mask==0) fill with -1 / -inf.
+#     topk_json_per_token is only for generated answer tokens and is iterated
+#     in order across positions where loss_mask==1.
+#     """
+#     T = len(ids)
+#     topk_ids = np.full((T, k), -1, dtype=np.int32)
+#     topk_lp  = np.full((T, k), -np.inf, dtype=np.float32)
+#
+#     n = min(len(topk_json_per_token), len(answer_positions))
+#     if n == 0:
+#         return topk_ids, topk_lp  # nothing to align
+#     for pos, json_str in zip(answer_positions[:n], topk_json_per_token[:n]):
+#         toks, lps = _parse_topk_str(json_str, k)
+#
+#         toks, lps = _parse_topk_str(json_str, k)
+#         if not toks:
+#             continue
+#         # Convert teacher tokens → student token ids (byte-level & merges already in tokenizer)
+#         # NOTE: vLLM tokens are string pieces; AutoTokenizer.decode/encode may be needed.
+#         # We try encode without special tokens; we also handle cases where 'toks' is already a single-piece token.
+#         ids_k: List[int] = []
+#         for t in toks:
+#             if t == "":
+#                 continue
+#             # robust path: encode the piece exactly as-is
+#             enc = tokenizer.encode(t, add_special_tokens=False)
+#             if len(enc) == 1:
+#                 ids_k.append(int(enc[0]))
+#             else:
+#                 # If it maps to multiple pieces, we skip it (KD would be noisy).
+#                 continue
+#         # cut/align to k
+#         ids_k = ids_k[:k]
+#         lps_k = lps[: len(ids_k)]
+#         if not ids_k:
+#             continue
+#         topk_ids[pos, :len(ids_k)] = np.asarray(ids_k, dtype=np.int32)
+#         topk_lp[pos, :len(ids_k)]  = np.asarray(lps_k, dtype=np.float32)
+#
+#     return topk_ids, topk_lp
 
 def _iter_windows_for_record(
     ids: List[int],
@@ -201,9 +201,12 @@ def _materialize_batches(tbl, ctx, k, batch_size, subset_pct):
                 topkL_full[pos, :Lk] = np.asarray(lps[:Lk], np.float32)
             # ----------------------------------------------------
 
-            inp, tgt, m, kI, kL = _make_single_padded_window(
+            result = _make_single_padded_window(
                 ids, msk, topkI_full, topkL_full, ctx=ctx, eos_id=eos_id, pad_id=pad_id
             )
+            if result is None:
+                continue  # Skip sequences that are too short
+            inp, tgt, m, kI, kL = result
             buf_inp.append(inp); buf_tgt.append(tgt); buf_msk.append(m); buf_kI.append(kI); buf_kL.append(kL)
 
             if len(buf_inp) == B:
@@ -225,10 +228,18 @@ def _materialize_batches(tbl, ctx, k, batch_size, subset_pct):
 # Public API used by Run_training.py
 def get_data(*, subset_pct: float, context_length: int, batch_size: int, **_):
     tbl = _open_answers_table()
+
+    # Debug: Check data size first
+    ids_list = _read_column(tbl, "student_input_ids")
+    print(f"[DEBUG] Total records in Arrow table: {len(ids_list)}")
+    if ids_list:
+        print(f"[DEBUG] Sample sequence length: {len(ids_list[0])}")
+
     train_it, val_it, tokenizer = _materialize_batches(
         tbl, ctx=context_length, k=getattr(Config, "distill_topk", 8),
         batch_size=batch_size, subset_pct=subset_pct
     )
+
     return train_it, val_it, tokenizer
 
 def data_loader(iterator: Iterator[Batch]) -> Iterator[Dict[str, np.ndarray]]:
@@ -269,6 +280,11 @@ def _make_single_padded_window(
     # We need ctx+1 tokens to create ctx targets after a 1-step shift.
     need = ctx + 1
     L = len(ids)
+
+    # If the sequence is too short for meaningful training, skip it
+    # But allow sequences that can be padded to the required length
+    if L < 2:  # Need at least 2 tokens for input/target
+        return None
 
     # Build arrays aligned with ids
     ids_arr  = np.asarray(ids, dtype=np.int32)

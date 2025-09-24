@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Iterator, List, Dict, Any, Tuple
 
 import numpy as np
-import jax.numpy as jnp
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 from transformers import AutoTokenizer
@@ -22,16 +21,13 @@ class Batch:
     topk_ids: np.ndarray      # (B, T, K) int32   (-1 where N/A)
     topk_logprobs: np.ndarray # (B, T, K) float32 (-inf where N/A)
 
-def _open_answers_table() -> pa.Table:
+def _answers_path() -> Path:
     base = Path(Config.dataset_path)
     fname = getattr(Config, "teacher_answers_filename", "answers.arrow")
     path = base / fname
     if not path.exists():
         raise FileNotFoundError(f"Teacher answers Arrow not found: {path}")
-    with path.open("rb") as f:
-        reader = pa_ipc.open_file(f)
-        tbl = reader.read_all()
-    return tbl
+    return path
 
 def _parse_topk_str(s: str, k: int) -> Tuple[List[int], List[float]]:
     """
@@ -109,138 +105,112 @@ def _parse_topk_str(s: str, k: int) -> Tuple[List[int], List[float]]:
 #
 #     return topk_ids, topk_lp
 
-def _iter_windows_for_record(
-    ids: List[int],
-    roles: List[int],
-    mask: List[int],
-    topk_ids_full: np.ndarray,
-    topk_lp_full: np.ndarray,
-    ctx: int
-) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+# NOTE: legacy multi-window function removed. We use exactly one window per entry.
+
+
+def _stream_iterator(*, split: str, ctx: int, k: int, batch_size: int, subset_pct: float) -> Iterator[Batch]:
     """
-    Turn one variable-length sequence into many (ctx)-length windows for LM training.
-    We create input/target by shifting 1, and slice topk arrays accordingly.
+    Stream the Arrow file record-batch by record-batch and yield training batches.
+    No full-table materialization. Deterministic subsampling + split via row index.
     """
-    # We need at least ctx+1 tokens to make (ctx) targets after shift
-    if len(ids) < ctx + 1:
-        return
-    # stride = ctx (no overlap). You can change to smaller stride if desired.
-    stride = ctx
-    L = len(ids) - 1  # because of shift
-    for start in range(0, L - ctx + 1, stride):
-        s = start
-        e = start + ctx + 1  # include next token for target
-        chunk_ids   = np.asarray(ids[s:e], dtype=np.int32)
-        chunk_mask  = np.asarray(mask[s:e], dtype=np.int8)
-        chunk_topkI = topk_ids_full[s:e]
-        chunk_topkL = topk_lp_full[s:e]
-
-        inp    = chunk_ids[:-1]
-        tgt    = chunk_ids[1:]
-        msk    = chunk_mask[1:]        # mask next-token prediction (answer region only)
-        topkI  = chunk_topkI[1:]
-        topkL  = chunk_topkL[1:]
-        yield inp, tgt, msk, topkI, topkL
-
-def _split_indices(n: int, train_pct: float = 0.9):
-    # simple split using qid parity or round-robin if present else 90/10 by index
-    n_train = int(n * train_pct)
-    return set(range(n_train)), set(range(n_train, n))
-
-def _read_column(tbl, name):
-    return tbl[name].to_pylist() if name in tbl.column_names else []
-
-def _materialize_batches(tbl, ctx, k, batch_size, subset_pct):
+    path = _answers_path()
     tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name, use_fast=True)
     eos_id = tokenizer.eos_token_id
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else (tokenizer.eos_token_id or 0)
 
-    ids_list   = _read_column(tbl, "student_input_ids")
-    roles_list = _read_column(tbl, "student_role_ids")
-    mask_list  = _read_column(tbl, "student_loss_mask")
-    topk_list  = _read_column(tbl, "topk_json_per_token")
+    # Deterministic approx-subset: keep rows where (row_idx % 100) < subset_mod
+    subset_mod = int(round(subset_pct)) if (subset_pct and 0 < subset_pct < 100) else 100
+    subset_mod = max(1, min(100, subset_mod))
 
-    assert len(ids_list) == len(roles_list) == len(mask_list) == len(topk_list), \
-        "Arrow columns length mismatch. Re-generate with teacher_generate.py"
+    B = batch_size; K = k
+    buf_inp, buf_tgt, buf_msk, buf_kI, buf_kL = [], [], [], [], []
+    emitted = 0
 
-    total = len(ids_list)
-    if subset_pct and 0 < subset_pct < 100:
-        total = int(total * (subset_pct / 100.0))
+    with path.open("rb") as f:
+        reader = pa_ipc.open_file(f)
+        row_idx = 0
+        # Iterate record-batches without loading entire table
+        for bi in range(reader.num_record_batches):
+            rb = reader.get_batch(bi)
+            # Extract columns as Python lists per *batch* (not whole file)
+            ids_col  = rb.column(rb.schema.get_field_index("student_input_ids")).to_pylist()
+            mask_col = rb.column(rb.schema.get_field_index("student_loss_mask")).to_pylist()
+            kd_col   = rb.column(rb.schema.get_field_index("topk_json_per_token")).to_pylist()
 
-    train_idx, val_idx = _split_indices(total)
-
-    def _iterator(indexes: set[int]) -> Iterator[Batch]:
-        B = batch_size; K = k
-        buf_inp, buf_tgt, buf_msk, buf_kI, buf_kL = [], [], [], [], []
-        emitted = 0
-        for i in range(total):
-            if i not in indexes:
-                continue
-            ids   = ids_list[i]
-            msk   = mask_list[i]
-            kd    = topk_list[i]
-
-            # --- tolerant KD alignment (EOS/off-by-one safe) ---
-            topkI_full = np.full((len(ids), K), -1, dtype=np.int32)
-            topkL_full = np.full((len(ids), K), -np.inf, dtype=np.float32)
-            answer_positions = [p for p, m in enumerate(msk) if m == 1]
-            n = min(len(kd), len(answer_positions))
-            for pos, json_str in zip(answer_positions[:n], kd[:n]):
-                toks, lps = _parse_topk_str(json_str, K)
-                if not toks:
+            for ids, msk, kd in zip(ids_col, mask_col, kd_col):
+                # subset gating
+                if (row_idx % 100) >= subset_mod:
+                    row_idx += 1
                     continue
-                ids_k = []
-                for t in toks[:K]:
-                    enc = tokenizer.encode(t, add_special_tokens=False)
-                    if len(enc) == 1:
-                        ids_k.append(int(enc[0]))
-                if len(ids_k) == 0:
+                # split gating: 90/10 via modulo (train: indices not ≡9 mod 10; val: ≡9 mod 10)
+                is_val = (row_idx % 10) == 9
+                if (split == "train" and is_val) or (split == "val" and not is_val):
+                    row_idx += 1
                     continue
-                Lk = min(len(ids_k), len(lps))
-                topkI_full[pos, :Lk] = np.asarray(ids_k[:Lk], np.int32)
-                topkL_full[pos, :Lk] = np.asarray(lps[:Lk], np.float32)
-            # ----------------------------------------------------
 
-            result = _make_single_padded_window(
-                ids, msk, topkI_full, topkL_full, ctx=ctx, eos_id=eos_id, pad_id=pad_id
-            )
-            if result is None:
-                continue  # Skip sequences that are too short
-            inp, tgt, m, kI, kL = result
-            buf_inp.append(inp); buf_tgt.append(tgt); buf_msk.append(m); buf_kI.append(kI); buf_kL.append(kL)
+                # ---- KD alignment (tolerant to off-by-1 / EOS) ----
+                topkI_full = np.full((len(ids), K), -1, dtype=np.int32)
+                topkL_full = np.full((len(ids), K), -np.inf, dtype=np.float32)
+                answer_positions = [p for p, m in enumerate(msk) if m == 1]
+                n = min(len(kd), len(answer_positions))
+                for pos, json_str in zip(answer_positions[:n], kd[:n]):
+                    toks, lps = _parse_topk_str(json_str, K)
+                    if not toks:
+                        continue
+                    ids_k = []
+                    for t in toks[:K]:
+                        if not t:
+                            continue
+                        enc = tokenizer.encode(t, add_special_tokens=False)
+                        if len(enc) == 1:
+                            ids_k.append(int(enc[0]))
+                    if not ids_k:
+                        continue
+                    Lk = min(len(ids_k), len(lps))
+                    topkI_full[pos, :Lk] = np.asarray(ids_k[:Lk], np.int32)
+                    topkL_full[pos, :Lk] = np.asarray(lps[:Lk], np.float32)
+                # ---------------------------------------------------
 
-            if len(buf_inp) == B:
-                yield Batch(
-                    input=np.stack(buf_inp, 0),
-                    target=np.stack(buf_tgt, 0),
-                    mask=np.stack(buf_msk, 0),
-                    topk_ids=np.stack(buf_kI, 0),
-                    topk_logprobs=np.stack(buf_kL, 0),
+                result = _make_single_padded_window(
+                    ids, msk, topkI_full, topkL_full, ctx=ctx, eos_id=eos_id, pad_id=pad_id
                 )
-                emitted += 1
-                buf_inp.clear(); buf_tgt.clear(); buf_msk.clear(); buf_kI.clear(); buf_kL.clear()
+                row_idx += 1
+                if result is None:
+                    continue  # L < 2 → skip by design
 
-        if emitted == 0:
-            print("[prepare_dataset] WARNING: 0 batches emitted for this split — "
-                  "check context_length or dataset_percent.")
-    return _iterator(train_idx), _iterator(val_idx), tokenizer
+                inp, tgt, m, kI, kL = result
+                buf_inp.append(inp); buf_tgt.append(tgt); buf_msk.append(m); buf_kI.append(kI); buf_kL.append(kL)
+                if len(buf_inp) == B:
+                    yield Batch(
+                        input=np.stack(buf_inp, 0),
+                        target=np.stack(buf_tgt, 0),
+                        mask=np.stack(buf_msk, 0),
+                        topk_ids=np.stack(buf_kI, 0),
+                        topk_logprobs=np.stack(buf_kL, 0),
+                    )
+                    emitted += 1
+                    buf_inp.clear(); buf_tgt.clear(); buf_msk.clear(); buf_kI.clear(); buf_kL.clear()
+
+    if emitted == 0:
+        print(f"[prepare_dataset] WARNING: 0 batches emitted for split={split} — "
+              "check context_length, dataset_percent, or data coverage.")
 
 # Public API used by Run_training.py
 def get_data(*, subset_pct: float, context_length: int, batch_size: int, **_):
-    tbl = _open_answers_table()
+    """
+    Returns *factory functions* that create fresh streaming iterators
+    (avoids generator exhaustion). No full in-RAM materialization.
+    """
+    k = int(getattr(Config, "distill_topk", 8))
+    # Small probe to print tokenizer info (and ensure it's available)
+    tok = AutoTokenizer.from_pretrained(Config.tokenizer_name, use_fast=True)
+    print(f"[DEBUG] tokenizer vocab_size={tok.vocab_size}")
 
-    # Debug: Check data size first
-    ids_list = _read_column(tbl, "student_input_ids")
-    print(f"[DEBUG] Total records in Arrow table: {len(ids_list)}")
-    if ids_list:
-        print(f"[DEBUG] Sample sequence length: {len(ids_list[0])}")
-
-    train_it, val_it, tokenizer = _materialize_batches(
-        tbl, ctx=context_length, k=getattr(Config, "distill_topk", 8),
-        batch_size=batch_size, subset_pct=subset_pct
-    )
-
-    return train_it, val_it, tokenizer
+    def train_factory():
+        return _stream_iterator(split="train", ctx=context_length, k=k, batch_size=batch_size, subset_pct=subset_pct)
+    def val_factory():
+        return _stream_iterator(split="val",   ctx=context_length, k=k, batch_size=batch_size, subset_pct=subset_pct)
+    return train_factory, val_factory, tok
 
 def data_loader(iterator: Iterator[Batch]) -> Iterator[Dict[str, np.ndarray]]:
     # present batches as dicts for Training_step

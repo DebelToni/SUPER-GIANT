@@ -31,6 +31,9 @@ jobs:
           context: ./giant-training
           file: ./giant-training/Dockerfile
           push: true
+          no-cache: true
+          pull: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:${{ github.sha }}
+

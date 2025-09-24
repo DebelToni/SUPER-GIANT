@@ -38,7 +38,7 @@ def main():
 
     # Model
     model = GiantGPT(
-        vocab_size=tokenizer.vocab_size,
+        vocab_size=len(tokenizer),
         context_length=Config.context_length - 1,
         d_model=Config.embedding_size,
         n_heads=Config.num_heads,

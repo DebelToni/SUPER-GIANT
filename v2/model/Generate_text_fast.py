@@ -28,7 +28,7 @@ def build_model() -> GiantGPT:
     if Config.use_custom_tokenizer:
         tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
     else:
-        tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+        tok = AutoTokenizer.from_pretrained(Config.tokenizer_name, use_fast=True)
 
     return GiantGPT(
         vocab_size=len(tok),
@@ -252,7 +252,7 @@ def main():
     if Config.use_custom_tokenizer:
         tokenizer = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
     else:
-        tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+        tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name, use_fast=True)
 
     prompt_ids = preprocess_prompt(tokenizer, args.prompt, Config.context_length)
 

@@ -13,10 +13,10 @@ out_dir: "teacher_out"
 questions_arrow: "teacher_out/questions.arrow"
 answers_arrow: "teacher_out/answers.arrow"
 
-student_tokenizer_dir: "neo-english-cust"
+student_tokenizer_name: "meta-llama/Llama-3.2-3B-Instruct"
 
-user_token: "[USER]"
-ai_token: "[AI]"
+user_token: "user"
+ai_token: "assistant"
 
 # for these make sure they match the neo tokenizer config, because saw it uses mask for pads and so on.
 write_loss_mask: true  

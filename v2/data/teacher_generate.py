@@ -347,7 +347,7 @@ def _answer_one(cfg, tokenizer, user_tok, ai_tok, rec) -> Dict[str, Any]:
     }
 
 def generate_answers(cfg, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    tokenizer = AutoTokenizer.from_pretrained(cfg.student_tokenizer_dir, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.student_tokenizer_name, use_fast=True)
     user_tok = cfg.user_token
     ai_tok = cfg.ai_token
 

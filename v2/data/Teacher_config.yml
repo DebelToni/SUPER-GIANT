@@ -6,15 +6,14 @@ api_key: "banangun3000"
 max_model_len: 2048
 temperature: 1.5
 top_p: 0.7
-top_logprobs: 100
+top_logprobs: 8
 prompt_logprobs: 0
 
 out_dir: "teacher_out"
 questions_arrow: "teacher_out/questions.arrow"
 answers_arrow: "teacher_out/answers.arrow"
 
-student_tokenizer_name: "meta-llama/Llama-3.2-3B-Instruct"
-
+student_tokenizer_name: "clowman/Llama-3.2-3B-Instruct-AWQ-Int4"
 user_token: "user"
 ai_token: "assistant"
 
@@ -37,5 +36,6 @@ question_user: "Generate a single user_question about any topic. The question ca
 # question_user: "Generate a single user_question about any topic. Make it relatively simple but still the answer needs to require more than one sentance."
 
 # answer_system: "Answer the user question shortly and simply. Use A1-A2 english language."
-answer_system: "Answer the user question shortly and simply."
+# answer_system: "Answer the user question shortly and simply."
 # answer_system: "Answer the user question simply."
+answer_system: "Answer the user question."

@@ -8,46 +8,43 @@ Config = OmegaConf.load("Config.yml")
 def _kd_loss_topk(student_logits, topk_ids, topk_logprobs, mask):
     """
     student_logits: (B, T, V)
-    topk_ids:      (B, T, K) int32 (-1 where N/A)
+    topk_ids:      (B, T, K) int32  (-1 where N/A)
     topk_logprobs: (B, T, K) float32 (-inf where N/A)  -- teacher logprobs (per-token)
     mask:          (B, T) float32  -- 1.0 where answer tokens
+
+    Numerically safe: if a position has *no* valid teacher candidates,
+    its KD contribution is forced to zero (no NaNs).
     """
-    T = float(getattr(Config, "distill_temperature", 2.0))
-    # gather student logits on teacher's K ids
-    # replace -1 by 0 to avoid OOB, and then mask them out
-    safe_ids = jnp.maximum(topk_ids, 0)
-    B, L, K = safe_ids.shape
-    V = student_logits.shape[-1]
-
-    # gather: (B, T, K)
-    idx = jnp.expand_dims(safe_ids, axis=-1)  # (B, T, K, 1)
-    # one-hot gather without allocating full one-hot: use take_along_axis
+    temp = float(getattr(Config, "distill_temperature", 2.0))
+    # Guard: gather logits for teacher indices; invalid ids set to a large negative
+    safe_ids = jnp.maximum(topk_ids, 0)              # (B, T, K)
     student_k = jnp.take_along_axis(student_logits, safe_ids, axis=-1)  # (B, T, K)
+    valid_k   = (topk_ids >= 0)                      # (B, T, K) bool
+    # Replace invalid entries by a large negative (not -inf to avoid all-(-inf))
+    student_k = jnp.where(valid_k, student_k, -1e9)
 
-    # mask out invalid entries (-1)
-    valid_k = (topk_ids >= 0)
-    student_k = jnp.where(valid_k, student_k, -jnp.inf)
+    # Temperature-softmax student over K
+    s_log_probs = jax.nn.log_softmax(student_k / temp, axis=-1)        # (B, T, K)
 
-    # temperature softmax on both sides
-    s_log_probs = jax.nn.log_softmax(student_k / T, axis=-1)
-    # teacher probs from provided logprobs
-    t_log_probs = (topk_logprobs / T)
-    # renormalize teacher over provided K only
-    t_logZ = jax.scipy.special.logsumexp(t_log_probs, axis=-1, keepdims=True)
-    t_log_probs = t_log_probs - t_logZ
-    t_probs = jnp.exp(t_log_probs)
+    # Teacher: normalize only over valid entries; if none are valid, make KL=0 later
+    t_logp_raw = topk_logprobs / temp                                  # (B, T, K)
+    t_logp_raw = jnp.where(valid_k, t_logp_raw, -jnp.inf)              # mask invalid
+    # logsumexp returns -inf if all inputs are -inf; handle that with a safe fallback
+    t_logZ = jax.scipy.special.logsumexp(t_logp_raw, axis=-1, keepdims=True)  # (B, T, 1)
+    # Positions with no valid candidates → t_logZ = -inf. Create a boolean mask.
+    has_any = jnp.any(valid_k, axis=-1)                                 # (B, T) bool
+    # Safe normalized teacher log-probs: where no valid, copy student's log-probs so KL=0
+    t_log_probs = t_logp_raw - t_logZ
+    t_log_probs = jnp.where(has_any[..., None], t_log_probs, s_log_probs)
+    t_probs     = jnp.exp(t_log_probs)
 
     # KL(teacher || student) over K
-    kl = jnp.sum(t_probs * (t_log_probs - s_log_probs), axis=-1)  # (B, T)
+    kl = jnp.sum(t_probs * (t_log_probs - s_log_probs), axis=-1)       # (B, T)
 
-    # mask: only answer tokens where KD exists (at least one valid_k)
-    has_any = jnp.any(valid_k, axis=-1)  # (B, T) bool
-    eff_mask = mask * has_any.astype(jnp.float32)
-
+    # Only answer tokens contribute, and only where teacher had any candidates
+    eff_mask = mask * has_any.astype(jnp.float32)                       # (B, T)
     kd = jnp.sum(kl * eff_mask) / (jnp.sum(eff_mask) + 1e-9)
-    # Hinton scaling T^2
-    kd = (T * T) * kd
-    return kd
+    return (temp * temp) * kd
 
 @partial(jax.jit, static_argnames=['model','optimizer'])
 def train_step(params, opt_state, batch, *, model, optimizer, dropout_rng):

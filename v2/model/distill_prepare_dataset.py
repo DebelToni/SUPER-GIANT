@@ -210,6 +210,15 @@ def get_data(*, subset_pct: float, context_length: int, batch_size: int, **_):
         return _stream_iterator(split="train", ctx=context_length, k=k, batch_size=batch_size, subset_pct=subset_pct)
     def val_factory():
         return _stream_iterator(split="val",   ctx=context_length, k=k, batch_size=batch_size, subset_pct=subset_pct)
+    # one quick probe to report KD coverage on a few batches
+    it = train_factory()
+    try:
+        b = next(it)
+        has_any = (b.topk_ids >= 0).any(axis=-1)   # (B,T)
+        coverage = has_any.mean() * 100.0
+        print(f"[DEBUG] KD coverage on first batch: {coverage:.1f}% of positions have teacher candidates")
+    except StopIteration:
+        pass
     return train_factory, val_factory, tok
 
 def data_loader(iterator: Iterator[Batch]) -> Iterator[Dict[str, np.ndarray]]:

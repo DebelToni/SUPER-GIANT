@@ -46,7 +46,7 @@ device: gpu
 
 # ---- Distillation knobs ----
 use_distillation: true
-distill_topk: 16           # how many top-k alternatives per token we keep
+distill_topk: 8           # how many top-k alternatives per token we keep
 distill_temperature: 2.0  # Hinton temperature
 distill_weight: 0.5       # lambda for KD vs CE
 

@@ -68,8 +68,8 @@ def main() -> None:
     # Dataset
     # ------------------------------------------------------------------ #
     print("Preparing dataset …")
-    # Use smaller context length for distillation (conversations are short)
-    distill_context_length = min(256, Config.context_length - 1)
+    # Use full configured context length (minus 1 for the shift in our prep)
+    distill_context_length = Config.context_length - 1
     print(f"Using distillation context length: {distill_context_length}")
     train_factory, val_factory, tokenizer = get_data(
         subset_pct=Config.dataset_percent * 100 if Config.dataset_percent <= 1 else Config.dataset_percent,
@@ -99,7 +99,7 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     model = GiantGPT(
         vocab_size     = len(tokenizer),
-        context_length = Config.context_length - 1,  # Full model context
+        context_length = distill_context_length,     # match the prep input length
         d_model        = Config.embedding_size,
         n_heads        = Config.num_heads,
         d_ff           = Config.feed_forward_size,
@@ -108,7 +108,7 @@ def main() -> None:
     )
     rng     = jax.random.PRNGKey(0)
     # Model expects full context length during initialization
-    dummy   = jnp.zeros((Config.batch_size, Config.context_length - 1), dtype=jnp.int32)
+    dummy   = jnp.zeros((Config.batch_size, distill_context_length), dtype=jnp.int32)
     params  = model.init(rng, dummy, deterministic=True)["params"]
     save_params(params, "initial_params.pkl")     # optional convenience dump
 

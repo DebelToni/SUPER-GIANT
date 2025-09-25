@@ -146,7 +146,7 @@ def main():
     # Load config & tokenizer
     Config = OmegaConf.load("Config.yml")
     tokenizer = load_tokenizer(Config)
-    vocab_size = tokenizer.vocab_size
+    vocab_size = len(tokenizer)
     print(f"Tokenizer vocab_size={vocab_size}")
 
     # Build model

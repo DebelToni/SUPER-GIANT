@@ -39,7 +39,7 @@ ffn_activation: silu # epu
 
 # other:
 # use_remat: true
-dataset_percent: 5
+dataset_percent: 100
 chunk_percent: 10
 # put cpu if you dont have gpu, jax may do that for you
 device: gpu

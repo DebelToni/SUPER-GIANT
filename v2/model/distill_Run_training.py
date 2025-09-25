@@ -188,10 +188,7 @@ def main() -> None:
     # Final save
     # ------------------------------------------------------------------ #
     save_ckpt(params, global_step, checkpoint_dir)
-    save_params(params)   # legacy pickle dump
-    with open("tokenizer.pkl", "wb") as f:
-        pickle.dump(tokenizer, f)
-    print("✔ final parameters & tokenizer saved")
+    print("✔ final parameters saved")
 
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":

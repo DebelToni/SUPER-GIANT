@@ -31,11 +31,11 @@ parrallel_calls: 32
 
 # Prompts:
 question_system: "You are a teacher language model who is needed to generate questions for a chat interaction based smaller model."
-question_user: "Generate a single user_question about any topic. The question can be as simple as what is 1+1, why is the sky blue or a greeting interaction. These were just examples make the question a bit more unique."
-# question_user: "Generate a single user_question about any topic. Make it relatively simple."
+# question_user: "Generate a single user_question about any topic. The question can be as simple as what is 1+1, why is the sky blue or a greeting interaction. These were just examples make the question a bit more unique."
+question_user: "Generate a single user_question about any topic. Make it relatively simple."
 # question_user: "Generate a single user_question about any topic. Make it relatively simple but still the answer needs to require more than one sentance."
 
 # answer_system: "Answer the user question shortly and simply. Use A1-A2 english language."
-# answer_system: "Answer the user question shortly and simply."
+answer_system: "Answer the user question shortly and simply."
 # answer_system: "Answer the user question simply."
-answer_system: "Answer the user question."
+# answer_system: "Answer the user question."

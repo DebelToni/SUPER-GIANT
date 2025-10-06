@@ -35,6 +35,7 @@ def _parse_topk_str(s: str, k: int) -> Tuple[List[int], List[float]]:
     It may be:
       - dict: {token: logprob, ...}
       - list: [{token: "...", "logprob": -0.1}, ...]
+      - list of lists: [["token", logprob], ...]  # new format from teacher
     Returns lists of token-ids and logprobs (length <= k).
     """
     if not s:
@@ -51,10 +52,19 @@ def _parse_topk_str(s: str, k: int) -> Tuple[List[int], List[float]]:
             lps.append(float(lp))
     elif isinstance(obj, list):
         for d in obj:
-            if not isinstance(d, dict):
+            if isinstance(d, dict):
+                # Format: [{"token": "...", "logprob": -0.1}, ...]
+                toks.append(d.get("token", ""))
+                lps.append(float(d.get("logprob", float("-inf"))))
+            elif isinstance(d, list) and len(d) >= 2:
+                # Format: [["token", logprob], ...] - new format from teacher
+                token_str = str(d[0]) if d[0] is not None else ""
+                logprob_val = float(d[1]) if len(d) > 1 else float("-inf")
+                toks.append(token_str)
+                lps.append(logprob_val)
+            else:
+                # Skip invalid entries
                 continue
-            toks.append(d.get("token", ""))
-            lps.append(float(d.get("logprob", float("-inf"))))
     # cut to k
     toks = toks[:k]; lps = lps[:k]
     return toks, lps
@@ -204,7 +214,7 @@ def get_data(*, subset_pct: float, context_length: int, batch_size: int, **_):
     k = int(getattr(Config, "distill_topk", 8))
     # Small probe to print tokenizer info (and ensure it's available)
     tok = AutoTokenizer.from_pretrained(Config.tokenizer_name, use_fast=True)
-    print(f"[DEBUG] tokenizer vocab_size={tok.vocab_size}")
+    print(f"[DEBUG] tokenizer vocab_size={len(tok)}")
 
     def train_factory():
         return _stream_iterator(split="train", ctx=context_length, k=k, batch_size=batch_size, subset_pct=subset_pct)

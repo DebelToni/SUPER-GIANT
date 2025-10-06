@@ -225,8 +225,24 @@ def get_data(*, subset_pct: float, context_length: int, batch_size: int, **_):
     try:
         b = next(it)
         has_any = (b.topk_ids >= 0).any(axis=-1)   # (B,T)
-        coverage = has_any.mean() * 100.0
-        print(f"[DEBUG] KD coverage on first batch: {coverage:.1f}% of positions have teacher candidates")
+
+        # Calculate padding percentage
+        pad_id = tok.pad_token_id if tok.pad_token_id is not None else (tok.eos_token_id or 0)
+        is_padding = (b.input == pad_id)
+        padding_percentage = is_padding.mean() * 100.0
+
+        # Calculate KD coverage excluding padding positions
+        non_padding_positions = ~is_padding
+        if non_padding_positions.sum() > 0:
+            coverage_non_padding = (has_any & non_padding_positions).sum() / non_padding_positions.sum() * 100.0
+        else:
+            coverage_non_padding = 0.0
+
+        coverage_total = has_any.mean() * 100.0
+
+        print(f"[DEBUG] KD coverage on first batch: {coverage_non_padding:.1f}% of non-padding positions have teacher candidates")
+        print(f"[DEBUG] Dataset padding: {padding_percentage:.1f}% of positions are padding tokens")
+        print(f"[DEBUG] Raw KD coverage (including padding): {coverage_total:.1f}%")
     except StopIteration:
         pass
     return train_factory, val_factory, tok

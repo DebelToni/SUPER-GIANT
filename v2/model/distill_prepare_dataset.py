@@ -162,6 +162,19 @@ def _stream_iterator(*, split: str, ctx: int, k: int, batch_size: int, subset_pc
                 topkI_full = np.full((len(ids), K), -1, dtype=np.int32)
                 topkL_full = np.full((len(ids), K), -np.inf, dtype=np.float32)
                 answer_positions = [p for p, m in enumerate(msk) if m == 1]
+
+                # Handle both formats: single JSON strings or lists of JSON strings
+                if isinstance(kd, list) and kd and isinstance(kd[0], list):
+                    # New format: kd is a list of lists of JSON strings
+                    # Flatten the list of lists
+                    flat_kd = []
+                    for sublist in kd:
+                        if isinstance(sublist, list):
+                            flat_kd.extend(sublist)
+                        else:
+                            flat_kd.append(sublist)
+                    kd = flat_kd
+
                 n = min(len(kd), len(answer_positions))
                 for pos, json_str in zip(answer_positions[:n], kd[:n]):
                     toks, lps = _parse_topk_str(json_str, K)

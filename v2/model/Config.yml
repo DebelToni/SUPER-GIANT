@@ -1,60 +1,49 @@
-param_dtype: float32
-compute_dtype: bfloat16
+model:
+  embedding_size: 512
+  num_heads: 8
+  num_layers: 6
+  feed_forward_size: 2048
+  dropout_rate: 0.05
+  activation: silu
+  param_dtype: float32
+  compute_dtype: bfloat16
+  rope_dim: 8
+  num_kv_heads: 8
+  context_length: 1024
 
-tokenizer_name: "clowman/Llama-3.2-3B-Instruct-AWQ-Int4"
-# tokenizer_name: neo-english-cust
-tokenizer_path: tiny_cached
-tokenizer_dtype: float32 #uint16
-use_custom_tokenizer: false
-custom_tokenizer_path: math_tokenizer_data
+optimizer:
+  base_learning_rate: 2.0e-4
+  min_learning_rate: 2.0e-5
+  weight_decay: 0.05
+  gradient_clip_norm: 1.0
+  warmup_steps: 1000
 
-# dataset_name: wikitext-2-raw-v1
-# dataset_has_vendor: true
-# dataset_vendor: Salesforce/wikitext
-# dataset_name: roneneldan/TinyStories
-# dataset_has_vendor: false
-# dataset_vendor: roneneldan
-# use_custom_dataset: false
-# dataset_path: math_dataset_arrow
+training:
+  batch_size: 8
+  gradient_accumulation: 1
+  max_epochs: 3
+  seed: 0
+  log_every: 100
+  checkpoint_every: 1000
+  device: gpu
+  label_smoothing: 0.0
 
-
-model: # USE THIS IF YOU TRAIN A BIGGER MODEL ON BETTER DATA:
-embedding_size: 512
-context_length: 513
-num_heads: 8
-num_layers: 6
-feed_forward_size: 2048
-rope_dim: 8
-
-num_kv_heads: 8
-
-# training:
-dropout_rate: 0.05
-learning_rate: 2e-4
-weight_decay: 0.05
-batch_size: 8
-num_epochs: 3
-acc_steps: 2
-ffn_activation: silu # epu
-
-# other:
-# use_remat: true
-dataset_percent: 100
-chunk_percent: 10
-# put cpu if you dont have gpu, jax may do that for you
-device: gpu
-
-# ---- Distillation knobs ----
-use_distillation: true
-distill_topk: 8           # how many top-k alternatives per token we keep
-distill_temperature: 2.0  # Hinton temperature
-distill_weight: 0.5       # lambda for KD vs CE
-
-# ---- Point to your teacher Arrow ----
-use_custom_dataset: true
-dataset_path: teacher_out
-teacher_answers_filename: answers.arrow            # file produced by teacher_generate.py
-
-# (optional) fast/robust reading
-arrow_memory_map: true
-
+stages:
+  - name: warmup_tinystories
+    dataset: tinystories.arrow
+    seq_len: 256
+    epochs: 1
+    end_ratio: 0.1
+    shuffle: true
+  - name: wiki_medium
+    dataset: wikipedia.arrow
+    seq_len: 512
+    epochs: 1
+    end_ratio: 0.4
+    shuffle: true
+  - name: wiki_long
+    dataset: wikipedia.arrow
+    seq_len: 1024
+    epochs: 1
+    end_ratio: 1.0
+    shuffle: true

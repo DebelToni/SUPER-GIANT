@@ -1,11 +1,23 @@
 # Based on your original script (the one you pasted above).
+from pathlib import Path
+
 from transformers import AutoTokenizer
 from tokenizers.processors import TemplateProcessing
 from omegaconf import OmegaConf
-Config = OmegaConf.load("Teacher_config.yml")
+
+DATA_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = DATA_DIR.parent
+
+cfg = OmegaConf.merge(
+    OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
+    OmegaConf.load(DATA_DIR / "Config.yml"),
+)
+
+teacher_cfg = cfg.teacher if "teacher" in cfg else cfg
+tokenizer_id = getattr(teacher_cfg, "model_tokenizer", cfg.tokenizer.name)
 
 # Load the base tokenizer
-tok = AutoTokenizer.from_pretrained(Config.model_tokenizer, use_fast=True)
+tok = AutoTokenizer.from_pretrained(tokenizer_id, use_fast=True)
 
 # Prepare special tokens to add.
 # We keep your existing logic for pad / optional <|bos|> and also add [USER] and [AI].
@@ -104,4 +116,3 @@ assert encoded["input_ids"][0, -1] == tok.pad_token_id      # <|pad|>
 assert encoded["attention_mask"][0, -1] == 0                # mask is 0
 
 print("All checks passed. [USER] and [AI] tokens are added and used in the post-processor.")
-

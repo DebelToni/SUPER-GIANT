@@ -1,0 +1,39 @@
+tiny_stories:
+  dataset_name: "roneneldan/TinyStories"
+  dataset_split: "train"
+  streaming: true
+  warmup_fraction: 0.1
+  context_length: 256
+  max_records: null
+  min_tokens: 128
+
+wikipedia:
+  raw_root: "/Volumes/SSD/enwiki20201020"
+  file_glob: "**/*.json"
+  text_field: "text"
+  context_length: 1024
+  min_tokens: 128
+  normalization:
+    nfkc: true
+    collapse_whitespace: true
+    strip_markup: true
+  pads_to_context: true
+  deduplicate: true
+  dedup_shingle_size: 12
+  dedup_hash_bits: 21
+  max_files: null
+  max_records: null
+
+outputs:
+  processed_root: "dataset_artifacts/base_corpus"
+  tinystories_filename: "tinystories.arrow"
+  wikipedia_filename: "wikipedia.arrow"
+  merged_filename: "merged_training.arrow"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  validation_fraction: 0.01
+  seed: 42
+  shuffle_buffer_size: 65536
+  wiki_num_workers: 8
+  write_batch_size: 1024

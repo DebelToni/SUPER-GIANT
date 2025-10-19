@@ -1,177 +1,311 @@
-# Run_training.py
-import os, sys, math, pickle, time
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"
+from __future__ import annotations
 
-# --------------------------------------------------------------------------- #
-# JAX stack + project imports
-# --------------------------------------------------------------------------- #
-try:
-    import jax
-except ImportError:
-    print("JAX not found – installing …")
-    os.system("pip install jax[cuda12] transformers datasets flax")
-    import jax
+import argparse
+import os
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List
 
+import jax
 import jax.numpy as jnp
-import optax
 import numpy as np
+import optax
 from omegaconf import OmegaConf
 
-from GiantGPT         import GiantGPT
-from Training_step    import train_step
-from Evaluate         import evaluate
-from Data_loader      import data_loader
-from Save_params      import save_params
-from prepare_dataset  import get_data
-from checkpoint_manager import (
-    save   as save_ckpt,
-    load   as load_ckpt,
-    latest as latest_ckpt,
+from GiantGPT import GiantGPT
+from Training_step import train_step
+from arrow_data_loader import (
+    ArrowDataset,
+    StageDataLoader,
+    load_dataloader_state,
+    save_dataloader_state,
 )
+from checkpoint_manager import latest as latest_ckpt
+from checkpoint_manager import load as load_ckpt
+from checkpoint_manager import save as save_ckpt
 
-from jax import config
-config.update("jax_default_matmul_precision", "tensorfloat32")
+jax.config.update("jax_default_matmul_precision", "tensorfloat32")
 
 
-# --------------------------------------------------------------------------- #
-# Config
-# --------------------------------------------------------------------------- #
-Config = OmegaConf.load("Config.yml")
+@dataclass
+class StageConfig:
+    name: str
+    dataset: str
+    seq_len: int
+    epochs: int
+    end_ratio: float
+    shuffle: bool = True
 
-# -------------------------- simple CLI parser ------------------------------ #
-# Defaults
-checkpoint_dir    = "checkpoints"
-checkpoint_every  = 1_000         # optimiser steps
-resume_request    = None          # "latest" | path | None
 
-for arg in sys.argv[1:]:
-    if arg.startswith("--checkpoint_dir="):
-        checkpoint_dir = arg.split("=", 1)[1]
-    elif arg.startswith("--checkpoint_every="):
-        checkpoint_every = int(arg.split("=", 1)[1])
-    elif arg == "--resume":
-        resume_request = "latest"
-    elif arg.startswith("--resume="):
-        resume_request = arg.split("=", 1)[1]
-# --------------------------------------------------------------------------- #
+@dataclass
+class StageRuntime:
+    config: StageConfig
+    loader: StageDataLoader
+    total_steps: int
 
-def main() -> None:
-    # Echo the effective run‑time config (handy for logs)
-    print("» Effective training configuration:")
-    for k, v in Config.__dict__.items():
-        if not k.startswith("__") and not callable(v):
-            print(f"{k:>20} = {v}")
-    print(f"{'checkpoint_dir':>20} = {checkpoint_dir}")
-    print(f"{'checkpoint_every':>20} = {checkpoint_every}")
-    print(f"{'resume_request':>20} = {resume_request}")
 
-    # ------------------------------------------------------------------ #
-    # Dataset
-    # ------------------------------------------------------------------ #
-    print("Preparing dataset …")
-    train_tokens, val_tokens, tokenizer = get_data(
-        subset_pct      = Config.dataset_percent,
-        context_length  = Config.context_length,
-    )
-    print(f"train batches: {len(train_tokens)}   val batches: {len(val_tokens)}")
-    print(f"train_tokens shape: {train_tokens.shape}  val_tokens shape: {val_tokens.shape}")
+def load_configs() -> OmegaConf:
+    model_dir = Path(__file__).resolve().parent
+    project_root = model_dir.parent
+    global_cfg = OmegaConf.load(project_root / "Global_Config.yml")
+    local_cfg = OmegaConf.load(model_dir / "Config.yml")
+    return OmegaConf.merge(global_cfg, local_cfg)
 
-    # ------------------------------------------------------------------ #
-    # Model
-    # ------------------------------------------------------------------ #
-    model = GiantGPT(
-        vocab_size     = len(tokenizer),
-        context_length = Config.context_length,
-        d_model        = Config.embedding_size,
-        n_heads        = Config.num_heads,
-        d_ff           = Config.feed_forward_size,
-        n_layers       = Config.num_layers,
-        dropout_rate   = Config.dropout_rate,
-    )
-    rng     = jax.random.PRNGKey(0)
-    dummy   = jnp.zeros((1, Config.context_length), dtype=jnp.int32)
-    params  = model.init(rng, dummy)["params"]
-    save_params(params, "initial_params.pkl")     # optional convenience dump
 
-    # ------------------------------------------------------------------ #
-    # Optimiser + LR scheduler
-    # ------------------------------------------------------------------ #
-    steps_per_epoch = math.ceil(len(train_tokens) / Config.batch_size)
-    total_steps     = steps_per_epoch * Config.num_epochs
-    assert total_steps > 500, "total_steps must exceed warm‑up (500)"
+def load_tokenizer(cfg: OmegaConf):
+    from transformers import AutoTokenizer
 
+    tok_cfg = cfg.tokenizer
+    if tok_cfg.use_custom:
+        tokenizer = AutoTokenizer.from_pretrained(tok_cfg.custom_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tok_cfg.name,
+            use_fast=True,
+            cache_dir=tok_cfg.cache_dir,
+        )
+    if tokenizer.pad_token is None:
+        if tokenizer.eos_token:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    return tokenizer
+
+
+def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
+    stages_raw = OmegaConf.to_container(cfg.stages, resolve=True)
+    stage_cfgs = []
+    for stage in stages_raw:
+        stage_cfgs.append(
+            StageConfig(
+                name=stage["name"],
+                dataset=stage["dataset"],
+                seq_len=int(stage["seq_len"]),
+                epochs=int(stage["epochs"]),
+                end_ratio=float(stage["end_ratio"]),
+                shuffle=bool(stage.get("shuffle", True)),
+            )
+        )
+    return stage_cfgs
+
+
+def build_stage_runtimes(
+    stage_cfgs: List[StageConfig],
+    *,
+    dataset_root: Path,
+    batch_size: int,
+    seed: int,
+) -> List[StageRuntime]:
+    dataset_cache: Dict[Path, ArrowDataset] = {}
+    runtimes: List[StageRuntime] = []
+    for stage in stage_cfgs:
+        data_path = dataset_root / stage.dataset
+        dataset = dataset_cache.get(data_path)
+        if dataset is None:
+            dataset = ArrowDataset(data_path)
+            dataset_cache[data_path] = dataset
+        if stage.seq_len > dataset.tokens.shape[1]:
+            raise ValueError(
+                f"Stage {stage.name} requests seq_len {stage.seq_len} but dataset "
+                f"only provides context {dataset.tokens.shape[1]}"
+            )
+        loader = StageDataLoader(
+            dataset,
+            batch_size=batch_size,
+            seq_len=stage.seq_len,
+            shuffle=stage.shuffle,
+            seed=seed,
+        )
+        total_steps = stage.epochs * loader.steps_per_epoch
+        if total_steps == 0:
+            raise ValueError(f"Stage {stage.name} has zero training steps. Adjust dataset or batch size.")
+        runtimes.append(StageRuntime(config=stage, loader=loader, total_steps=total_steps))
+    return runtimes
+
+
+def validate_milestones(stage_cfgs: List[StageConfig], cfg: OmegaConf) -> None:
+    milestones = list(cfg.training_defaults.lr_milestones)
+    expected = [stage.end_ratio for stage in stage_cfgs]
+    if not expected or expected[-1] != 1.0:
+        raise ValueError("Stage configuration must end with end_ratio == 1.0")
+    if sorted(expected) != expected:
+        raise ValueError("Stage end_ratio values must be non-decreasing")
+    if milestones and milestones[-1] != 1.0:
+        milestones.append(1.0)
+    if milestones and len(milestones) != len(stage_cfgs):
+        print("⚠ lr_milestones count does not match number of stages; proceeding regardless.")
+    else:
+        for m, e in zip(milestones, expected):
+            if abs(m - e) > 1e-3:
+                print("⚠ lr milestone", m, "differs from stage end_ratio", e)
+
+
+def build_optimizer(cfg: OmegaConf, total_steps: int) -> optax.GradientTransformation:
+    warmup_steps = int(cfg.optimizer.warmup_steps)
+    if total_steps <= warmup_steps:
+        raise ValueError("Total steps must exceed warmup steps for cosine decay")
     schedule = optax.warmup_cosine_decay_schedule(
-        init_value   = 0.0,
-        peak_value   = Config.learning_rate,
-        warmup_steps = 500,
-        decay_steps  = total_steps - 500,
-        end_value    = Config.learning_rate * 0.1,
+        init_value=0.0,
+        peak_value=cfg.optimizer.base_learning_rate,
+        warmup_steps=warmup_steps,
+        decay_steps=total_steps - warmup_steps,
+        end_value=cfg.optimizer.min_learning_rate,
     )
     optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
+        optax.clip_by_global_norm(cfg.optimizer.gradient_clip_norm),
         optax.adamw(
-            learning_rate = schedule,
-            b1 = 0.9, b2 = 0.95, eps = 1e-8, weight_decay=Config.weight_decay,
+            learning_rate=schedule,
+            b1=0.9,
+            b2=0.95,
+            eps=1e-8,
+            weight_decay=cfg.optimizer.weight_decay,
         ),
     )
-    opt_state    = optimizer.init(params)
-    global_step  = 0
+    return optimizer
 
-    # ------------------------------------------------------------------ #
-    # Resume logic
-    # ------------------------------------------------------------------ #
-    if resume_request:
-        if resume_request == "latest":
+
+def dataloader_state_path(cfg: OmegaConf, step: int) -> Path:
+    root = Path(cfg.paths.dataloader_state_root)
+    return root / f"state_{step:07d}.json"
+
+
+def parse_args() -> argparse.Namespace:
+    cli = argparse.ArgumentParser("SUPER-GIANT training")
+    cli.add_argument("--checkpoint_dir", default="checkpoints")
+    cli.add_argument("--checkpoint_every", type=int, default=None)
+    cli.add_argument("--resume", nargs="?", const="latest", default=None)
+    return cli.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = load_configs()
+    tokenizer = load_tokenizer(cfg)
+
+    stage_cfgs = parse_stage_configs(cfg)
+    validate_milestones(stage_cfgs, cfg)
+
+    dataset_root = Path(cfg.paths.processed_data_root)
+    batch_size = int(cfg.training.batch_size)
+    seed = int(cfg.training.seed)
+
+    stage_runtimes = build_stage_runtimes(stage_cfgs, dataset_root=dataset_root, batch_size=batch_size, seed=seed)
+    total_steps = sum(stage.total_steps for stage in stage_runtimes)
+
+    max_seq_len = max(stage.config.seq_len for stage in stage_runtimes)
+    model = GiantGPT(
+        vocab_size=len(tokenizer),
+        context_length=max_seq_len,
+        d_model=cfg.model.embedding_size,
+        n_heads=cfg.model.num_heads,
+        d_ff=cfg.model.feed_forward_size,
+        n_layers=cfg.model.num_layers,
+        dropout_rate=cfg.model.dropout_rate,
+    )
+
+    rng = jax.random.PRNGKey(seed)
+    params = model.init(rng, jnp.zeros((batch_size, max_seq_len), dtype=jnp.int32))["params"]
+
+    optimizer = build_optimizer(cfg, total_steps)
+    opt_state = optimizer.init(params)
+    global_step = 0
+
+    checkpoint_dir = args.checkpoint_dir
+    checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
+
+    # Resume if requested
+    if args.resume:
+        if args.resume == "latest":
             ckpt_path = latest_ckpt(checkpoint_dir)
             if ckpt_path is None:
-                raise FileNotFoundError(
-                    f"No checkpoints found in '{checkpoint_dir}' to resume from.")
+                raise FileNotFoundError("No checkpoints available to resume from.")
         else:
-            ckpt_path = resume_request
+            ckpt_path = args.resume
         params, global_step = load_ckpt(ckpt_path)
-        print(f"▶ Resumed from {ckpt_path}  (global_step={global_step})")
-        opt_state = optimizer.init(params)   # re‑seed optimiser state
+        opt_state = optimizer.init(params)
+        print(f"▶ Resumed parameters from {ckpt_path} at step {global_step}")
 
-    # ------------------------------------------------------------------ #
-    # Training loop
-    # ------------------------------------------------------------------ #
-    print(f"Training for {Config.num_epochs} epochs with batch size {Config.batch_size}")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    rng = jax.random.PRNGKey(0)
+    # Restore dataloader state if available
+    loader_state = load_dataloader_state(dataloader_state_path(cfg, global_step)) if global_step else None
+    stage_states: Dict[str, Dict[str, int]] = {}
+    current_stage_idx = 0
+    stage_step_total = 0
+    if loader_state:
+        current_stage_idx = int(loader_state.get("stage_index", 0))
+        stage_step_total = int(loader_state.get("stage_step_total", 0))
+        stage_states = loader_state.get("stage_states", {})
+        print(f"▶ Restored dataloader state at stage {current_stage_idx} step {stage_step_total}")
 
-    for epoch in range(Config.num_epochs):
-        t0 = time.time()
-        for batch in data_loader(train_tokens, Config.batch_size):
-            rng, dropout_rng = jax.random.split(rng)
+    for idx, runtime in enumerate(stage_runtimes):
+        state_dict = stage_states.get(runtime.config.name, {"epoch": 0, "step_in_epoch": 0})
+        runtime.loader.load_state(state_dict)
+
+    base_rng = jax.random.PRNGKey(seed)
+
+    start = time.time()
+    for stage_idx in range(current_stage_idx, len(stage_runtimes)):
+        runtime = stage_runtimes[stage_idx]
+        stage_steps_target = runtime.total_steps
+        completed_in_stage = stage_step_total if stage_idx == current_stage_idx else 0
+
+        print(
+            f"→ Stage {runtime.config.name}: seq_len={runtime.config.seq_len} "
+            f"epochs={runtime.config.epochs} steps={stage_steps_target}"
+        )
+
+        while completed_in_stage < stage_steps_target:
+            batch = next(runtime.loader)
+            dropout_rng = jax.random.fold_in(base_rng, global_step)
             params, opt_state, loss = train_step(
-                params, opt_state, batch,
-                model = model,
-                optimizer = optimizer,
-                dropout_rng = dropout_rng,
+                params,
+                opt_state,
+                batch,
+                model=model,
+                optimizer=optimizer,
+                dropout_rng=dropout_rng,
             )
             global_step += 1
+            completed_in_stage += 1
 
-            # Console logging
-            if global_step % 200 == 0:
-                est_total = Config.num_epochs * steps_per_epoch
-                print(f"step {global_step:>7}/{est_total:<7} "
-                      f"| loss {loss:.4f}  ppl {np.exp(loss):.2f}")
+            if global_step % cfg.training.log_every == 0:
+                elapsed = time.time() - start
+                ppl = float(np.exp(loss)) if loss < 20 else float("inf")
+                print(
+                    f"step {global_step:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
+                    f"loss {loss:.4f} ppl {ppl:.2f} ({elapsed:.1f}s)"
+                )
+                start = time.time()
 
-            # Periodic checkpoint
             if global_step % checkpoint_every == 0:
                 ckpt_file = save_ckpt(params, global_step, checkpoint_dir)
                 print(f"💾 checkpoint → {ckpt_file}")
+                stage_states[runtime.config.name] = runtime.loader.state_dict()
+                save_dataloader_state(
+                    dataloader_state_path(cfg, global_step),
+                    {
+                        "stage_index": stage_idx,
+                        "stage_step_total": completed_in_stage,
+                        "stage_states": stage_states,
+                    },
+                )
+
+            stage_states[runtime.config.name] = runtime.loader.state_dict()
+
+        # Stage finished → reset step tracker
+        stage_step_total = 0
+
+    final_ckpt = save_ckpt(params, global_step, checkpoint_dir)
+    save_dataloader_state(
+        dataloader_state_path(cfg, global_step),
+        {
+            "stage_index": len(stage_runtimes) - 1,
+            "stage_step_total": stage_runtimes[-1].total_steps,
+            "stage_states": stage_states,
+        },
+    )
+    print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
 
 
-    # ------------------------------------------------------------------ #
-    # Final save
-    # ------------------------------------------------------------------ #
-    save_ckpt(params, global_step, checkpoint_dir)
-    print("✔ final parameters saved")
-
-# --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    print("Starting training …")
     main()
-

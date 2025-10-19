@@ -18,7 +18,7 @@
 
 import os, sys, json, random
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -26,6 +26,45 @@ from omegaconf import OmegaConf
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 from transformers import AutoTokenizer
+
+DATA_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = DATA_DIR.parent
+
+
+def _load_config(user_path: str | None) -> OmegaConf:
+    base = OmegaConf.load(PROJECT_ROOT / "Global_Config.yml")
+    default = OmegaConf.load(DATA_DIR / "Config.yml")
+    if user_path:
+        user_cfg = OmegaConf.load(user_path)
+        return OmegaConf.merge(base, default, user_cfg)
+    return OmegaConf.merge(base, default)
+
+
+def _resolve_student_tokenizer(cfg, teacher_cfg) -> Tuple[str, str | None]:
+    override_dir = getattr(teacher_cfg, "student_tokenizer_dir", None)
+    override_name = getattr(teacher_cfg, "student_tokenizer_name", None)
+    tok_cfg = cfg.tokenizer
+
+    if override_dir:
+        dir_path = Path(override_dir)
+        if not dir_path.is_absolute():
+            dir_path = (PROJECT_ROOT / override_dir).resolve()
+        if dir_path.exists():
+            return str(dir_path), None
+        return str(dir_path), getattr(tok_cfg, "cache_dir", None)
+
+    if override_name:
+        return override_name, getattr(tok_cfg, "cache_dir", None)
+
+    if tok_cfg.use_custom:
+        custom_path = Path(tok_cfg.custom_path)
+        if not custom_path.is_absolute():
+            custom_path = (PROJECT_ROOT / tok_cfg.custom_path).resolve()
+        if custom_path.exists():
+            return str(custom_path), None
+        return tok_cfg.custom_path, getattr(tok_cfg, "cache_dir", None)
+
+    return tok_cfg.name, getattr(tok_cfg, "cache_dir", None)
 
 
 # -----------------------
@@ -283,10 +322,10 @@ def _make_question_request(cfg) -> str:
             return s
     return text.strip()
 
-def generate_questions(cfg, qid_start:int) -> List[Dict[str, Any]]:
+def generate_questions(cfg, qid_start: int) -> List[Dict[str, Any]]:
     total = int(cfg.num_questions_total)
     per_chunk = int(cfg.questions_per_chunk)
-    par_calls = int(cfg.get("parrallel_calls", cfg.get("parallel_calls", 4)))
+    par_calls = int(getattr(cfg, "parallel_calls", getattr(cfg, "parrallel_calls", 4)))
 
     questions = []
     qid = qid_start
@@ -308,21 +347,21 @@ def generate_questions(cfg, qid_start:int) -> List[Dict[str, Any]]:
 # --------------------------------
 # Stage B: ANSWER GENERATION
 # --------------------------------
-def _answer_one(cfg, tokenizer, user_tok, ai_tok, rec) -> Dict[str, Any]:
-    system = {"role": "system", "content": cfg.answer_system}
+def _answer_one(teacher_cfg, tokenizer, user_tok, ai_tok, rec) -> Dict[str, Any]:
+    system = {"role": "system", "content": teacher_cfg.answer_system}
     user = {"role": "user", "content": rec["question_text"]}
 
     resp = chat_complete(
-        base_url=cfg.model_base_url,
-        api_key=cfg.api_key,
-        model=cfg.model_name,
+        base_url=teacher_cfg.model_base_url,
+        api_key=teacher_cfg.api_key,
+        model=teacher_cfg.model_name,
         messages=[system, user],
-        temperature=cfg.temperature,
-        top_p=cfg.top_p,
-        max_tokens=int(cfg.max_new_tokens_answer),
+        temperature=teacher_cfg.temperature,
+        top_p=teacher_cfg.top_p,
+        max_tokens=int(teacher_cfg.max_new_tokens_answer),
         logprobs=True,
-        top_logprobs=int(cfg.top_logprobs),
-        prompt_logprobs=int(cfg.prompt_logprobs),
+        top_logprobs=int(teacher_cfg.top_logprobs),
+        prompt_logprobs=int(teacher_cfg.prompt_logprobs),
         response_format=None,
         timeout=180,
     )
@@ -341,20 +380,26 @@ def _answer_one(cfg, tokenizer, user_tok, ai_tok, rec) -> Dict[str, Any]:
         "student_input_ids": [int(x) for x in ids],
         "student_role_ids": [int(min(2, max(0, x))) for x in role_ids],
         "student_loss_mask": [int(min(1, max(0, x))) for x in loss_mask],
-        "meta": {"model": cfg.model_name,
-                 "temperature": float(cfg.temperature),
-                 "top_p": float(cfg.top_p)},
+        "meta": {
+            "model": teacher_cfg.model_name,
+            "temperature": float(teacher_cfg.temperature),
+            "top_p": float(teacher_cfg.top_p),
+        },
     }
 
-def generate_answers(cfg, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    tokenizer = AutoTokenizer.from_pretrained(cfg.student_tokenizer_name, use_fast=True)
-    user_tok = cfg.user_token
-    ai_tok = cfg.ai_token
+def generate_answers(global_cfg, teacher_cfg, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    tok_source, cache_dir = _resolve_student_tokenizer(global_cfg, teacher_cfg)
+    tokenizer = AutoTokenizer.from_pretrained(tok_source, use_fast=True, cache_dir=cache_dir)
+    user_tok = getattr(teacher_cfg, "user_token", "[USER]")
+    ai_tok = getattr(teacher_cfg, "ai_token", "[AI]")
 
-    par_calls = int(cfg.get("parrallel_calls", cfg.get("parallel_calls", 4)))
+    par_calls = int(getattr(teacher_cfg, "parallel_calls", getattr(teacher_cfg, "parrallel_calls", 4)))
     rows = []
     with ThreadPoolExecutor(max_workers=par_calls) as ex:
-        futs = [ex.submit(_answer_one, cfg, tokenizer, user_tok, ai_tok, q) for q in questions]
+        futs = [
+            ex.submit(_answer_one, teacher_cfg, tokenizer, user_tok, ai_tok, q)
+            for q in questions
+        ]
         for fut in as_completed(futs):
             try:
                 item = fut.result()
@@ -370,16 +415,24 @@ def generate_answers(cfg, questions: List[Dict[str, Any]]) -> List[Dict[str, Any
 # --------------
 def main():
     import argparse
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True, help="Path to Teacher_config.yml")
+    ap.add_argument(
+        "--config",
+        default=str(DATA_DIR / "Config.yml"),
+        help="Path to teacher_data/Config.yml",
+    )
     args = ap.parse_args()
 
-    cfg = OmegaConf.load(args.config)
-    out_dir = Path(cfg.out_dir)
+    cfg = _load_config(args.config)
+    teacher_cfg = cfg.teacher
+    outputs_cfg = cfg.outputs
+
+    out_dir = (PROJECT_ROOT / outputs_cfg.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    q_path = Path(cfg.questions_arrow)
-    a_path = Path(cfg.answers_arrow)
+    q_path = (PROJECT_ROOT / outputs_cfg.questions_arrow).resolve()
+    a_path = (PROJECT_ROOT / outputs_cfg.answers_arrow).resolve()
 
     # 0) Read existing (for stacking)
     old_q = read_arrow_if_exists(q_path, Q_SCHEMA)
@@ -393,10 +446,10 @@ def main():
         qid_start = 0
 
     # 2) Generate NEW questions
-    new_q = generate_questions(cfg, qid_start=qid_start)
+    new_q = generate_questions(teacher_cfg, qid_start=qid_start)
 
     # 3) Generate NEW answers for those new questions
-    new_a = generate_answers(cfg, new_q)
+    new_a = generate_answers(cfg, teacher_cfg, new_q)
 
     # 4) Stack and write back (OLD + NEW)
     all_q = (old_q + new_q) if old_q else new_q
@@ -410,4 +463,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

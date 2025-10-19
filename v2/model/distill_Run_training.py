@@ -1,11 +1,14 @@
 # distill_Run_training.py
-import os, sys, math, pickle, time
+import os
+import sys
+import math
+import time
+from pathlib import Path
+from typing import Optional
+
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.80"
 
-# --------------------------------------------------------------------------- #
-# JAX stack + project imports
-# --------------------------------------------------------------------------- #
 try:
     import jax
 except ImportError:
@@ -14,183 +17,212 @@ except ImportError:
     import jax
 
 import jax.numpy as jnp
-import optax
 import numpy as np
+import optax
 from omegaconf import OmegaConf
 
-from GiantGPT         import GiantGPT
-from distill_Training_step    import train_step
-from distill_prepare_dataset  import get_data, data_loader
-from Save_params      import save_params
-from checkpoint_manager import (
-    save   as save_ckpt,
-    load   as load_ckpt,
-    latest as latest_ckpt,
+from GiantGPT import GiantGPT
+from distill_Training_step import train_step
+from distill_prepare_dataset import get_data, data_loader
+from checkpoint_manager import save as save_ckpt, load as load_ckpt, latest as latest_ckpt
+
+from jax import config as jax_config
+
+MODEL_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = MODEL_DIR.parent
+
+CFG = OmegaConf.merge(
+    OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
+    OmegaConf.load(MODEL_DIR / "Config.yml"),
 )
+MODEL_CFG = CFG.model
+QA_CFG = CFG.qa_finetune
+TOKENIZER_CFG = CFG.tokenizer
 
-from jax import config
-config.update("jax_default_matmul_precision", "tensorfloat32")
+DEFAULT_QA_CKPT_DIR = QA_CFG.get("checkpoint_dir", "checkpoints_qa")
+
+jax_config.update("jax_default_matmul_precision", "tensorfloat32")
 
 
-# --------------------------------------------------------------------------- #
-# Config
-# --------------------------------------------------------------------------- #
-Config = OmegaConf.load("Config.yml")
+def parse_args():
+    import argparse
 
-# -------------------------- simple CLI parser ------------------------------ #
-# Defaults
-checkpoint_dir    = "checkpoints"
-checkpoint_every  = 1_000         # optimiser steps
-resume_request    = None          # "latest" | path | None
+    parser = argparse.ArgumentParser("SUPER-GIANT QA distillation finetune")
+    parser.add_argument(
+        "--checkpoint_dir",
+        default=str(DEFAULT_QA_CKPT_DIR),
+        help="Directory for QA finetune checkpoints",
+    )
+    parser.add_argument(
+        "--checkpoint_every",
+        type=int,
+        help="Override checkpoint interval (steps)",
+    )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        default=None,
+        help="Resume from latest or specific checkpoint",
+    )
+    parser.add_argument(
+        "--init_checkpoint",
+        default=None,
+        help="Path to base-model checkpoint to initialise from before QA finetune",
+    )
+    return parser.parse_args()
 
-for arg in sys.argv[1:]:
-    if arg.startswith("--checkpoint_dir="):
-        checkpoint_dir = arg.split("=", 1)[1]
-    elif arg.startswith("--checkpoint_every="):
-        checkpoint_every = int(arg.split("=", 1)[1])
-    elif arg == "--resume":
-        resume_request = "latest"
-    elif arg.startswith("--resume="):
-        resume_request = arg.split("=", 1)[1]
-# --------------------------------------------------------------------------- #
+
+def _maybe_load_initial_params(path: Optional[str], params):
+    if not path:
+        return params, 0
+    ckpt_path = Path(path)
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Initial checkpoint not found: {ckpt_path}")
+    loaded_params, step = load_ckpt(str(ckpt_path))
+    print(f"▶ Loaded initial parameters from {ckpt_path} (step {step})")
+    return loaded_params, step
+
 
 def main() -> None:
-    # Echo the effective run‑time config (handy for logs)
-    print("» Effective training configuration:")
-    for k, v in Config.__dict__.items():
-        if not k.startswith("__") and not callable(v):
-            print(f"{k:>20} = {v}")
-    print(f"{'checkpoint_dir':>20} = {checkpoint_dir}")
-    print(f"{'checkpoint_every':>20} = {checkpoint_every}")
-    print(f"{'resume_request':>20} = {resume_request}")
+    args = parse_args()
 
-    # ------------------------------------------------------------------ #
-    # Dataset
-    # ------------------------------------------------------------------ #
-    print("Preparing dataset …")
-    # Use full configured context length (minus 1 for the shift in our prep)
-    distill_context_length = Config.context_length - 1
-    print(f"Using distillation context length: {distill_context_length}")
+    checkpoint_dir = Path(args.checkpoint_dir)
+    checkpoint_every = int(args.checkpoint_every or QA_CFG.checkpoint_every)
+    resume_request = args.resume
+
+    print("» QA finetune configuration:")
+    print(OmegaConf.to_yaml(QA_CFG))
+    print(f" checkpoint_dir   = {checkpoint_dir}")
+    print(f" checkpoint_every = {checkpoint_every}")
+    print(f" resume_request   = {resume_request}")
+    if args.init_checkpoint:
+        print(f" init_checkpoint  = {args.init_checkpoint}")
+
+    context_length = int(QA_CFG.context_length)
+    batch_size = int(QA_CFG.batch_size)
+    dataset_fraction = float(QA_CFG.get("dataset_fraction", 1.0))
+
+    print("Preparing QA dataset …")
     train_factory, val_factory, tokenizer = get_data(
-        subset_pct=Config.dataset_percent * 100 if Config.dataset_percent <= 1 else Config.dataset_percent,
-        context_length=distill_context_length,
-        batch_size=Config.batch_size,
+        subset_pct=dataset_fraction * 100.0,
+        context_length=context_length,
+        batch_size=batch_size,
     )
-    # Iterator factories → create fresh iterators whenever needed
+
     def make_train_loader():
         return data_loader(train_factory())
+
     def make_val_loader():
         return data_loader(val_factory())
 
-    # Estimate dataset size for logging (uses fresh iterators, does not exhaust)
     train_batches = sum(1 for _ in make_train_loader())
-    val_batches   = sum(1 for _ in make_val_loader())
+    val_batches = sum(1 for _ in make_val_loader())
     print(f"train batches: {train_batches}   val batches: {val_batches}")
-
-    # Debug: Check if we have any batches
     if train_batches == 0:
-        print("⚠ WARNING: No training batches found!")
-        print("This suggests the context length may be too large for the dataset.")
-        print("Consider using a smaller context length for distillation training.")
-        return
+        raise RuntimeError("No QA training batches available – check answers.arrow and context length")
 
-    # ------------------------------------------------------------------ #
-    # Model
-    # ------------------------------------------------------------------ #
     model = GiantGPT(
-        vocab_size     = len(tokenizer),
-        context_length = distill_context_length,     # match the prep input length
-        d_model        = Config.embedding_size,
-        n_heads        = Config.num_heads,
-        d_ff           = Config.feed_forward_size,
-        n_layers       = Config.num_layers,
-        dropout_rate   = Config.dropout_rate,
+        vocab_size=len(tokenizer),
+        context_length=context_length,
+        d_model=MODEL_CFG.embedding_size,
+        n_heads=MODEL_CFG.num_heads,
+        d_ff=MODEL_CFG.feed_forward_size,
+        n_layers=MODEL_CFG.num_layers,
+        dropout_rate=MODEL_CFG.dropout_rate,
     )
-    rng     = jax.random.PRNGKey(0)
-    # Model expects full context length during initialization
-    dummy   = jnp.zeros((Config.batch_size, distill_context_length), dtype=jnp.int32)
-    params  = model.init(rng, dummy, deterministic=True)["params"]
-    save_params(params, "initial_params.pkl")     # optional convenience dump
 
-    # ------------------------------------------------------------------ #
-    # Optimiser + LR scheduler
-    # ------------------------------------------------------------------ #
+    seed = int(QA_CFG.get("seed", 0))
+    rng = jax.random.PRNGKey(seed)
+    dummy = jnp.zeros((batch_size, context_length), dtype=jnp.int32)
+    params = model.init(rng, dummy, deterministic=True)["params"]
+
+    if args.init_checkpoint and not resume_request:
+        params, _ = _maybe_load_initial_params(args.init_checkpoint, params)
+
     steps_per_epoch = train_batches
-    total_steps     = steps_per_epoch * Config.num_epochs
-    assert total_steps > 500, "total_steps must exceed warm‑up (500)"
+    total_steps = max(1, steps_per_epoch * int(QA_CFG.num_epochs))
+    warmup_ratio = float(QA_CFG.get("warmup_ratio", 0.1))
+    warmup_steps = max(1, int(total_steps * warmup_ratio))
+    decay_steps = max(1, total_steps - warmup_steps)
+
+    learning_rate = float(QA_CFG.learning_rate)
+    end_lr = learning_rate * 0.1
 
     schedule = optax.warmup_cosine_decay_schedule(
-        init_value   = 0.0,
-        peak_value   = Config.learning_rate,
-        warmup_steps = 500,
-        decay_steps  = total_steps - 500,
-        end_value    = Config.learning_rate * 0.1,
+        init_value=0.0,
+        peak_value=learning_rate,
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps,
+        end_value=end_lr,
     )
     optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
+        optax.clip_by_global_norm(QA_CFG.get("gradient_clip_norm", 1.0)),
         optax.adamw(
-            learning_rate = schedule,
-            b1 = 0.9, b2 = 0.95, eps = 1e-8, weight_decay=Config.weight_decay,
+            learning_rate=schedule,
+            b1=0.9,
+            b2=0.95,
+            eps=1e-8,
+            weight_decay=float(QA_CFG.get("weight_decay", 0.01)),
         ),
     )
-    opt_state    = optimizer.init(params)
-    global_step  = 0
+    opt_state = optimizer.init(params)
+    global_step = 0
 
-    # ------------------------------------------------------------------ #
-    # Resume logic
-    # ------------------------------------------------------------------ #
     if resume_request:
         if resume_request == "latest":
-            ckpt_path = latest_ckpt(checkpoint_dir)
+            ckpt_path = latest_ckpt(str(checkpoint_dir))
             if ckpt_path is None:
-                raise FileNotFoundError(
-                    f"No checkpoints found in '{checkpoint_dir}' to resume from.")
+                raise FileNotFoundError(f"No checkpoints found in '{checkpoint_dir}' to resume from.")
         else:
             ckpt_path = resume_request
         params, global_step = load_ckpt(ckpt_path)
-        print(f"▶ Resumed from {ckpt_path}  (global_step={global_step})")
-        opt_state = optimizer.init(params)   # re‑seed optimiser state
+        opt_state = optimizer.init(params)
+        print(f"▶ Resumed QA finetune from {ckpt_path} (step {global_step})")
 
-    # ------------------------------------------------------------------ #
-    # Training loop
-    # ------------------------------------------------------------------ #
-    print(f"Training for {Config.num_epochs} epochs with batch size {Config.batch_size}")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    rng = jax.random.PRNGKey(0)
+    log_every = int(QA_CFG.get("log_every", 100))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(Config.num_epochs):
+    print(
+        f"Starting QA finetune for {QA_CFG.num_epochs} epochs | "
+        f"batch_size={batch_size} | total_steps≈{total_steps}"
+    )
+
+    base_rng = jax.random.PRNGKey(seed)
+
+    for epoch in range(int(QA_CFG.num_epochs)):
         t0 = time.time()
-        for batch in make_train_loader():  # fresh streaming iterator per epoch
-            rng, dropout_rng = jax.random.split(rng)
+        train_iter = make_train_loader()
+        for batch in train_iter:
+            base_rng, dropout_rng = jax.random.split(base_rng)
             params, opt_state, loss = train_step(
-                params, opt_state, batch,
-                model = model,
-                optimizer = optimizer,
-                dropout_rng = dropout_rng,
+                params,
+                opt_state,
+                batch,
+                model=model,
+                optimizer=optimizer,
+                dropout_rng=dropout_rng,
             )
             global_step += 1
 
-            # Console logging
-            if global_step % 200 == 0:
-                est_total = Config.num_epochs * steps_per_epoch
-                print(f"step {global_step:>7}/{est_total:<7} "
-                      f"| loss {loss:.4f}  ppl {np.exp(loss):.2f}")
+            if global_step % log_every == 0:
+                ppl = float(np.exp(loss)) if loss < 20 else float("inf")
+                print(
+                    f"step {global_step:>7}/{total_steps:<7} | epoch {epoch+1:<3} | "
+                    f"loss {loss:.4f} ppl {ppl:.2f}"
+                )
 
-            # Periodic checkpoint
             if global_step % checkpoint_every == 0:
-                ckpt_file = save_ckpt(params, global_step, checkpoint_dir)
+                ckpt_file = save_ckpt(params, global_step, str(checkpoint_dir))
                 print(f"💾 checkpoint → {ckpt_file}")
 
         dt = time.time() - t0
-        print(f"epoch {epoch+1} done in {dt:.1f}s")
+        print(f"epoch {epoch + 1} finished in {dt:.1f}s")
 
-    # ------------------------------------------------------------------ #
-    # Final save
-    # ------------------------------------------------------------------ #
-    save_ckpt(params, global_step, checkpoint_dir)
-    print("✔ final parameters saved")
+    final_ckpt = save_ckpt(params, global_step, str(checkpoint_dir))
+    print(f"✔ QA finetune complete. Final checkpoint: {final_ckpt}")
 
-# --------------------------------------------------------------------------- #
+
 if __name__ == "__main__":
-    print("Starting distillation training …")
+    print("Starting QA distillation finetune …")
     main()

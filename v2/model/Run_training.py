@@ -305,6 +305,7 @@ def main() -> None:
         },
     )
     print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
+    print("→ Use this checkpoint as --init_checkpoint for the QA finetune stage.")
 
 
 if __name__ == "__main__":

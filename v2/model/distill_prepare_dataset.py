@@ -11,7 +11,15 @@ import pyarrow.ipc as pa_ipc
 from transformers import AutoTokenizer
 from omegaconf import OmegaConf
 
-Config = OmegaConf.load("Config.yml")
+MODEL_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = MODEL_DIR.parent
+
+CFG = OmegaConf.merge(
+    OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
+    OmegaConf.load(MODEL_DIR / "Config.yml"),
+)
+TOKENIZER_CFG = CFG.tokenizer
+QA_CFG = CFG.qa_finetune
 
 @dataclass
 class Batch:
@@ -21,10 +29,22 @@ class Batch:
     topk_ids: np.ndarray      # (B, T, K) int32   (-1 where N/A)
     topk_logprobs: np.ndarray # (B, T, K) float32 (-inf where N/A)
 
+
+def _load_tokenizer() -> AutoTokenizer:
+    tok_cfg = TOKENIZER_CFG
+    if tok_cfg.use_custom:
+        path = Path(tok_cfg.custom_path)
+        if not path.is_absolute():
+            path = (PROJECT_ROOT / tok_cfg.custom_path).resolve()
+        return AutoTokenizer.from_pretrained(str(path), use_fast=True)
+    return AutoTokenizer.from_pretrained(tok_cfg.name, use_fast=True, cache_dir=tok_cfg.cache_dir)
+
+
 def _answers_path() -> Path:
-    base = Path(Config.dataset_path)
-    fname = getattr(Config, "teacher_answers_filename", "answers.arrow")
-    path = base / fname
+    raw = getattr(QA_CFG, "answers_arrow", "teacher_out/answers.arrow")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (PROJECT_ROOT / raw).resolve()
     if not path.exists():
         raise FileNotFoundError(f"Teacher answers Arrow not found: {path}")
     return path
@@ -124,7 +144,7 @@ def _stream_iterator(*, split: str, ctx: int, k: int, batch_size: int, subset_pc
     No full-table materialization. Deterministic subsampling + split via row index.
     """
     path = _answers_path()
-    tokenizer = AutoTokenizer.from_pretrained(Config.tokenizer_name, use_fast=True)
+    tokenizer = _load_tokenizer()
     eos_id = tokenizer.eos_token_id
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else (tokenizer.eos_token_id or 0)
 
@@ -219,14 +239,18 @@ def _stream_iterator(*, split: str, ctx: int, k: int, batch_size: int, subset_pc
               "check context_length, dataset_percent, or data coverage.")
 
 # Public API used by Run_training.py
-def get_data(*, subset_pct: float, context_length: int, batch_size: int, **_):
+def get_data(*, subset_pct: float | None = None, context_length: int, batch_size: int, **_):
     """
     Returns *factory functions* that create fresh streaming iterators
     (avoids generator exhaustion). No full in-RAM materialization.
     """
-    k = int(getattr(Config, "distill_topk", 8))
+    if subset_pct is None:
+        frac = float(getattr(QA_CFG, "dataset_fraction", 1.0))
+        subset_pct = min(100.0, max(0.0, frac * 100.0))
+
+    k = int(getattr(QA_CFG, "distill_topk", 8))
     # Small probe to print tokenizer info (and ensure it's available)
-    tok = AutoTokenizer.from_pretrained(Config.tokenizer_name, use_fast=True)
+    tok = _load_tokenizer()
     print(f"[DEBUG] tokenizer vocab_size={len(tok)}")
 
     def train_factory():
@@ -333,4 +357,3 @@ def _make_single_padded_window(
     assert inp.shape[0] == ctx and tgt.shape[0] == ctx
 
     return inp, tgt, mask, topkI, topkL
-

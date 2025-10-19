@@ -47,3 +47,19 @@ stages:
     epochs: 1
     end_ratio: 1.0
     shuffle: true
+
+qa_finetune:
+  answers_arrow: "teacher_out/answers.arrow"
+  batch_size: 4
+  context_length: 1024
+  num_epochs: 1
+  learning_rate: 5.0e-5
+  weight_decay: 0.02
+  warmup_ratio: 0.1
+  distill_topk: 8
+  distill_temperature: 2.0
+  distill_weight: 0.5
+  seed: 1
+  log_every: 50
+  checkpoint_every: 200
+  dataset_fraction: 1.0

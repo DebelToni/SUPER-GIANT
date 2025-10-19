@@ -1,9 +1,17 @@
 # Training_step.py
 import jax, jax.numpy as jnp, optax
 from functools import partial
+from pathlib import Path
 from omegaconf import OmegaConf
 
-Config = OmegaConf.load("Config.yml")
+MODEL_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = MODEL_DIR.parent
+
+CFG = OmegaConf.merge(
+    OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
+    OmegaConf.load(MODEL_DIR / "Config.yml"),
+)
+QA_CFG = CFG.qa_finetune
 
 def _kd_loss_topk(student_logits, topk_ids, topk_logprobs, mask):
     """
@@ -15,7 +23,7 @@ def _kd_loss_topk(student_logits, topk_ids, topk_logprobs, mask):
     Numerically safe: if a position has *no* valid teacher candidates,
     its KD contribution is forced to zero (no NaNs).
     """
-    temp = float(getattr(Config, "distill_temperature", 2.0))
+    temp = float(getattr(QA_CFG, "distill_temperature", 2.0))
     # Guard: gather logits for teacher indices; invalid ids set to a large negative
     safe_ids = jnp.maximum(topk_ids, 0)              # (B, T, K)
     student_k = jnp.take_along_axis(student_logits, safe_ids, axis=-1)  # (B, T, K)
@@ -70,11 +78,11 @@ def train_step(params, opt_state, batch, *, model, optimizer, dropout_rng):
         )  # (B, T)
         ce = (ce * batch["mask"]).sum() / (batch["mask"].sum() + 1e-9)
 
-        if getattr(Config, "use_distillation", True):
+        if getattr(QA_CFG, "use_distillation", True):
             kd = _kd_loss_topk(
                 logits, batch["topk_ids"], batch["topk_logprobs"], batch["mask"]
             )
-            w = float(getattr(Config, "distill_weight", 0.5))
+            w = float(getattr(QA_CFG, "distill_weight", 0.5))
             loss = (1.0 - w) * ce + w * kd
         else:
             loss = ce
@@ -84,4 +92,3 @@ def train_step(params, opt_state, batch, *, model, optimizer, dropout_rng):
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
     return new_params, opt_state, loss
-

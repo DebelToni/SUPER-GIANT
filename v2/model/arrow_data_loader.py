@@ -103,7 +103,7 @@ class StageDataLoader:
 
         self.steps_per_epoch = dataset.num_rows // batch_size
         if self.steps_per_epoch == 0:
-            raise ValueError("Dataset too small for the specified batch_size")
+            raise ValueError(f"Dataset too small for the specified batch_size. dataset.num_rows={dataset.num_rows}, batch_size={batch_size}")
 
         self.epoch = 0
         self.step_in_epoch = 0

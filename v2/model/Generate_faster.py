@@ -13,7 +13,8 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from checkpoint_io import load_npz
 
 from omegaconf import OmegaConf
-Config = OmegaConf.load("Config.yml")
+CONFIG_PATH = Path(__file__).resolve().parent / "Config.yml"
+Config = OmegaConf.load(CONFIG_PATH)
 
 from GiantGPT import GiantGPT
 from jit_inference import init_inference_state, make_prefill_and_decode_fns

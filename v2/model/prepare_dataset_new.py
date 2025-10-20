@@ -11,7 +11,8 @@ from tqdm.auto import tqdm
 from omegaconf import OmegaConf
 
 # Load configuration
-Config = OmegaConf.load("Config.yml")
+CONFIG_PATH = Path(__file__).resolve().parent / "Config.yml"
+Config = OmegaConf.load(CONFIG_PATH)
 
 # Constants
 DATASET_VENDOR = Config.dataset_vendor
@@ -213,4 +214,3 @@ if __name__ == "__main__":
                          chunk_pct=args.chunk_pct,
                          context_length=args.ctx)
     print("train_tokens", tr.shape, "val_tokens", va.shape)
-

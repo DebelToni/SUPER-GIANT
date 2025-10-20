@@ -5,7 +5,8 @@ from collections import Counter
 from pathlib import Path
 from omegaconf import OmegaConf
 
-Config = OmegaConf.load("Config.yml")
+CONFIG_PATH = Path(__file__).resolve().parent / "Config.yml"
+Config = OmegaConf.load(CONFIG_PATH)
 
 ARROW_DIR = Config.dataset_path
 ARROW_FILE = Config.teacher_answers_filename
@@ -52,4 +53,3 @@ for idx, (r, m) in enumerate(zip(roles, masks)):
         printed += 1
         if printed >= 3:
             break
-

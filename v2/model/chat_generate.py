@@ -144,7 +144,8 @@ def main():
     args = parser.parse_args()
 
     # Load config & tokenizer
-    Config = OmegaConf.load("Config.yml")
+    script_dir = pathlib.Path(__file__).resolve().parent
+    Config = OmegaConf.load(script_dir / "Config.yml")
     tokenizer = load_tokenizer(Config)
     vocab_size = len(tokenizer)
     print(f"Tokenizer vocab_size={vocab_size}")
@@ -249,4 +250,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
@@ -84,6 +86,7 @@ class SchedulingCfg:
     shuffle_buffer_size: int = 65536
     wiki_num_workers: int = 8
     write_batch_size: int = 1024
+    tokenization_workers: Optional[int] = None
 
 
 @dataclass
@@ -384,19 +387,23 @@ def tokenize_records(
     pads_to_context: bool,
     dedupe: bool,
     stats: RunningStats,
+    workers: Optional[int] = None,
 ) -> Iterator[Dict[str, Any]]:
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else -1
     seen_hashes: set[int] = set() if dedupe else set()
 
-    for text in texts:
-        stats.records += 1
-        if dedupe:
-            h = _maybe_hash(text)
-            if h in seen_hashes:
-                stats.duplicates += 1
-                continue
-            seen_hashes.add(h)
+    def iter_candidates() -> Iterator[str]:
+        for text in texts:
+            stats.records += 1
+            if dedupe:
+                h = _maybe_hash(text)
+                if h in seen_hashes:
+                    stats.duplicates += 1
+                    continue
+                seen_hashes.add(h)
+            yield text
 
+    def tokenize_single(text: str) -> Tuple[str, List[int]]:
         enc = tokenizer(
             text,
             add_special_tokens=True,
@@ -405,22 +412,41 @@ def tokenize_records(
             max_length=max_tokens if max_tokens else None,
         )
         input_ids: List[int] = enc["input_ids"]
-
         if not pads_to_context and pad_id != -1:
             input_ids = _trim_padding(input_ids, pad_id)
+        return text, input_ids
 
+    def emit(text: str, input_ids: List[int]) -> Optional[Dict[str, Any]]:
         token_count = len(input_ids)
         stats.tokens += token_count
-
         if token_count < max(min_tokens, 0):
             stats.discarded += 1
-            continue
-
-        yield {
+            return None
+        return {
             "text": text,
             "input_ids": np.array(input_ids, dtype=np.int32),
             "length": token_count,
         }
+
+    worker_count = workers if workers and workers > 1 else 1
+    if worker_count == 1:
+        for text in iter_candidates():
+            text_val, input_ids = tokenize_single(text)
+            row = emit(text_val, input_ids)
+            if row is not None:
+                yield row
+        return
+
+    chunk_size = max(1, worker_count * 2)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        for text_val, input_ids in executor.map(
+            tokenize_single,
+            iter_candidates(),
+            chunksize=chunk_size,
+        ):
+            row = emit(text_val, input_ids)
+            if row is not None:
+                yield row
 
 
 # --------------------------------------------------------------------------------------
@@ -447,15 +473,24 @@ def stage_tokenize(
 
     texts, context_length, pads_to_context = load_text_iterable(stage_name, stages_cfg)
 
+    stage_key = stage_name.lower()
+    stage_cfg_map = stages_cfg.get(stage_key, {})
+
+    worker_count = stage_cfg_map.get("tokenization_workers")
+    if worker_count is None:
+        worker_count = top_cfg.scheduling.tokenization_workers
+    if worker_count is None or worker_count <= 0:
+        worker_count = max(1, os.cpu_count() or 1)
+
     # per-stage knobs
-    if stage_name.lower() == "tiny_stories":
-        min_tokens = int(stages_cfg["tiny_stories"].get("min_tokens", 0) or 0)
+    if stage_key == "tiny_stories":
+        min_tokens = int(stage_cfg_map.get("min_tokens", 0) or 0)
         dedupe = False
         batch_size = top_cfg.scheduling.write_batch_size
         arrow_filename = outputs.tinystories_filename
-    elif stage_name.lower() == "wikipedia":
-        min_tokens = int(stages_cfg["wikipedia"].get("min_tokens", 0) or 0)
-        dedupe = bool(stages_cfg["wikipedia"].get("deduplicate", True))
+    elif stage_key == "wikipedia":
+        min_tokens = int(stage_cfg_map.get("min_tokens", 0) or 0)
+        dedupe = bool(stage_cfg_map.get("deduplicate", True))
         batch_size = top_cfg.scheduling.write_batch_size
         arrow_filename = outputs.wikipedia_filename
     else:
@@ -464,6 +499,8 @@ def stage_tokenize(
         dedupe = True
         batch_size = top_cfg.scheduling.write_batch_size
         arrow_filename = f"{stage_name}.arrow"
+
+    LOGGER.info("Stage '%s' using %d tokenization workers.", stage_name, worker_count)
 
     output_root = _as_path(outputs.processed_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -474,12 +511,33 @@ def stage_tokenize(
 
     if top_cfg.dry_run:
         LOGGER.info("[dry-run] Tokenizing '%s' without writing output.", stage_name)
-        for i, _ in zip(range(200), tokenize_records(tokenizer, texts, min_tokens, context_length, pads_to_context, dedupe, stats)):
+        for i, _ in zip(
+            range(200),
+            tokenize_records(
+                tokenizer,
+                texts,
+                min_tokens,
+                context_length,
+                pads_to_context,
+                dedupe,
+                stats,
+                workers=worker_count,
+            ),
+        ):
             pass
     else:
         with ArrowBatchWriter(arrow_path, schema, batch_size) as writer:
             for rows in _iter_chunks(
-                tokenize_records(tokenizer, texts, min_tokens, context_length, pads_to_context, dedupe, stats),
+                tokenize_records(
+                    tokenizer,
+                    texts,
+                    min_tokens,
+                    context_length,
+                    pads_to_context,
+                    dedupe,
+                    stats,
+                    workers=worker_count,
+                ),
                 batch_size,
             ):
                 writer.write(rows)
@@ -639,4 +697,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

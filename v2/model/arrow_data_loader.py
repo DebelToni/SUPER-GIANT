@@ -61,6 +61,15 @@ class ArrowDataset:
         self.context_lengths = np.asarray(context_lengths, dtype=np.int32)
         self.pad_ids = np.asarray(pad_ids, dtype=np.int32)
 
+        if n:
+            avg_seq = self.seq_lengths.mean()
+        else:
+            avg_seq = 0.0
+        print(
+            f"[ArrowDataset] {self.path.name}: rows={n} max_ctx={self.tokens.shape[1]} "
+            f"avg_seq={avg_seq:.1f}"
+        )
+
         self.sources = table.column("source").to_pylist() if "source" in names else ["unknown"] * n
         self.doc_ids = table.column("document_id").to_pylist() if "document_id" in names else ["?"] * n
         self.window_indices = (

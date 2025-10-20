@@ -12,7 +12,7 @@ paths:
 
 training_defaults:
   progressive_sequence_lengths: [256, 512, 1024]
-  lr_milestones: [0.1, 0.4, 0.7]
+  lr_milestones: [0.1, 0.4, 1.0]
   warmup_steps: 1000
   grad_accumulation: 2
   global_seed: 0
@@ -21,4 +21,3 @@ io:
   shard_size_tokens: 2048
   validation_fraction: 0.01
   min_sequence_tokens: 128
-

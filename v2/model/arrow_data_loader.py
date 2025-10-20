@@ -21,13 +21,53 @@ class ArrowDataset:
         with pa.memory_map(str(self.path), "r") as source:
             reader = pa_ipc.open_file(source)
             table = reader.read_all()
+
+        names = set(table.column_names)
         tokens_list = table.column("input_ids").to_pylist()
-        self.tokens = np.asarray(tokens_list, dtype=np.int32)
-        self.seq_lengths = np.asarray(table.column("seq_length").to_pylist(), dtype=np.int32)
-        self.context_lengths = np.asarray(table.column("context_length").to_pylist(), dtype=np.int32)
-        self.sources = table.column("source").to_pylist()
-        self.doc_ids = table.column("document_id").to_pylist()
-        self.window_indices = np.asarray(table.column("window_index").to_pylist(), dtype=np.int32)
+        n = len(tokens_list)
+
+        context_raw = table.column("context_length").to_pylist() if "context_length" in names else [None] * n
+        seq_raw = table.column("seq_length").to_pylist() if "seq_length" in names else [None] * n
+        pad_raw = table.column("pad_id").to_pylist() if "pad_id" in names else [None] * n
+
+        processed_tokens = []
+        seq_lengths = []
+        context_lengths = []
+        pad_ids = []
+
+        for tokens, ctx, seq_len, pad in zip(tokens_list, context_raw, seq_raw, pad_raw):
+            tokens = list(tokens)
+            ctx_val = int(ctx) if ctx is not None else len(tokens)
+            pad_id = int(pad) if pad is not None else (tokens[-1] if tokens else 0)
+
+            trimmed = tokens[:ctx_val]
+            processed_tokens.append(trimmed)
+            pad_ids.append(pad_id)
+            context_lengths.append(ctx_val)
+            if seq_len is not None:
+                seq_lengths.append(int(min(seq_len, ctx_val)))
+            else:
+                seq_lengths.append(int(min(len(tokens), ctx_val)))
+
+        max_ctx = max((len(seq) for seq in processed_tokens), default=0)
+        self.tokens = np.full((n, max_ctx), 0, dtype=np.int32)
+        for i, seq in enumerate(processed_tokens):
+            arr = np.asarray(seq, dtype=np.int32)
+            self.tokens[i, : arr.shape[0]] = arr
+            if arr.shape[0] < max_ctx:
+                self.tokens[i, arr.shape[0]:] = pad_ids[i]
+
+        self.seq_lengths = np.asarray(seq_lengths, dtype=np.int32)
+        self.context_lengths = np.asarray(context_lengths, dtype=np.int32)
+        self.pad_ids = np.asarray(pad_ids, dtype=np.int32)
+
+        self.sources = table.column("source").to_pylist() if "source" in names else ["unknown"] * n
+        self.doc_ids = table.column("document_id").to_pylist() if "document_id" in names else ["?"] * n
+        self.window_indices = (
+            np.asarray(table.column("window_index").to_pylist(), dtype=np.int32)
+            if "window_index" in names
+            else np.zeros(n, dtype=np.int32)
+        )
 
     @property
     def num_rows(self) -> int:

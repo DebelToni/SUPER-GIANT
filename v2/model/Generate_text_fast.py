@@ -16,7 +16,8 @@ import jax.lax as lax
 from functools import partial
 
 from omegaconf import OmegaConf
-Config = OmegaConf.load("Config.yml")
+CONFIG_PATH = Path(__file__).resolve().parent / "Config.yml"
+Config = OmegaConf.load(CONFIG_PATH)
 
 from GiantGPT import GiantGPT
 

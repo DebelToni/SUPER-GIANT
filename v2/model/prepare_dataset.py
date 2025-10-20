@@ -37,7 +37,8 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from tqdm.auto import tqdm
 
 from omegaconf import OmegaConf
-Config = OmegaConf.load("Config.yml")
+CONFIG_PATH = Path(__file__).resolve().parent / "Config.yml"
+Config = OmegaConf.load(CONFIG_PATH)
 
 # ────────────────────────────────
 # Configuration constants
@@ -268,4 +269,3 @@ if __name__ == "__main__":
                          chunk_pct=args.chunk_pct,
                          context_length=args.ctx)
     print("train_tokens", tr.shape, "val_tokens", va.shape)
-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +11,8 @@ from flax.linen import RMSNorm
 from flash_attn_jax import flash_mha
 
 from omegaconf import OmegaConf
-Config = OmegaConf.load("Config.yml")
+CONFIG_PATH = Path(__file__).resolve().parent / "Config.yml"
+Config = OmegaConf.load(CONFIG_PATH)
 
 from jax import config as jax_config
 jax_config.update("jax_default_matmul_precision", Config.compute_dtype)  

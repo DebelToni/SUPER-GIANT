@@ -594,8 +594,25 @@ def load_combined_config(user_cfg_path: Optional[str]) -> TopConfig:
     or just the corpus Config.yml (we'll still try to auto-load Global_Config.yml).
     """
     # Try to auto-detect both files in CWD
-    corpus_cfg_path = user_cfg_path or _find_default(["Config.yml", "config.yml", "configs/Config.yml", "configs/config.yml"])
-    global_cfg_path = _find_default(["Global_Config.yml", "global_config.yml", "configs/Global_Config.yml", "configs/global_config.yml"])
+    script_dir = Path(__file__).resolve().parent
+    corpus_cfg_path = user_cfg_path or _find_default(
+        [
+            "Config.yml",
+            "config.yml",
+            "configs/Config.yml",
+            "configs/config.yml",
+            str(script_dir / "Config.yml"),
+            str(script_dir / "config.yml"),
+        ]
+    )
+    global_cfg_path = _find_default(
+        [
+            "Global_Config.yml",
+            "global_config.yml",
+            "configs/Global_Config.yml",
+            "configs/global_config.yml",
+        ]
+    )
 
     corpus_cfg = OmegaConf.create({})
     global_cfg = OmegaConf.create({})

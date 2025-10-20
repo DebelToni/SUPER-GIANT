@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from omegaconf import OmegaConf
+from tqdm.auto import tqdm
 
 from GiantGPT import GiantGPT
 from Training_step import train_step
@@ -103,6 +104,7 @@ def build_stage_runtimes(
         data_path = dataset_root / stage.dataset
         dataset = dataset_cache.get(data_path)
         if dataset is None:
+            print(f"[loader] loading {data_path}")
             dataset = ArrowDataset(data_path)
             dataset_cache[data_path] = dataset
         if stage.seq_len > dataset.tokens.shape[1]:
@@ -116,6 +118,10 @@ def build_stage_runtimes(
             seq_len=stage.seq_len,
             shuffle=stage.shuffle,
             seed=seed,
+        )
+        print(
+            f"[loader] stage={stage.name} rows={dataset.num_rows} "
+            f"ctx={stage.seq_len} steps_per_epoch={loader.steps_per_epoch}"
         )
         total_steps = stage.epochs * loader.steps_per_epoch
         if total_steps == 0:
@@ -250,9 +256,18 @@ def main() -> None:
         completed_in_stage = stage_step_total if stage_idx == current_stage_idx else 0
 
         print(
-            f"→ Stage {runtime.config.name}: seq_len={runtime.config.seq_len} "
-            f"epochs={runtime.config.epochs} steps={stage_steps_target}"
+            f"→ Stage {runtime.config.name}: seq_len={runtime.config.seq_len} epochs={runtime.config.epochs} "
+            f"steps={stage_steps_target} (resume at {completed_in_stage})"
         )
+
+        pbar = tqdm(
+            total=stage_steps_target,
+            desc=f"stage:{runtime.config.name}",
+            initial=completed_in_stage,
+            leave=True,
+            dynamic_ncols=True,
+        )
+        last_loss = None
 
         while completed_in_stage < stage_steps_target:
             batch = next(runtime.loader)
@@ -267,6 +282,8 @@ def main() -> None:
             )
             global_step += 1
             completed_in_stage += 1
+            last_loss = float(loss)
+            pbar.update(1)
 
             if global_step % cfg.training.log_every == 0:
                 elapsed = time.time() - start
@@ -292,6 +309,13 @@ def main() -> None:
 
             stage_states[runtime.config.name] = runtime.loader.state_dict()
 
+        pbar.close()
+        if last_loss is not None:
+            print(
+                f"✓ Stage {runtime.config.name} completed (last loss {last_loss:.4f})"
+            )
+        else:
+            print(f"✓ Stage {runtime.config.name} completed (no batches emitted)")
         # Stage finished → reset step tracker
         stage_step_total = 0
 

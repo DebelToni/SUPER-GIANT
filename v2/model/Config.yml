@@ -17,6 +17,10 @@ optimizer:
   weight_decay: 0.05
   gradient_clip_norm: 1.0
   warmup_steps: 1000
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
 
 training:
   batch_size: 8
@@ -55,6 +59,10 @@ qa_finetune:
   num_epochs: 1
   learning_rate: 5.0e-5
   weight_decay: 0.02
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
   warmup_ratio: 0.1
   distill_topk: 8
   distill_temperature: 2.0

@@ -22,6 +22,7 @@ import optax
 from omegaconf import OmegaConf
 
 from GiantGPT import GiantGPT
+from optimizer_utils import create_weight_decay_mask
 from distill_Training_step import train_step
 from distill_prepare_dataset import get_data, data_loader
 from checkpoint_manager import save as save_ckpt, load as load_ckpt, latest as latest_ckpt
@@ -156,6 +157,9 @@ def main() -> None:
         decay_steps=decay_steps,
         end_value=end_lr,
     )
+    exclusions = QA_CFG.get("weight_decay_exclusions", [])
+    mask = create_weight_decay_mask(params, exclusions) if exclusions else None
+
     optimizer = optax.chain(
         optax.clip_by_global_norm(QA_CFG.get("gradient_clip_norm", 1.0)),
         optax.adamw(
@@ -164,6 +168,7 @@ def main() -> None:
             b2=0.95,
             eps=1e-8,
             weight_decay=float(QA_CFG.get("weight_decay", 0.01)),
+            mask=mask,
         ),
     )
     opt_state = optimizer.init(params)

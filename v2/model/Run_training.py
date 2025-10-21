@@ -25,6 +25,7 @@ from arrow_data_loader import (
 from checkpoint_manager import latest as latest_ckpt
 from checkpoint_manager import load as load_ckpt
 from checkpoint_manager import save as save_ckpt
+from optimizer_utils import create_weight_decay_mask
 
 jax.config.update("jax_default_matmul_precision", "tensorfloat32")
 
@@ -147,7 +148,7 @@ def validate_milestones(stage_cfgs: List[StageConfig], cfg: OmegaConf) -> None:
                 print("⚠ lr milestone", m, "differs from stage end_ratio", e)
 
 
-def build_optimizer(cfg: OmegaConf, total_steps: int) -> optax.GradientTransformation:
+def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientTransformation:
     warmup_steps = int(cfg.optimizer.warmup_steps)
     if total_steps <= warmup_steps:
         raise ValueError("Total steps must exceed warmup steps for cosine decay")
@@ -158,6 +159,9 @@ def build_optimizer(cfg: OmegaConf, total_steps: int) -> optax.GradientTransform
         decay_steps=total_steps - warmup_steps,
         end_value=cfg.optimizer.min_learning_rate,
     )
+    exclusions = cfg.optimizer.get("weight_decay_exclusions", [])
+    mask = create_weight_decay_mask(params, exclusions) if exclusions else None
+
     optimizer = optax.chain(
         optax.clip_by_global_norm(cfg.optimizer.gradient_clip_norm),
         optax.adamw(
@@ -166,6 +170,7 @@ def build_optimizer(cfg: OmegaConf, total_steps: int) -> optax.GradientTransform
             b2=0.95,
             eps=1e-8,
             weight_decay=cfg.optimizer.weight_decay,
+            mask=mask,
         ),
     )
     return optimizer
@@ -213,7 +218,7 @@ def main() -> None:
     rng = jax.random.PRNGKey(seed)
     params = model.init(rng, jnp.zeros((batch_size, max_seq_len), dtype=jnp.int32))["params"]
 
-    optimizer = build_optimizer(cfg, total_steps)
+    optimizer = build_optimizer(cfg, total_steps, params)
     opt_state = optimizer.init(params)
     global_step = 0
 

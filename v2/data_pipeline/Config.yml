@@ -21,6 +21,7 @@ wikipedia:
   deduplicate: true
   dedup_shingle_size: 12
   dedup_hash_bits: 21
+  dedup_max_keys: 2000000
   max_files: null
   max_records: null
 

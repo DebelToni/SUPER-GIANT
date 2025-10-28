@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from collections import deque
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -23,6 +24,7 @@ try:
     from huggingface_hub import snapshot_download
 except Exception:
     snapshot_download = None
+from cleaning import normalise_text
 
 # --------------------------------------------------------------------------------------
 # Logging
@@ -112,6 +114,7 @@ class WikipediaStageCfg:
     deduplicate: bool = True
     dedup_shingle_size: int = 12
     dedup_hash_bits: int = 21
+    dedup_max_keys: Optional[int] = None
     max_files: Optional[int] = None
     max_records: Optional[int] = None
 
@@ -328,31 +331,65 @@ def iter_wikipedia(cfg: WikipediaStageCfg) -> Iterable[str]:
     if cfg.max_files:
         files = files[: cfg.max_files]
     emitted = 0
-    for p in files:
-        try:
-            obj = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
-        except Exception:
-            continue
+    norm_opts = SimpleNamespace(**(cfg.normalization or {}))
+    text_keys = (cfg.text_field, "text", "article", "content", "body")
+
+    def _normalise(text: Optional[str]) -> Optional[str]:
+        if not isinstance(text, str):
+            return None
+        cleaned = normalise_text(text, norm_opts) if cfg.normalization else text
+        return cleaned.strip() if cleaned and cleaned.strip() else None
+
+    def _iter_texts(obj: Any) -> Iterator[str]:
         if isinstance(obj, dict):
-            if cfg.text_field in obj and isinstance(obj[cfg.text_field], str):
-                yield obj[cfg.text_field]
-                emitted += 1
-            else:
-                # try common fallbacks
-                for k in ("text", "article", "content", "body"):
-                    if k in obj and isinstance(obj[k], str):
-                        yield obj[k]
-                        emitted += 1
-                        break
+            for key in text_keys:
+                if key in obj and isinstance(obj[key], str):
+                    yield obj[key]
+                    break
         elif isinstance(obj, list):
             for item in obj:
-                if isinstance(item, dict) and cfg.text_field in item and isinstance(item[cfg.text_field], str):
-                    yield item[cfg.text_field]
-                    emitted += 1
-                    if cfg.max_records and emitted >= cfg.max_records:
-                        return
+                if cfg.max_records and emitted >= cfg.max_records:
+                    return
+                yield from _iter_texts(item)
+
+    for p in files:
         if cfg.max_records and emitted >= cfg.max_records:
             return
+        try:
+            with p.open("r", encoding="utf-8", errors="ignore") as handle:
+                try:
+                    obj = json.load(handle)
+                    candidates = _iter_texts(obj)
+                    for raw_text in candidates:
+                        if cfg.max_records and emitted >= cfg.max_records:
+                            return
+                        text = _normalise(raw_text)
+                        if not text:
+                            continue
+                        yield text
+                        emitted += 1
+                except json.JSONDecodeError:
+                    handle.seek(0)
+                    for line in handle:
+                        if cfg.max_records and emitted >= cfg.max_records:
+                            return
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        for raw_text in _iter_texts(obj):
+                            if cfg.max_records and emitted >= cfg.max_records:
+                                return
+                            text = _normalise(raw_text)
+                            if not text:
+                                continue
+                            yield text
+                            emitted += 1
+        except Exception:
+            continue
 
 
 def load_text_iterable(stage_name: str, stages_cfg: Dict[str, Any]) -> Tuple[Iterable[str], int, bool]:
@@ -388,19 +425,30 @@ def tokenize_records(
     dedupe: bool,
     stats: RunningStats,
     workers: Optional[int] = None,
+    dedupe_mask: Optional[int] = None,
+    dedupe_max_keys: Optional[int] = None,
 ) -> Iterator[Dict[str, Any]]:
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else -1
     seen_hashes: set[int] = set() if dedupe else set()
+    seen_queue: Optional[deque[int]] = deque() if dedupe and dedupe_max_keys else None
 
     def iter_candidates() -> Iterator[str]:
         for text in texts:
             stats.records += 1
             if dedupe:
                 h = _maybe_hash(text)
+                if dedupe_mask is not None:
+                    h &= dedupe_mask
                 if h in seen_hashes:
                     stats.duplicates += 1
                     continue
                 seen_hashes.add(h)
+                if seen_queue is not None:
+                    seen_queue.append(h)
+                    if dedupe_max_keys is not None and len(seen_queue) > dedupe_max_keys:
+                        old = seen_queue.popleft()
+                        if old in seen_hashes:
+                            seen_hashes.remove(old)
             yield text
 
     def tokenize_single(text: str) -> Tuple[str, List[int]]:
@@ -478,11 +526,16 @@ def stage_tokenize(
 
     worker_count = stage_cfg_map.get("tokenization_workers")
     if worker_count is None:
-        worker_count = top_cfg.scheduling.tokenization_workers
+        if stage_key == "wikipedia" and top_cfg.scheduling.wiki_num_workers:
+            worker_count = top_cfg.scheduling.wiki_num_workers
+        else:
+            worker_count = top_cfg.scheduling.tokenization_workers
     if worker_count is None or worker_count <= 0:
         worker_count = max(1, os.cpu_count() or 1)
 
     # per-stage knobs
+    dedupe_mask = None
+    dedupe_max_keys = None
     if stage_key == "tiny_stories":
         min_tokens = int(stage_cfg_map.get("min_tokens", 0) or 0)
         dedupe = False
@@ -493,12 +546,17 @@ def stage_tokenize(
         dedupe = bool(stage_cfg_map.get("deduplicate", True))
         batch_size = top_cfg.scheduling.write_batch_size
         arrow_filename = outputs.wikipedia_filename
+        hash_bits_val = stage_cfg_map.get("dedup_hash_bits")
+        dedupe_mask = ((1 << int(hash_bits_val)) - 1) if hash_bits_val and int(hash_bits_val) < 63 else None
+        dedupe_max_keys = stage_cfg_map.get("dedup_max_keys")
     else:
         # Fallbacks
         min_tokens = 0
         dedupe = True
         batch_size = top_cfg.scheduling.write_batch_size
         arrow_filename = f"{stage_name}.arrow"
+        dedupe_mask = None
+        dedupe_max_keys = None
 
     LOGGER.info("Stage '%s' using %d tokenization workers.", stage_name, worker_count)
 
@@ -522,6 +580,8 @@ def stage_tokenize(
                 dedupe,
                 stats,
                 workers=worker_count,
+                dedupe_mask=dedupe_mask,
+                dedupe_max_keys=dedupe_max_keys,
             ),
         ):
             pass
@@ -537,6 +597,8 @@ def stage_tokenize(
                     dedupe,
                     stats,
                     workers=worker_count,
+                    dedupe_mask=dedupe_mask,
+                    dedupe_max_keys=dedupe_max_keys,
                 ),
                 batch_size,
             ):

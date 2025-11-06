@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.11 python3.11-venv python3-pip                       \
         libssl-dev zlib1g-dev libbz2-dev libreadline-dev             \
         libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev        \
-        openssh-server iproute2 procps fuse3 unzip                   \
+        openssh-server iproute2 procps fuse3 unzip gnupg lsb-release \
     && rm -rf /var/lib/apt/lists/*
 
 # Python virtual env
@@ -22,8 +22,10 @@ RUN pip install --upgrade pip && \
         "jax[cuda12]" \
         flax transformers datasets optax omegaconf kagglehub huggingface-hub
 
-# Node.js + latest npm (no corepack; npm comes with Node)
-RUN curl -fsSL https://deb.nodesource.com/setup_current.x | bash - && \
+# Node.js + latest npm (pin major; no corepack)
+ARG NODE_MAJOR=22
+RUN set -eux; \
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     npm install -g npm@latest && \
     node -v && npm -v && \
@@ -51,15 +53,38 @@ RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activ
 # 1) Tailscale
 RUN curl -fsSL https://tailscale.com/install.sh | sh
 
-# 2) rclone (official binary so "rclone mount" works)
-RUN curl -fsSL https://rclone.org/install.sh | bash
+# 2) rclone (pin version + arch-aware; provides rclone mount/bisync)
+ARG RCLONE_VERSION=1.67.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) rarch="amd64" ;; \
+      arm64) rarch="arm64" ;; \
+      *) echo "Unsupported arch: $arch"; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/rclone.zip "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-${rarch}.zip"; \
+    unzip -q /tmp/rclone.zip -d /tmp; \
+    install -m 0755 "/tmp/rclone-v${RCLONE_VERSION}-linux-${rarch}/rclone" /usr/local/bin/; \
+    rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCLONE_VERSION}-linux-${rarch}"; \
+    rclone version
 
-# 3) s5cmd (fast parallel S3 copies)
-RUN S5VER="2.4.0" && \
+# 3) s5cmd (fast parallel S3 copies) — pin to existing release + arch-aware
+ARG S5VER=2.3.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64)  s5arch="Linux-64bit" ;; \
+      arm64)  s5arch="Linux-arm64" ;; \
+      i386)   s5arch="Linux-32bit" ;; \
+      ppc64el|ppc64le) s5arch="Linux-ppc64le" ;; \
+      armhf|armv7l)    s5arch="Linux-armv6" ;; \
+      *) echo "Unsupported arch: $arch"; exit 1 ;; \
+    esac; \
     curl -fsSL -o /tmp/s5cmd.tgz \
-      "https://github.com/peak/s5cmd/releases/download/v${S5VER}/s5cmd_${S5VER}_Linux-64bit.tar.gz" && \
-    tar -xzf /tmp/s5cmd.tgz -C /usr/local/bin s5cmd && \
-    rm -f /tmp/s5cmd.tgz
+      "https://github.com/peak/s5cmd/releases/download/v${S5VER}/s5cmd_${S5VER}_${s5arch}.tar.gz"; \
+    tar -xzf /tmp/s5cmd.tgz -C /usr/local/bin s5cmd; \
+    rm -f /tmp/s5cmd.tgz; \
+    s5cmd --version
 
 # ── Runtime env (filled via pod console) ──────────────────────────────────────
 ENV TS_AUTHKEY="" \
@@ -176,4 +201,3 @@ WORKDIR /workspace/app
 RUN mkdir -p /workspace/app
 
 CMD ["/usr/local/bin/entrypoint.sh"]
-

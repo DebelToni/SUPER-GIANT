@@ -18,7 +18,7 @@ user_token: "user"
 ai_token: "assistant"
 
 # for these make sure they match the neo tokenizer config, because saw it uses mask for pads and so on.
-write_loss_mask: true  
+write_loss_mask: true
 write_role_ids: true
 
 # Generation:

@@ -4,20 +4,28 @@
 
 import argparse, os, random, glob, json
 from pathlib import Path
+
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
+from omegaconf import OmegaConf
 
-def find_arrow(path_like: str) -> str:
-    p = Path(path_like)
-    if p.is_dir():
-        # pick first *.arrow in the directory
-        cands = sorted(glob.glob(str(p / "*.arrow")))
-        if not cands:
-            raise FileNotFoundError(f"No .arrow files in directory: {p}")
-        return cands[0]
-    if p.is_file():
-        return str(p)
-    raise FileNotFoundError(f"Path not found: {p}")
+
+def find_arrow(path_like: str, base: Path | None) -> str:
+    path = Path(path_like)
+    candidates = []
+    if base is not None and not path.is_absolute():
+        candidates.append(base / path)
+    candidates.append(path)
+
+    for candidate in candidates:
+        if candidate.is_dir():
+            options = sorted(glob.glob(str(candidate / "*.arrow")))
+            if options:
+                return options[0]
+        if candidate.is_file():
+            return str(candidate)
+
+    raise FileNotFoundError(f"Path not found: {path}")
 
 def read_arrow_table(path: str) -> pa.Table:
     with pa_ipc.open_file(open(path, "rb")) as reader:
@@ -40,8 +48,16 @@ def main():
     if args.seed is not None:
         random.seed(args.seed)
 
-    q_path = find_arrow(args.questions)
-    a_path = find_arrow(args.answers)
+    project_root = Path(__file__).resolve().parent.parent
+    try:
+        global_cfg = OmegaConf.load(project_root / "Global_Config.yml")
+        base_root_str = global_cfg.paths.get("data_root", "")
+        base_root = Path(base_root_str) if base_root_str else None
+    except Exception:
+        base_root = None
+
+    q_path = find_arrow(args.questions, base_root)
+    a_path = find_arrow(args.answers, base_root)
 
     q_tbl = read_arrow_table(q_path)
     a_tbl = read_arrow_table(a_path)
@@ -114,4 +130,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

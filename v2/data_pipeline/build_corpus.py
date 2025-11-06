@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import bz2
+import gzip
 import json
 import logging
 import os
@@ -11,8 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from collections import deque
-
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pyarrow as pa
@@ -51,6 +51,7 @@ class TokenizerCfg:
 
 @dataclass
 class PathsCfg:
+    data_root: str = ""
     processed_data_root: str = "dataset_artifacts"
     dataloader_state_root: str = "checkpoints/dataloader_state"
     logs_root: str = "logs"
@@ -109,6 +110,7 @@ class WikipediaStageCfg:
     text_field: str = "text"
     context_length: int = 1024
     min_tokens: int = 0
+    warmup_fraction: float = 1.0
     normalization: Dict[str, bool] = None
     pads_to_context: bool = True
     deduplicate: bool = True
@@ -138,6 +140,74 @@ class TopConfig:
 
 def _as_path(p: str | Path) -> Path:
     return p if isinstance(p, Path) else Path(p)
+
+
+def _resolve_path(base: Optional[str], value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    path = Path(value)
+    if base and not path.is_absolute():
+        return str(Path(base) / path)
+    return str(path)
+
+
+def _open_text_stream(path: Path):
+    """Open *path* for streaming text reads, handling common compressions."""
+    suffix = path.suffix.lower()
+    if suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8", errors="ignore")
+    if suffix == ".bz2":
+        return bz2.open(path, "rt", encoding="utf-8", errors="ignore")
+    return path.open("r", encoding="utf-8", errors="ignore")
+
+
+def _stream_json_records(path: Path, chunk_size: int = 65536) -> Iterator[Any]:
+    """Yield JSON objects from *path* without loading the full file into RAM."""
+    decoder = json.JSONDecoder()
+    buffer = ""
+    in_array = False
+
+    with _open_text_stream(path) as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), ""):
+            if not chunk:
+                break
+            buffer += chunk
+            while True:
+                buffer = buffer.lstrip()
+                if not buffer:
+                    break
+                ch = buffer[0]
+                if ch == "[":
+                    in_array = True
+                    buffer = buffer[1:]
+                    continue
+                if ch == "]":
+                    in_array = False
+                    buffer = buffer[1:]
+                    continue
+                if ch == "," and in_array:
+                    buffer = buffer[1:]
+                    continue
+                try:
+                    obj, idx = decoder.raw_decode(buffer)
+                except json.JSONDecodeError:
+                    # Need more data: break inner loop and read another chunk
+                    break
+                yield obj
+                buffer = buffer[idx:]
+
+    # Flush any trailing buffered object (handles files that end without newline)
+    while buffer:
+        buffer = buffer.lstrip()
+        if not buffer:
+            break
+        ch = buffer[0]
+        if ch in ",]":
+            buffer = buffer[1:]
+            continue
+        obj, idx = decoder.raw_decode(buffer)
+        yield obj
+        buffer = buffer[idx:]
 
 
 def _iter_chunks(iterable: Iterable[Any], n: int) -> Iterator[List[Any]]:
@@ -323,13 +393,18 @@ def iter_tiny_stories(cfg: TinyStoriesStageCfg) -> Iterable[str]:
 
 
 def iter_wikipedia(cfg: WikipediaStageCfg) -> Iterable[str]:
-    """Walk json files and yield the 'text' field (or fallbacks)."""
+    """Stream Wikipedia JSON/JSONL dumps without loading full files into RAM."""
     root = _as_path(cfg.raw_root)
     if not root.exists():
         raise FileNotFoundError(f"wikipedia.raw_root not found: {root}")
+
     files = sorted(root.rglob(cfg.file_glob))
     if cfg.max_files:
         files = files[: cfg.max_files]
+    if cfg.warmup_fraction is not None and 0 < cfg.warmup_fraction < 1.0 and files:
+        limit = max(1, int(len(files) * cfg.warmup_fraction))
+        files = files[:limit]
+
     emitted = 0
     norm_opts = SimpleNamespace(**(cfg.normalization or {}))
     text_keys = (cfg.text_field, "text", "article", "content", "body")
@@ -340,55 +415,34 @@ def iter_wikipedia(cfg: WikipediaStageCfg) -> Iterable[str]:
         cleaned = normalise_text(text, norm_opts) if cfg.normalization else text
         return cleaned.strip() if cleaned and cleaned.strip() else None
 
-    def _iter_texts(obj: Any) -> Iterator[str]:
+    def _yield_text_fields(obj: Any) -> Iterator[str]:
         if isinstance(obj, dict):
             for key in text_keys:
-                if key in obj and isinstance(obj[key], str):
-                    yield obj[key]
+                value = obj.get(key)
+                if isinstance(value, str):
+                    yield value
                     break
         elif isinstance(obj, list):
             for item in obj:
-                if cfg.max_records and emitted >= cfg.max_records:
-                    return
-                yield from _iter_texts(item)
+                yield from _yield_text_fields(item)
 
-    for p in files:
+    for path in files:
         if cfg.max_records and emitted >= cfg.max_records:
             return
         try:
-            with p.open("r", encoding="utf-8", errors="ignore") as handle:
-                try:
-                    obj = json.load(handle)
-                    candidates = _iter_texts(obj)
-                    for raw_text in candidates:
-                        if cfg.max_records and emitted >= cfg.max_records:
-                            return
-                        text = _normalise(raw_text)
-                        if not text:
-                            continue
-                        yield text
-                        emitted += 1
-                except json.JSONDecodeError:
-                    handle.seek(0)
-                    for line in handle:
-                        if cfg.max_records and emitted >= cfg.max_records:
-                            return
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        for raw_text in _iter_texts(obj):
-                            if cfg.max_records and emitted >= cfg.max_records:
-                                return
-                            text = _normalise(raw_text)
-                            if not text:
-                                continue
-                            yield text
-                            emitted += 1
-        except Exception:
+            for record in _stream_json_records(path):
+                if cfg.max_records and emitted >= cfg.max_records:
+                    return
+                for raw_text in _yield_text_fields(record):
+                    if cfg.max_records and emitted >= cfg.max_records:
+                        return
+                    text = _normalise(raw_text)
+                    if not text:
+                        continue
+                    emitted += 1
+                    yield text
+        except Exception as exc:
+            LOGGER.warning("Failed to stream %s: %s", path, exc)
             continue
 
 
@@ -451,50 +505,44 @@ def tokenize_records(
                             seen_hashes.remove(old)
             yield text
 
-    def tokenize_single(text: str) -> Tuple[str, List[int]]:
-        enc = tokenizer(
-            text,
+    def prepare_batch(batch: List[str]) -> List[np.ndarray]:
+        encoded = tokenizer(
+            batch,
             add_special_tokens=True,
             padding="max_length" if max_tokens and pads_to_context else False,
             truncation=True if max_tokens else False,
             max_length=max_tokens if max_tokens else None,
-        )
-        input_ids: List[int] = enc["input_ids"]
-        if not pads_to_context and pad_id != -1:
-            input_ids = _trim_padding(input_ids, pad_id)
-        return text, input_ids
+            return_attention_mask=False,
+        )["input_ids"]
 
-    def emit(text: str, input_ids: List[int]) -> Optional[Dict[str, Any]]:
-        token_count = len(input_ids)
-        stats.tokens += token_count
-        if token_count < max(min_tokens, 0):
-            stats.discarded += 1
-            return None
-        return {
-            "text": text,
-            "input_ids": np.array(input_ids, dtype=np.int32),
-            "length": token_count,
-        }
+        outputs: List[np.ndarray] = []
+        for ids in encoded:
+            if not pads_to_context and pad_id != -1:
+                ids = _trim_padding(ids, pad_id)
+            arr = np.asarray(ids, dtype=np.int32)
+            outputs.append(arr)
+        return outputs
 
-    worker_count = workers if workers and workers > 1 else 1
-    if worker_count == 1:
-        for text in iter_candidates():
-            text_val, input_ids = tokenize_single(text)
-            row = emit(text_val, input_ids)
-            if row is not None:
-                yield row
-        return
+    batch_size = max(1, workers or 1)
+    buffer: List[str] = []
+    for text in iter_candidates():
+        buffer.append(text)
+        if len(buffer) >= batch_size:
+            for arr in prepare_batch(buffer):
+                stats.tokens += int(arr.shape[0])
+                if arr.shape[0] < max(min_tokens, 0):
+                    stats.discarded += 1
+                    continue
+                yield {"input_ids": arr, "length": int(arr.shape[0])}
+            buffer.clear()
 
-    chunk_size = max(1, worker_count * 2)
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        for text_val, input_ids in executor.map(
-            tokenize_single,
-            iter_candidates(),
-            chunksize=chunk_size,
-        ):
-            row = emit(text_val, input_ids)
-            if row is not None:
-                yield row
+    if buffer:
+        for arr in prepare_batch(buffer):
+            stats.tokens += int(arr.shape[0])
+            if arr.shape[0] < max(min_tokens, 0):
+                stats.discarded += 1
+                continue
+            yield {"input_ids": arr, "length": int(arr.shape[0])}
 
 
 # --------------------------------------------------------------------------------------
@@ -504,7 +552,6 @@ def tokenize_records(
 def _arrow_schema() -> pa.Schema:
     return pa.schema(
         [
-            pa.field("text", pa.string()),
             pa.field("input_ids", pa.list_(pa.int32())),
             pa.field("length", pa.int32()),
         ]
@@ -543,12 +590,10 @@ def stage_tokenize(
         arrow_filename = outputs.tinystories_filename
     elif stage_key == "wikipedia":
         min_tokens = int(stage_cfg_map.get("min_tokens", 0) or 0)
-        dedupe = bool(stage_cfg_map.get("deduplicate", True))
+        # Temporarily disable deduplication to minimise memory footprint during streaming.
+        dedupe = False
         batch_size = top_cfg.scheduling.write_batch_size
         arrow_filename = outputs.wikipedia_filename
-        hash_bits_val = stage_cfg_map.get("dedup_hash_bits")
-        dedupe_mask = ((1 << int(hash_bits_val)) - 1) if hash_bits_val and int(hash_bits_val) < 63 else None
-        dedupe_max_keys = stage_cfg_map.get("dedup_max_keys")
     else:
         # Fallbacks
         min_tokens = 0
@@ -703,6 +748,19 @@ def load_combined_config(user_cfg_path: Optional[str]) -> TopConfig:
         stages["tiny_stories"] = dict(corpus_cfg["tiny_stories"])
     if "wikipedia" in corpus_cfg:
         stages["wikipedia"] = dict(corpus_cfg["wikipedia"])
+
+    base_prefix = paths.data_root or ""
+    if base_prefix:
+        base_prefix = str(Path(base_prefix))
+        paths.data_root = base_prefix
+    paths.processed_data_root = _resolve_path(base_prefix, paths.processed_data_root) or paths.processed_data_root
+    paths.dataloader_state_root = _resolve_path(base_prefix, paths.dataloader_state_root) or paths.dataloader_state_root
+    if paths.logs_root:
+        paths.logs_root = _resolve_path(base_prefix, paths.logs_root)
+    outputs.processed_root = _resolve_path(base_prefix, outputs.processed_root) or outputs.processed_root
+    if "wikipedia" in stages:
+        raw_root = stages["wikipedia"].get("raw_root")
+        stages["wikipedia"]["raw_root"] = _resolve_path(base_prefix, raw_root)
 
     # If nothing provided, default to TinyStories
     if not stages:

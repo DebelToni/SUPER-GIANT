@@ -52,7 +52,41 @@ def load_configs() -> OmegaConf:
     project_root = model_dir.parent
     global_cfg = OmegaConf.load(project_root / "Global_Config.yml")
     local_cfg = OmegaConf.load(model_dir / "Config.yml")
-    return OmegaConf.merge(global_cfg, local_cfg)
+    cfg = OmegaConf.merge(global_cfg, local_cfg)
+
+    base_prefix_str = cfg.paths.get("data_root", "") if "paths" in cfg else ""
+    base_prefix = Path(base_prefix_str) if base_prefix_str else None
+
+    def resolve_path(value: str | None) -> str | None:
+        if value is None:
+            return None
+        path = Path(str(value))
+        if path.is_absolute() or base_prefix is None:
+            return str(path)
+        return str(base_prefix / path)
+
+    if base_prefix is not None:
+        cfg.paths.data_root = str(base_prefix)
+    else:
+        cfg.paths.data_root = str(project_root)
+
+    for key in ("processed_data_root", "dataloader_state_root", "logs_root"):
+        if key in cfg.paths and cfg.paths[key] is not None:
+            resolved = resolve_path(cfg.paths[key])
+            if resolved is not None:
+                cfg.paths[key] = resolved
+
+    if "answers_arrow" in cfg.qa_finetune and cfg.qa_finetune.answers_arrow is not None:
+        resolved = resolve_path(cfg.qa_finetune.answers_arrow)
+        if resolved is not None:
+            cfg.qa_finetune.answers_arrow = resolved
+
+    if "checkpoint_dir" in cfg.qa_finetune and cfg.qa_finetune.checkpoint_dir is not None:
+        resolved = resolve_path(cfg.qa_finetune.checkpoint_dir)
+        if resolved is not None:
+            cfg.qa_finetune.checkpoint_dir = resolved
+
+    return cfg
 
 
 def load_tokenizer(cfg: OmegaConf):
@@ -197,7 +231,11 @@ def main() -> None:
     stage_cfgs = parse_stage_configs(cfg)
     validate_milestones(stage_cfgs, cfg)
 
+    base_root = Path(cfg.paths.data_root)
+
     dataset_root = Path(cfg.paths.processed_data_root)
+    if not dataset_root.is_absolute():
+        dataset_root = (base_root / dataset_root).resolve()
     batch_size = int(cfg.training.batch_size)
     seed = int(cfg.training.seed)
 
@@ -222,17 +260,28 @@ def main() -> None:
     opt_state = optimizer.init(params)
     global_step = 0
 
-    checkpoint_dir = args.checkpoint_dir
+    checkpoint_path = Path(args.checkpoint_dir)
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = (base_root / checkpoint_path).resolve()
+    checkpoint_dir = str(checkpoint_path)
     checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
 
+    resume_request = args.resume
+    if resume_request and resume_request != "latest":
+        resume_path = Path(resume_request)
+        if not resume_path.is_absolute():
+            resume_request = str((base_root / resume_path).resolve())
+    else:
+        resume_request = args.resume
+
     # Resume if requested
-    if args.resume:
-        if args.resume == "latest":
+    if resume_request:
+        if resume_request == "latest":
             ckpt_path = latest_ckpt(checkpoint_dir)
             if ckpt_path is None:
                 raise FileNotFoundError("No checkpoints available to resume from.")
         else:
-            ckpt_path = args.resume
+            ckpt_path = resume_request
         params, global_step = load_ckpt(ckpt_path)
         opt_state = optimizer.init(params)
         print(f"▶ Resumed parameters from {ckpt_path} at step {global_step}")

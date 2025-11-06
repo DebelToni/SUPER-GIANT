@@ -1,3 +1,4 @@
+
 # CUDA 12.9 + cuDNN + Python 3.11 + JAX stack + SSH + Tailscale + rclone + s5cmd for S3 I/O
 FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
@@ -53,19 +54,18 @@ RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activ
 # 1) Tailscale
 RUN curl -fsSL https://tailscale.com/install.sh | sh
 
-# 2) rclone (pin version + arch-aware; provides rclone mount/bisync)
-ARG RCLONE_VERSION=1.67.0
+# 2) rclone (install via official .deb; arch-aware)
+#    This avoids unzip/path mismatches and is very reliable in CI.
+ARG RCLONE_CHANNEL=current
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) rarch="amd64" ;; \
-      arm64) rarch="arm64" ;; \
-      *) echo "Unsupported arch: $arch"; exit 1 ;; \
+      amd64|arm64) pkgarch="$arch" ;; \
+      *) echo "Unsupported arch for rclone .deb: $arch"; exit 1 ;; \
     esac; \
-    curl -fsSLo /tmp/rclone.zip "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-${rarch}.zip"; \
-    unzip -q /tmp/rclone.zip -d /tmp; \
-    install -m 0755 "/tmp/rclone-v${RCLONE_VERSION}-linux-${rarch}/rclone" /usr/local/bin/; \
-    rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCLONE_VERSION}-linux-${rarch}"; \
+    curl -fsSLo /tmp/rclone.deb "https://downloads.rclone.org/rclone-${RCLONE_CHANNEL}-linux-${pkgarch}.deb"; \
+    dpkg -i /tmp/rclone.deb; \
+    rm -f /tmp/rclone.deb; \
     rclone version
 
 # 3) s5cmd (fast parallel S3 copies) — pin to existing release + arch-aware
@@ -78,7 +78,7 @@ RUN set -eux; \
       i386)   s5arch="Linux-32bit" ;; \
       ppc64el|ppc64le) s5arch="Linux-ppc64le" ;; \
       armhf|armv7l)    s5arch="Linux-armv6" ;; \
-      *) echo "Unsupported arch: $arch"; exit 1 ;; \
+      *) echo "Unsupported arch for s5cmd: $arch"; exit 1 ;; \
     esac; \
     curl -fsSL -o /tmp/s5cmd.tgz \
       "https://github.com/peak/s5cmd/releases/download/v${S5VER}/s5cmd_${S5VER}_${s5arch}.tar.gz"; \

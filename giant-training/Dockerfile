@@ -62,7 +62,7 @@ RUN S5VER="2.4.0" && \
 
 # ── Runtime env (filled via pod console) ──────────────────────────────────────
 ENV TS_AUTHKEY="" \
-    S3_ENDPOINT="http://mac.dzo-opah.ts.net:9000" \
+    S3_ENDPOINT="" \
     S3_BUCKET="ml-home" \
     S3_ACCESS_KEY_ID="" \
     S3_SECRET_ACCESS_KEY="" \

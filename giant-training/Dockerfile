@@ -1,7 +1,10 @@
-
 # CUDA 12.9 + cuDNN + Python 3.11 + JAX stack + SSH + Tailscale + rclone + s5cmd for S3 I/O
-FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
+# Force amd64 at the base image level.
+FROM --platform=linux/amd64 nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Guard: bail out early if someone tries to build for a non-amd64 platform.
+RUN dpkg --print-architecture | grep -qx amd64 || (echo "This image targets amd64/x86_64 only." && exit 1)
 
 # Base packages + SSH daemon + fuse3 (for rclone mount)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -54,33 +57,23 @@ RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activ
 # 1) Tailscale
 RUN curl -fsSL https://tailscale.com/install.sh | sh
 
-# 2) rclone (install via official .deb; arch-aware)
-#    This avoids unzip/path mismatches and is very reliable in CI.
-ARG RCLONE_CHANNEL=current
+# 2) rclone (amd64-only + retries)
+ARG RCLONE_VERSION=1.67.0
 RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-      amd64|arm64) pkgarch="$arch" ;; \
-      *) echo "Unsupported arch for rclone .deb: $arch"; exit 1 ;; \
-    esac; \
-    curl -fsSLo /tmp/rclone.deb "https://downloads.rclone.org/rclone-${RCLONE_CHANNEL}-linux-${pkgarch}.deb"; \
-    dpkg -i /tmp/rclone.deb; \
-    rm -f /tmp/rclone.deb; \
+    rarch="amd64"; \
+    base="https://downloads.rclone.org"; \
+    url="${base}/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-${rarch}.zip"; \
+    curl -fSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/rclone.zip "$url"; \
+    unzip -q /tmp/rclone.zip -d /tmp; \
+    install -m 0755 "/tmp/rclone-v${RCLONE_VERSION}-linux-${rarch}/rclone" /usr/local/bin/; \
+    rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCLONE_VERSION}-linux-${rarch}"; \
     rclone version
 
-# 3) s5cmd (fast parallel S3 copies) — pin to existing release + arch-aware
+# 3) s5cmd (amd64-only + retries)
 ARG S5VER=2.3.0
 RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-      amd64)  s5arch="Linux-64bit" ;; \
-      arm64)  s5arch="Linux-arm64" ;; \
-      i386)   s5arch="Linux-32bit" ;; \
-      ppc64el|ppc64le) s5arch="Linux-ppc64le" ;; \
-      armhf|armv7l)    s5arch="Linux-armv6" ;; \
-      *) echo "Unsupported arch for s5cmd: $arch"; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /tmp/s5cmd.tgz \
+    s5arch="Linux-64bit"; \
+    curl -fSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/s5cmd.tgz \
       "https://github.com/peak/s5cmd/releases/download/v${S5VER}/s5cmd_${S5VER}_${s5arch}.tar.gz"; \
     tar -xzf /tmp/s5cmd.tgz -C /usr/local/bin s5cmd; \
     rm -f /tmp/s5cmd.tgz; \

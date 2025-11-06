@@ -3,7 +3,7 @@ name: Build & push giant-training image
 on:
   push:
     paths:
-      - 'giant-training/**'
+      - "giant-training/**"
 
 permissions:
   contents: read
@@ -31,9 +31,9 @@ jobs:
           context: ./giant-training
           file: ./giant-training/Dockerfile
           push: true
-          no-cache: true
           pull: true
+          no-cache: true
+          platforms: linux/amd64 # ← Force amd64 only (no ARM images in the manifest)
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:${{ github.sha }}
-

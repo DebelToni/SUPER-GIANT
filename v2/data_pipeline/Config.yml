@@ -8,17 +8,18 @@ tiny_stories:
   min_tokens: 128
 
 wikipedia:
-  raw_root: "/Volumes/SSD/enwiki20201020"
+  raw_root: "enwiki20201020"
   file_glob: "**/*.json"
   text_field: "text"
   context_length: 1024
   min_tokens: 128
+  warmup_fraction: 1.0
   normalization:
     nfkc: true
     collapse_whitespace: true
     strip_markup: true
   pads_to_context: true
-  deduplicate: true
+  deduplicate: false
   dedup_shingle_size: 12
   dedup_hash_bits: 21
   dedup_max_keys: 2000000
@@ -26,7 +27,7 @@ wikipedia:
   max_records: null
 
 outputs:
-  processed_root: "dataset_artifacts/base_corpus"
+  processed_root: "dataset_artifacts"
   tinystories_filename: "tinystories.arrow"
   wikipedia_filename: "wikipedia.arrow"
   merged_filename: "merged_training.arrow"
@@ -34,7 +35,7 @@ outputs:
 
 scheduling:
   validation_fraction: 0.01
-  seed: 42
+  seed: 4212
   shuffle_buffer_size: 65536
-  wiki_num_workers: 8
+  wiki_num_workers: 64
   write_batch_size: 1024

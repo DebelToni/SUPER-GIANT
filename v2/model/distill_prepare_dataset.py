@@ -21,6 +21,18 @@ CFG = OmegaConf.merge(
 TOKENIZER_CFG = CFG.tokenizer
 QA_CFG = CFG.qa_finetune
 
+BASE_PREFIX_STR = CFG.paths.get("data_root", "") if "paths" in CFG else ""
+BASE_PREFIX = Path(BASE_PREFIX_STR) if BASE_PREFIX_STR else None
+
+
+def _resolve_path(value: str | None) -> Path:
+    if value is None:
+        raise ValueError("Path value cannot be None")
+    path = Path(value)
+    if path.is_absolute() or BASE_PREFIX is None:
+        return path
+    return BASE_PREFIX / path
+
 @dataclass
 class Batch:
     input: np.ndarray         # (B, T) int32
@@ -35,16 +47,17 @@ def _load_tokenizer() -> AutoTokenizer:
     if tok_cfg.use_custom:
         path = Path(tok_cfg.custom_path)
         if not path.is_absolute():
-            path = (PROJECT_ROOT / tok_cfg.custom_path).resolve()
+            if BASE_PREFIX is not None:
+                path = BASE_PREFIX / path
+            else:
+                path = PROJECT_ROOT / tok_cfg.custom_path
         return AutoTokenizer.from_pretrained(str(path), use_fast=True)
     return AutoTokenizer.from_pretrained(tok_cfg.name, use_fast=True, cache_dir=tok_cfg.cache_dir)
 
 
 def _answers_path() -> Path:
     raw = getattr(QA_CFG, "answers_arrow", "teacher_out/answers.arrow")
-    path = Path(raw)
-    if not path.is_absolute():
-        path = (PROJECT_ROOT / raw).resolve()
+    path = _resolve_path(raw)
     if not path.exists():
         raise FileNotFoundError(f"Teacher answers Arrow not found: {path}")
     return path

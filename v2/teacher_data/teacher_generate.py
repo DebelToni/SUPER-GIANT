@@ -44,11 +44,15 @@ def _resolve_student_tokenizer(cfg, teacher_cfg) -> Tuple[str, str | None]:
     override_dir = getattr(teacher_cfg, "student_tokenizer_dir", None)
     override_name = getattr(teacher_cfg, "student_tokenizer_name", None)
     tok_cfg = cfg.tokenizer
+    base_prefix = Path(cfg.paths.get("data_root", "")) if "paths" in cfg else None
 
     if override_dir:
         dir_path = Path(override_dir)
         if not dir_path.is_absolute():
-            dir_path = (PROJECT_ROOT / override_dir).resolve()
+            if base_prefix and base_prefix.exists():
+                dir_path = (base_prefix / dir_path).resolve()
+            else:
+                dir_path = (PROJECT_ROOT / override_dir).resolve()
         if dir_path.exists():
             return str(dir_path), None
         return str(dir_path), getattr(tok_cfg, "cache_dir", None)
@@ -59,12 +63,24 @@ def _resolve_student_tokenizer(cfg, teacher_cfg) -> Tuple[str, str | None]:
     if tok_cfg.use_custom:
         custom_path = Path(tok_cfg.custom_path)
         if not custom_path.is_absolute():
-            custom_path = (PROJECT_ROOT / tok_cfg.custom_path).resolve()
+            if base_prefix and base_prefix.exists():
+                custom_path = (base_prefix / custom_path).resolve()
+            else:
+                custom_path = (PROJECT_ROOT / tok_cfg.custom_path).resolve()
         if custom_path.exists():
             return str(custom_path), None
         return tok_cfg.custom_path, getattr(tok_cfg, "cache_dir", None)
 
     return tok_cfg.name, getattr(tok_cfg, "cache_dir", None)
+
+
+def _resolve_output_path(base_prefix: Path | None, value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    if base_prefix is not None:
+        return (base_prefix / path).resolve()
+    return (PROJECT_ROOT / path).resolve()
 
 
 # -----------------------
@@ -428,11 +444,16 @@ def main():
     teacher_cfg = cfg.teacher
     outputs_cfg = cfg.outputs
 
-    out_dir = (PROJECT_ROOT / outputs_cfg.out_dir).resolve()
+    base_prefix_str = cfg.paths.get("data_root", "") if "paths" in cfg else ""
+    base_prefix = Path(base_prefix_str) if base_prefix_str else None
+    if base_prefix is not None and not base_prefix.is_absolute():
+        base_prefix = (PROJECT_ROOT / base_prefix).resolve()
+
+    out_dir = _resolve_output_path(base_prefix, outputs_cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    q_path = (PROJECT_ROOT / outputs_cfg.questions_arrow).resolve()
-    a_path = (PROJECT_ROOT / outputs_cfg.answers_arrow).resolve()
+    q_path = _resolve_output_path(base_prefix, outputs_cfg.questions_arrow)
+    a_path = _resolve_output_path(base_prefix, outputs_cfg.answers_arrow)
 
     # 0) Read existing (for stacking)
     old_q = read_arrow_if_exists(q_path, Q_SCHEMA)

@@ -40,6 +40,38 @@ MODEL_CFG = CFG.model
 QA_CFG = CFG.qa_finetune
 TOKENIZER_CFG = CFG.tokenizer
 
+BASE_PREFIX_STR = CFG.paths.get("data_root", "") if "paths" in CFG else ""
+BASE_PREFIX = Path(BASE_PREFIX_STR) if BASE_PREFIX_STR else None
+
+
+def _resolve_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    path = Path(str(value))
+    if path.is_absolute() or BASE_PREFIX is None:
+        return str(path)
+    return str(BASE_PREFIX / path)
+
+
+if BASE_PREFIX is not None:
+    CFG.paths.data_root = str(BASE_PREFIX)
+else:
+    CFG.paths.data_root = str(PROJECT_ROOT)
+
+for key in ("processed_data_root", "dataloader_state_root", "logs_root"):
+    if key in CFG.paths and CFG.paths[key] is not None:
+        resolved = _resolve_path(CFG.paths[key])
+        if resolved is not None:
+            CFG.paths[key] = resolved
+
+answers_path_resolved = _resolve_path(QA_CFG.get("answers_arrow"))
+if answers_path_resolved is not None:
+    QA_CFG.answers_arrow = answers_path_resolved
+
+checkpoint_dir_resolved = _resolve_path(QA_CFG.get("checkpoint_dir"))
+if checkpoint_dir_resolved is not None:
+    QA_CFG.checkpoint_dir = checkpoint_dir_resolved
+
 DEFAULT_QA_CKPT_DIR = QA_CFG.get("checkpoint_dir", "checkpoints_qa")
 
 jax_config.update("jax_default_matmul_precision", "tensorfloat32")
@@ -88,7 +120,12 @@ def _maybe_load_initial_params(path: Optional[str], params):
 def main() -> None:
     args = parse_args()
 
-    checkpoint_dir = Path(args.checkpoint_dir)
+    base_root = Path(CFG.paths.data_root)
+
+    checkpoint_dir_path = Path(args.checkpoint_dir)
+    if not checkpoint_dir_path.is_absolute():
+        checkpoint_dir_path = (base_root / checkpoint_dir_path).resolve()
+    checkpoint_dir = checkpoint_dir_path
     checkpoint_every = int(args.checkpoint_every or QA_CFG.checkpoint_every)
     resume_request = args.resume
 
@@ -138,8 +175,15 @@ def main() -> None:
     dummy = jnp.zeros((batch_size, context_length), dtype=jnp.int32)
     params = model.init(rng, dummy, deterministic=True)["params"]
 
-    if args.init_checkpoint and not resume_request:
-        params, _ = _maybe_load_initial_params(args.init_checkpoint, params)
+    init_checkpoint_arg = args.init_checkpoint
+    if init_checkpoint_arg and resume_request != "latest":
+        init_checkpoint_path = Path(init_checkpoint_arg)
+        if not init_checkpoint_path.is_absolute():
+            init_checkpoint_path = (base_root / init_checkpoint_path).resolve()
+        init_checkpoint_arg = str(init_checkpoint_path)
+
+    if init_checkpoint_arg and not resume_request:
+        params, _ = _maybe_load_initial_params(init_checkpoint_arg, params)
 
     steps_per_epoch = train_batches
     total_steps = max(1, steps_per_epoch * int(QA_CFG.num_epochs))
@@ -173,6 +217,11 @@ def main() -> None:
     )
     opt_state = optimizer.init(params)
     global_step = 0
+
+    if resume_request and resume_request != "latest":
+        resume_path = Path(resume_request)
+        if not resume_path.is_absolute():
+            resume_request = str((base_root / resume_path).resolve())
 
     if resume_request:
         if resume_request == "latest":

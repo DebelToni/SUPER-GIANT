@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.11 python3.11-venv python3-pip                       \
         libssl-dev zlib1g-dev libbz2-dev libreadline-dev             \
         libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev        \
-        openssh-server iproute2 procps fuse3                         \
+        openssh-server iproute2 procps fuse3 unzip                   \
     && rm -rf /var/lib/apt/lists/*
 
 # Python virtual env

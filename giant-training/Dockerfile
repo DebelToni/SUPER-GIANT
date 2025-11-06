@@ -22,11 +22,12 @@ RUN pip install --upgrade pip && \
         "jax[cuda12]" \
         flax transformers datasets optax omegaconf kagglehub huggingface-hub
 
-# Node.js (as in your original)
+# Node.js + latest npm (no corepack; npm comes with Node)
 RUN curl -fsSL https://deb.nodesource.com/setup_current.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
+    npm install -g npm@latest && \
+    node -v && npm -v && \
     rm -rf /var/lib/apt/lists/*
-RUN corepack enable && corepack prepare npm@latest --activate
 
 # ── SSH server: password-only root login (your original setup) ────────────────
 RUN mkdir -p /var/run/sshd && \

@@ -57,17 +57,17 @@ RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activ
 # 1) Tailscale
 RUN curl -fsSL https://tailscale.com/install.sh | sh
 
-# 2) rclone (amd64-only + retries)
-ARG RCLONE_VERSION=1.67.0
+# 2) rclone (amd64-only + retries)  -- DO NOT use an ARG starting with RCLONE_
+ARG RCVER=1.67.0
 RUN set -eux; \
-    rarch="amd64"; \
+    arch="amd64"; \
     base="https://downloads.rclone.org"; \
-    url="${base}/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-${rarch}.zip"; \
+    url="${base}/v${RCVER}/rclone-v${RCVER}-linux-${arch}.zip"; \
     curl -fSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/rclone.zip "$url"; \
     unzip -q /tmp/rclone.zip -d /tmp; \
-    install -m 0755 "/tmp/rclone-v${RCLONE_VERSION}-linux-${rarch}/rclone" /usr/local/bin/; \
-    rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCLONE_VERSION}-linux-${rarch}"; \
-    rclone version
+    install -m 0755 "/tmp/rclone-v${RCVER}-linux-${arch}/rclone" /usr/local/bin/rclone; \
+    rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCVER}-linux-${arch}"; \
+    env -u RCLONE_VERSION rclone --version
 
 # 3) s5cmd (amd64-only + retries)
 ARG S5VER=2.3.0

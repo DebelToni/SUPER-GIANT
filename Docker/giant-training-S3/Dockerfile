@@ -1,13 +1,15 @@
 # ---- build s5cmd (static, CGO disabled) --------------------------------------
-FROM golang:1.22 AS s5cmd-builder
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS s5cmd-builder
+ARG TARGETOS
+ARG TARGETARCH
 ARG S5VER=v2.3.0
 ENV CGO_ENABLED=0 GOFLAGS="-buildvcs=false"
-# Build a small, statically-linked s5cmd binary
-RUN go install -ldflags="-s -w" github.com/peak/s5cmd/v2@${S5VER}
+RUN apk add --no-cache git
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go install -ldflags="-s -w" github.com/peak/s5cmd/v2@${S5VER}
 
 # ---- main image --------------------------------------------------------------
 # CUDA 12.9 + cuDNN + Python 3.11 + JAX + SSH + Tailscale + rclone + s5cmd
-FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
+FROM --platform=linux/amd64 nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -65,7 +67,7 @@ RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activ
 # 1) Tailscale
 RUN curl -fsSL https://tailscale.com/install.sh | sh
 
-# 2) rclone (amd64-only + retries) — avoid RCLONE_VERSION env collision
+# 2) rclone (amd64-only + retries)
 ARG RCVER=1.67.0
 RUN set -eux; \
     arch="amd64"; \
@@ -77,42 +79,61 @@ RUN set -eux; \
     rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCVER}-linux-${arch}"; \
     env -u RCLONE_VERSION rclone --version
 
-# copy the binary from the builder stage
+# 3) s5cmd from builder
 COPY --from=s5cmd-builder /go/bin/s5cmd /usr/local/bin/s5cmd
 RUN s5cmd version
 
-# ── Runtime env (filled via pod console) ──────────────────────────────────────
+# ── Runtime env (filled via env-file or flags) ────────────────────────────────
 ENV TS_AUTHKEY="" \
     S3_ENDPOINT="" \
     S3_BUCKET="ml-home" \
     S3_ACCESS_KEY_ID="" \
     S3_SECRET_ACCESS_KEY="" \
+    AWS_REGION="us-east-1" \
+    AWS_EC2_METADATA_DISABLED="true" \
     MOUNT_BUCKET="1" \
     RCLONE_VFS_CACHE_MODE="full" \
     RCLONE_VFS_WRITE_BACK="2s" \
     RCLONE_CONCURRENCY="64" \
     HF_HOME="/root/ml-home/hf" \
     TRANSFORMERS_CACHE="/root/ml-home/hf/transformers" \
-    AWS_EC2_METADATA_DISABLED="true"
+    RCLONE_CONFIG="/root/.config/rclone/rclone.conf"
 
-# ── Entrypoint: tailscale up → rclone remote → mount or bisync → sshd ────────
+# ── Hardened entrypoint: tailscale up → rclone remote → mount/bisync → sshd ──
 COPY --chown=root:root <<'BASH' /usr/local/bin/entrypoint.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+echo "[cuda-ts-s3] start"
+echo "S3_ENDPOINT=${S3_ENDPOINT:-<empty>}"
+echo "S3_BUCKET=${S3_BUCKET:-<empty>}"
+[[ -n "${S3_ACCESS_KEY_ID:-}" ]] && echo "S3_ACCESS_KEY_ID=<set>" || echo "S3_ACCESS_KEY_ID=<empty>"
+[[ -n "${S3_SECRET_ACCESS_KEY:-}" ]] && echo "S3_SECRET_ACCESS_KEY=<set>" || echo "S3_SECRET_ACCESS_KEY=<empty>"
+
+# Map S3_* -> AWS_* (for s5cmd/AWS SDKs)
+export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
+export AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
+export AWS_REGION="${AWS_REGION:-us-east-1}"
+export AWS_S3_FORCE_PATH_STYLE="true"
+export S3_ENDPOINT_URL="${S3_ENDPOINT:-}"
 
 MOUNTPOINT="${MOUNTPOINT:-/root/ml-home}"
 CACHE_DIR="${RCLONE_CACHE_DIR:-/tmp/rclone-cache}"
 CONCURRENCY="${RCLONE_CONCURRENCY:-64}"
 WRITE_BACK="${RCLONE_VFS_WRITE_BACK:-2s}"
+CONF="${RCLONE_CONFIG:-/root/.config/rclone/rclone.conf}"
 
-mkdir -p "$MOUNTPOINT" "$CACHE_DIR" /var/run/sshd
+mkdir -p "$MOUNTPOINT" "$CACHE_DIR" /var/run/sshd "$(dirname "$CONF")"
+: > "$CONF"
+chmod 600 "$CONF"
 
-# 1) Tailscale (kernel TUN preferred; else userspace + SOCKS5)
+# 1) Tailscale: prefer kernel TUN if available; else userspace + SOCKS5
 if [[ -n "${TS_AUTHKEY:-}" ]]; then
   if [[ -e /dev/net/tun ]]; then
     /usr/sbin/tailscaled --state=/tmp/tailscaled.state --tun=autodetect &
     sleep 1
     tailscale up --authkey="${TS_AUTHKEY}" --hostname="gpu-$(hostname)" --accept-dns=false || true
+    echo "[cuda-ts-s3] tailscale up (kernel TUN)"
   else
     /usr/sbin/tailscaled --state=/tmp/tailscaled.state --tun=userspace-networking --socks5-server=localhost:1055 &
     sleep 1
@@ -120,26 +141,38 @@ if [[ -n "${TS_AUTHKEY:-}" ]]; then
     export ALL_PROXY="socks5://127.0.0.1:1055"
     export HTTPS_PROXY="$ALL_PROXY"; export HTTP_PROXY="$ALL_PROXY"
     export NO_PROXY="localhost,127.0.0.1"
+    echo "[cuda-ts-s3] tailscale up (userspace) SOCKS5=$ALL_PROXY"
   fi
 fi
 
-# 2) Wait for S3 endpoint if TS is used (best effort)
+# 2) Wait for S3 /minio/health/ready (best effort, if endpoint set)
 if [[ -n "${S3_ENDPOINT:-}" ]]; then
   for i in {1..30}; do
-    curl -fsS "${S3_ENDPOINT}/minio/health/ready" >/dev/null && break || sleep 1
+    curl -fsS "${S3_ENDPOINT%/}/minio/health/ready" >/dev/null && break || sleep 1
   done || true
+  echo "[cuda-ts-s3] health check done"
 fi
 
-# 3) rclone remote (idempotent)
-if ! rclone listremotes 2>/dev/null | grep -q '^mlstore:'; then
-  rclone config create mlstore s3 provider=Minio \
-    access_key_id="${S3_ACCESS_KEY_ID}" secret_access_key="${S3_SECRET_ACCESS_KEY}" \
-    endpoint="${S3_ENDPOINT}" >/dev/null
+# 3) rclone remote (create/overwrite, explicit config, MinIO provider)
+if [[ -n "${S3_ENDPOINT:-}" ]]; then
+  echo "[cuda-ts-s3] creating rclone remote 'mlstore' -> ${S3_ENDPOINT}"
+  rclone config delete mlstore --config "$CONF" >/dev/null 2>&1 || true
+  rclone config create mlstore s3 \
+    provider Minio \
+    env_auth false \
+    access_key_id "${AWS_ACCESS_KEY_ID:-}" \
+    secret_access_key "${AWS_SECRET_ACCESS_KEY:-}" \
+    endpoint "${S3_ENDPOINT}" \
+    region "${AWS_REGION}" \
+    no_check_bucket true \
+    force_path_style true \
+    --config "$CONF" --non-interactive 1>/dev/null
+  rclone listremotes --config "$CONF" || true
 fi
 
 # 4) Prefer mount if allowed; otherwise fall back to bisync
 if [[ "${MOUNT_BUCKET:-1}" = "1" && -e /dev/fuse ]]; then
-  echo "[entrypoint] mounting ${S3_BUCKET} at ${MOUNTPOINT}"
+  echo "[cuda-ts-s3] mounting ${S3_BUCKET} at ${MOUNTPOINT}"
   umount -f "${MOUNTPOINT}" 2>/dev/null || true
   rclone mount mlstore:${S3_BUCKET} "${MOUNTPOINT}" \
     --daemon \
@@ -151,24 +184,25 @@ if [[ "${MOUNT_BUCKET:-1}" = "1" && -e /dev/fuse ]]; then
     --checkers "${CONCURRENCY}" \
     --dir-cache-time 1h \
     --poll-interval 30s \
-    --log-file /tmp/rclone-mount.log || true
+    --log-file /tmp/rclone-mount.log \
+    --config "$CONF" || true
 
   sleep 1
   if mountpoint -q "${MOUNTPOINT}"; then
-    echo "[entrypoint] mount OK → ${MOUNTPOINT}"
+    echo "[cuda-ts-s3] mount OK → ${MOUNTPOINT}"
   else
-    echo "[entrypoint] mount failed, starting sync mode"
+    echo "[cuda-ts-s3] mount failed, switching to sync mode"
     MOUNT_BUCKET="0"
   fi
 fi
 
 if [[ "${MOUNT_BUCKET:-0}" = "0" || ! -e /dev/fuse ]]; then
-  echo "[entrypoint] sync mode: initial pull to ${MOUNTPOINT}"
+  echo "[cuda-ts-s3] sync mode: initial pull to ${MOUNTPOINT}"
   rclone sync mlstore:${S3_BUCKET} "${MOUNTPOINT}" \
-    --create-empty-src-dirs --transfers "${CONCURRENCY}" --checkers "${CONCURRENCY}" --fast-list
+    --create-empty-src-dirs --transfers "${CONCURRENCY}" --checkers "${CONCURRENCY}" --fast-list --config "$CONF"
 
   if [[ ! -f "${MOUNTPOINT}/.rclonestate" ]]; then
-    rclone bisync "${MOUNTPOINT}" mlstore:${S3_BUCKET} --resync --max-delete 100000 || true
+    rclone bisync "${MOUNTPOINT}" mlstore:${S3_BUCKET} --resync --max-delete 100000 --config "$CONF" || true
     touch "${MOUNTPOINT}/.rclonestate"
   fi
 
@@ -177,16 +211,30 @@ if [[ "${MOUNT_BUCKET:-0}" = "0" || ! -e /dev/fuse ]]; then
 set -euo pipefail
 SRC="${MOUNTPOINT:-/root/ml-home}"
 DST="mlstore:${S3_BUCKET:-ml-home}"
+CONF="${RCLONE_CONFIG:-/root/.config/rclone/rclone.conf}"
 while true; do
-  rclone bisync "${SRC}" "${DST}" --max-delete 100000 --create-empty-src-dirs || true
+  rclone bisync "${SRC}" "${DST}" --max-delete 100000 --create-empty-src-dirs --config "$CONF" || true
   sleep 8
 done
 LOOP
   chmod +x /usr/local/bin/mlhome-bisync-loop.sh
-  ( S3_BUCKET="${S3_BUCKET}" MOUNTPOINT="${MOUNTPOINT}" nohup /usr/local/bin/mlhome-bisync-loop.sh >/tmp/mlhome-bisync.log 2>&1 & ) || true
+  ( S3_BUCKET="${S3_BUCKET}" MOUNTPOINT="${MOUNTPOINT}" RCLONE_CONFIG="${CONF}" nohup /usr/local/bin/mlhome-bisync-loop.sh >/tmp/mlhome-bisync.log 2>&1 & ) || true
 fi
 
-# 5) Start SSHD in the foreground
+# 5) Optional selftest then SSHD in foreground
+if [[ "${1:-}" == "selftest" ]]; then
+  if [[ -z "${S3_ENDPOINT:-}" || -z "${S3_BUCKET:-}" ]]; then
+    echo "[cuda-ts-s3] selftest: set S3_ENDPOINT and S3_BUCKET"; exit 2; fi
+  echo "[cuda-ts-s3] curl health: ${S3_ENDPOINT%/}/minio/health/ready"
+  curl -sSf "${S3_ENDPOINT%/}/minio/health/ready" >/dev/null && echo "[ok] minio health ready"
+  echo "[cuda-ts-s3] s5cmd ls s3://${S3_BUCKET}/"
+  s5cmd --endpoint-url="${S3_ENDPOINT}" ls "s3://${S3_BUCKET}/" || { echo "[fail] s5cmd"; exit 3; }
+  echo "[cuda-ts-s3] rclone ls mlstore:${S3_BUCKET}"
+  rclone --config "$CONF" ls "mlstore:${S3_BUCKET}" || { echo "[fail] rclone"; exit 4; }
+  echo "[cuda-ts-s3] selftest: SUCCESS"
+  exit 0
+fi
+
 exec /usr/sbin/sshd -D
 BASH
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -195,4 +243,6 @@ EXPOSE 22
 WORKDIR /workspace/app
 RUN mkdir -p /workspace/app
 
-CMD ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD []
+

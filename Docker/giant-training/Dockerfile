@@ -21,15 +21,16 @@ ENV PATH="$VENV_DIR/bin:$PATH" VIRTUAL_ENV="$VENV_DIR"
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir \
         "jax[cuda12]" \
-        flax transformers datasets optax omegaconf
+        flax transformers datasets optax omegaconf kagglehub huggingface-hub
 
-# Install latest Node.js (includes npm) via NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_current.x | bash - && \
+# Node.js + latest npm (pin major; no corepack)
+ARG NODE_MAJOR=22
+RUN set -eux; \
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
+    npm install -g npm@latest && \
+    node -v && npm -v && \
     rm -rf /var/lib/apt/lists/*
-
-# Ensure **latest** npm via Corepack (Node 18+)
-RUN corepack enable && corepack prepare npm@latest --activate
 
 # ── SSH server: password-only root login ────────────────────────────────────────
 RUN mkdir -p /var/run/sshd && \

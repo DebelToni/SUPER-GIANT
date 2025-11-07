@@ -22,13 +22,13 @@ jobs:
             context: ./Docker/giant-training
             dockerfile: ./Docker/giant-training/Dockerfile
             tag1: latest
-            # tag2: ${{ github.sha }}
+            tag2: ${{ github.sha }}
           - image_name: giant-training-S3
             image_repo: giant-training
             context: ./Docker/giant-training-S3
             dockerfile: ./Docker/giant-training-S3/Dockerfile
             tag1: S3
-            # tag2: S3-${{ github.sha }}
+            tag2: S3-${{ github.sha }}
 
     steps:
       - name: Checkout repository

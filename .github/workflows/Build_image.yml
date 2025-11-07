@@ -3,7 +3,9 @@ name: Build & push giant-training image
 on:
   push:
     paths:
-      - "giant-training/**"
+      - "Docker/giant-training/**"
+      - "Docker/giant-training-S3/**"
+      - ".github/workflows/Build_image.yml"
 
 permissions:
   contents: read
@@ -12,6 +14,21 @@ jobs:
   build-and-push:
     name: Build and push Docker image
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image_name: giant-training
+            context: ./Docker/giant-training
+            dockerfile: ./Docker/giant-training/Dockerfile
+            tags: |
+              ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:latest
+              ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:${{ github.sha }}
+          - image_name: giant-training-S3
+            context: ./Docker/giant-training-S3
+            dockerfile: ./Docker/giant-training-S3/Dockerfile
+            tags: |
+              ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:S3
+              ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:S3-${{ github.sha }}
 
     steps:
       - name: Checkout repository
@@ -25,15 +42,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push image (giant-training)
+      - name: Build and push image (${{ matrix.image_name }})
         uses: docker/build-push-action@v4
         with:
-          context: ./giant-training
-          file: ./giant-training/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
           pull: true
           no-cache: true
           platforms: linux/amd64 # ← Force amd64 only (no ARM images in the manifest)
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/giant-training:${{ github.sha }}
+          tags: ${{ matrix.tags }}

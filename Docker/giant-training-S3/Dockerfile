@@ -1,9 +1,17 @@
-# CUDA 12.9 + cuDNN + Python 3.11 + JAX stack + SSH + Tailscale + rclone + s5cmd for S3 I/O
-# Force amd64 at the base image level.
-FROM --platform=linux/amd64 nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
+# ---- build s5cmd (static, CGO disabled) --------------------------------------
+FROM golang:1.22 AS s5cmd-builder
+ARG S5VER=v2.3.0
+ENV CGO_ENABLED=0 GOFLAGS="-buildvcs=false"
+# Build a small, statically-linked s5cmd binary
+RUN go install -ldflags="-s -w" github.com/peak/s5cmd/v2@${S5VER}
+
+# ---- main image --------------------------------------------------------------
+# CUDA 12.9 + cuDNN + Python 3.11 + JAX + SSH + Tailscale + rclone + s5cmd
+FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
+
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Guard: bail out early if someone tries to build for a non-amd64 platform.
+# Guard: bail out if not amd64 (we build/push only x86_64)
 RUN dpkg --print-architecture | grep -qx amd64 || (echo "This image targets amd64/x86_64 only." && exit 1)
 
 # Base packages + SSH daemon + fuse3 (for rclone mount)
@@ -57,7 +65,7 @@ RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activ
 # 1) Tailscale
 RUN curl -fsSL https://tailscale.com/install.sh | sh
 
-# 2) rclone (amd64-only + retries)  -- DO NOT use an ARG starting with RCLONE_
+# 2) rclone (amd64-only + retries) — avoid RCLONE_VERSION env collision
 ARG RCVER=1.67.0
 RUN set -eux; \
     arch="amd64"; \
@@ -69,15 +77,9 @@ RUN set -eux; \
     rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCVER}-linux-${arch}"; \
     env -u RCLONE_VERSION rclone --version
 
-# 3) s5cmd (amd64-only + retries)
-ARG S5VER=2.3.0
-RUN set -eux; \
-    s5arch="Linux-64bit"; \
-    curl -fSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/s5cmd.tgz \
-      "https://github.com/peak/s5cmd/releases/download/v${S5VER}/s5cmd_${S5VER}_${s5arch}.tar.gz"; \
-    tar -xzf /tmp/s5cmd.tgz -C /usr/local/bin s5cmd; \
-    rm -f /tmp/s5cmd.tgz; \
-    s5cmd --version
+# copy the binary from the builder stage
+COPY --from=s5cmd-builder /go/bin/s5cmd /usr/local/bin/s5cmd
+RUN s5cmd version
 
 # ── Runtime env (filled via pod console) ──────────────────────────────────────
 ENV TS_AUTHKEY="" \

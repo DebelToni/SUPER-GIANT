@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from omegaconf import OmegaConf
+from flax import core as flax_core
 
 from GiantGPT import GiantGPT
 from optimizer_utils import create_weight_decay_mask
@@ -174,6 +175,8 @@ def main() -> None:
     rng = jax.random.PRNGKey(seed)
     dummy = jnp.zeros((batch_size, context_length), dtype=jnp.int32)
     params = model.init(rng, dummy, deterministic=True)["params"]
+    if isinstance(params, dict):
+        params = flax_core.freeze(params)
 
     init_checkpoint_arg = args.init_checkpoint
     if init_checkpoint_arg and resume_request != "latest":

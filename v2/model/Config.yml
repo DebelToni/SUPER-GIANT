@@ -6,7 +6,8 @@ model:
   dropout_rate: 0.05
   activation: silu
   param_dtype: float32
-  compute_dtype: bfloat16
+  compute_dtype: float32
+  # compute_dtype: bfloat16
   rope_dim: 8
   num_kv_heads: 8
   context_length: 1024
@@ -29,28 +30,32 @@ training:
   seed: 0
   log_every: 100
   checkpoint_every: 1000
-  device: gpu
+  # device: gpu
+  device: cpu
   label_smoothing: 0.0
 
 stages:
   - name: warmup_tinystories
-    dataset: tinystories.arrow
+    dataset: tinystories
     seq_len: 256
     epochs: 1
     end_ratio: 0.1
     shuffle: true
+    fraction: 0.1
   - name: wiki_medium
-    dataset: wikipedia.arrow
+    dataset: wikipedia
     seq_len: 512
     epochs: 1
     end_ratio: 0.4
     shuffle: true
+    fraction: 1.0
   - name: wiki_long
-    dataset: wikipedia.arrow
+    dataset: wikipedia
     seq_len: 1024
     epochs: 1
     end_ratio: 1.0
     shuffle: true
+    fraction: 1.0
 
 qa_finetune:
   answers_arrow: "teacher_out/answers.arrow"

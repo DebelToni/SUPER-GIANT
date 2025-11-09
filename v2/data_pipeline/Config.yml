@@ -6,6 +6,7 @@ tiny_stories:
   context_length: 256
   max_records: null
   min_tokens: 128
+  rows_per_shard: 65536
 
 wikipedia:
   raw_root: "enwiki20201020"
@@ -25,11 +26,12 @@ wikipedia:
   dedup_max_keys: 2000000
   max_files: null
   max_records: null
+  rows_per_shard: 65536
 
 outputs:
   processed_root: "dataset_artifacts"
-  tinystories_filename: "tinystories.arrow"
-  wikipedia_filename: "wikipedia.arrow"
+  tinystories_dir: "tinystories"
+  wikipedia_dir: "wikipedia"
   merged_filename: "merged_training.arrow"
   stats_filename: "dataset_stats.json"
 

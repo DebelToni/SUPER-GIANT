@@ -17,7 +17,7 @@ from tqdm.auto import tqdm
 from GiantGPT import GiantGPT
 from Training_step import train_step
 from arrow_data_loader import (
-    ArrowDataset,
+    ShardedArrowDataset,
     StageDataLoader,
     load_dataloader_state,
     save_dataloader_state,
@@ -26,6 +26,7 @@ from checkpoint_manager import latest as latest_ckpt
 from checkpoint_manager import load as load_ckpt
 from checkpoint_manager import save as save_ckpt
 from optimizer_utils import create_weight_decay_mask
+from flax import core as flax_core
 
 jax.config.update("jax_default_matmul_precision", "tensorfloat32")
 
@@ -38,6 +39,7 @@ class StageConfig:
     epochs: int
     end_ratio: float
     shuffle: bool = True
+    fraction: float = 1.0
 
 
 @dataclass
@@ -121,6 +123,7 @@ def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
                 epochs=int(stage["epochs"]),
                 end_ratio=float(stage["end_ratio"]),
                 shuffle=bool(stage.get("shuffle", True)),
+                fraction=float(stage.get("fraction", 1.0)),
             )
         )
     return stage_cfgs
@@ -132,20 +135,26 @@ def build_stage_runtimes(
     dataset_root: Path,
     batch_size: int,
     seed: int,
+    pad_token_id: int,
 ) -> List[StageRuntime]:
-    dataset_cache: Dict[Path, ArrowDataset] = {}
+    dataset_cache: Dict[Path, ShardedArrowDataset] = {}
     runtimes: List[StageRuntime] = []
     for stage in stage_cfgs:
         data_path = dataset_root / stage.dataset
         dataset = dataset_cache.get(data_path)
         if dataset is None:
-            print(f"[loader] loading {data_path}")
-            dataset = ArrowDataset(data_path)
+            if not data_path.exists():
+                raise FileNotFoundError(
+                    f"Dataset directory '{data_path}' missing. Run the data pipeline to generate shards."
+                )
+            print(f"[loader] loading shards from {data_path}")
+            dataset = ShardedArrowDataset(data_path)
             dataset_cache[data_path] = dataset
-        if stage.seq_len > dataset.tokens.shape[1]:
+        fraction = max(0.0, min(stage.fraction, 1.0))
+        target_rows = int(dataset.total_rows * fraction)
+        if target_rows < batch_size:
             raise ValueError(
-                f"Stage {stage.name} requests seq_len {stage.seq_len} but dataset "
-                f"only provides context {dataset.tokens.shape[1]}"
+                f"Stage {stage.name} fraction too small: {target_rows} rows for batch_size {batch_size}"
             )
         loader = StageDataLoader(
             dataset,
@@ -153,9 +162,11 @@ def build_stage_runtimes(
             seq_len=stage.seq_len,
             shuffle=stage.shuffle,
             seed=seed,
+            pad_token_id=pad_token_id,
+            max_rows=target_rows,
         )
         print(
-            f"[loader] stage={stage.name} rows={dataset.num_rows} "
+            f"[loader] stage={stage.name} rows={target_rows}/{dataset.total_rows} "
             f"ctx={stage.seq_len} steps_per_epoch={loader.steps_per_epoch}"
         )
         total_steps = stage.epochs * loader.steps_per_epoch
@@ -239,7 +250,16 @@ def main() -> None:
     batch_size = int(cfg.training.batch_size)
     seed = int(cfg.training.seed)
 
-    stage_runtimes = build_stage_runtimes(stage_cfgs, dataset_root=dataset_root, batch_size=batch_size, seed=seed)
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else (
+        tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+    )
+    stage_runtimes = build_stage_runtimes(
+        stage_cfgs,
+        dataset_root=dataset_root,
+        batch_size=batch_size,
+        seed=seed,
+        pad_token_id=pad_token_id,
+    )
     total_steps = sum(stage.total_steps for stage in stage_runtimes)
 
     max_seq_len = max(stage.config.seq_len for stage in stage_runtimes)
@@ -255,6 +275,9 @@ def main() -> None:
 
     rng = jax.random.PRNGKey(seed)
     params = model.init(rng, jnp.zeros((batch_size, max_seq_len), dtype=jnp.int32))["params"]
+    from flax import core as flax_core
+    if isinstance(params, dict):
+        params = flax_core.freeze(params)
 
     optimizer = build_optimizer(cfg, total_steps, params)
     opt_state = optimizer.init(params)

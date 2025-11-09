@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Base packages + SSH daemon
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential git wget curl ca-certificates vim pkg-config \
+        build-essential git wget curl ca-certificates vim tmux pkg-config \
         python3.11 python3.11-venv python3-pip                       \
         libssl-dev zlib1g-dev libbz2-dev libreadline-dev             \
         libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev        \

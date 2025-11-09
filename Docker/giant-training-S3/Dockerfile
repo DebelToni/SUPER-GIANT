@@ -18,7 +18,7 @@ RUN dpkg --print-architecture | grep -qx amd64 || (echo "This image targets amd6
 
 # Base packages + SSH daemon + fuse3 (for rclone mount)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential git wget curl ca-certificates vim pkg-config \
+        build-essential git wget curl ca-certificates vim tmux pkg-config \
         python3.11 python3.11-venv python3-pip                       \
         libssl-dev zlib1g-dev libbz2-dev libreadline-dev             \
         libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev        \

@@ -76,8 +76,8 @@ class TrainingDefaultsCfg:
 @dataclass
 class OutputsCfg:
     processed_root: str = "dataset_artifacts/base_corpus"
-    tinystories_filename: str = "tinystories.arrow"
-    wikipedia_filename: str = "wikipedia.arrow"
+    tinystories_dir: str = "tinystories"
+    wikipedia_dir: str = "wikipedia"
     merged_filename: str = "merged_training.arrow"
     stats_filename: str = "dataset_stats.json"
 
@@ -101,6 +101,7 @@ class TinyStoriesStageCfg:
     context_length: int = 256
     max_records: Optional[int] = None
     min_tokens: int = 0
+    rows_per_shard: int = 65536
 
 
 @dataclass
@@ -119,6 +120,7 @@ class WikipediaStageCfg:
     dedup_max_keys: Optional[int] = None
     max_files: Optional[int] = None
     max_records: Optional[int] = None
+    rows_per_shard: int = 65536
 
 
 @dataclass
@@ -242,39 +244,36 @@ class RunningStats:
         }
 
 
-class ArrowBatchWriter:
-    def __init__(self, output_path: Path, schema: pa.Schema, batch_size: int) -> None:
-        self._output_path = output_path
-        self._schema = schema
-        self._sink = None
-        self._writer = None
-        self._rows: List[Dict[str, Any]] = []
-        self._batch_size = batch_size
+class ShardWriter:
+    def __init__(self, output_dir: Path, prefix: str, schema: pa.Schema, rows_per_shard: int) -> None:
+        self.output_dir = output_dir
+        self.prefix = prefix
+        self.schema = schema
+        self.rows_per_shard = max(1, rows_per_shard)
+        self._buffer: List[Dict[str, Any]] = []
+        self._shard_index = 0
+        self.manifest: List[Dict[str, Any]] = []
 
-    def __enter__(self) -> "ArrowBatchWriter":
-        self._sink = pa.OSFile(str(self._output_path), "wb")
-        self._writer = pa_ipc.new_file(self._sink, self._schema)
-        return self
+    def append(self, rows: List[Dict[str, Any]]) -> None:
+        self._buffer.extend(rows)
+        while len(self._buffer) >= self.rows_per_shard:
+            self._flush_chunk(self.rows_per_shard)
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if self._rows:
-            self._flush()
-        if self._writer is not None:
-            self._writer.close()
-        if self._sink is not None:
-            self._sink.close()
+    def close(self) -> None:
+        if self._buffer:
+            self._flush_chunk(len(self._buffer))
 
-    def write(self, rows: List[Dict[str, Any]]) -> None:
-        self._rows.extend(rows)
-        if len(self._rows) >= self._batch_size:
-            self._flush()
-
-    def _flush(self) -> None:
-        if not self._rows:
-            return
-        batch = pa.RecordBatch.from_pylist(self._rows, schema=self._schema)
-        self._writer.write(batch)
-        self._rows.clear()
+    def _flush_chunk(self, count: int) -> None:
+        chunk = self._buffer[:count]
+        del self._buffer[:count]
+        filename = f"{self.prefix}-{self._shard_index:06d}.arrow"
+        path = self.output_dir / filename
+        table = pa.Table.from_pylist(chunk, schema=self.schema)
+        with pa.OSFile(str(path), "wb") as sink:
+            with pa_ipc.new_file(sink, self.schema) as writer:
+                writer.write_table(table)
+        self.manifest.append({"filename": filename, "rows": count})
+        self._shard_index += 1
 
 
 # --------------------------------------------------------------------------------------
@@ -533,7 +532,7 @@ def tokenize_records(
                 if arr.shape[0] < max(min_tokens, 0):
                     stats.discarded += 1
                     continue
-                yield {"input_ids": arr, "length": int(arr.shape[0])}
+                yield {"input_ids": arr.tolist(), "length": int(arr.shape[0])}
             buffer.clear()
 
     if buffer:
@@ -542,7 +541,7 @@ def tokenize_records(
             if arr.shape[0] < max(min_tokens, 0):
                 stats.discarded += 1
                 continue
-            yield {"input_ids": arr, "length": int(arr.shape[0])}
+            yield {"input_ids": arr.tolist(), "length": int(arr.shape[0])}
 
 
 # --------------------------------------------------------------------------------------
@@ -583,23 +582,24 @@ def stage_tokenize(
     # per-stage knobs
     dedupe_mask = None
     dedupe_max_keys = None
+    rows_per_shard = int(stage_cfg_map.get("rows_per_shard") or 65536)
+    stage_dir_name = stage_key
     if stage_key == "tiny_stories":
         min_tokens = int(stage_cfg_map.get("min_tokens", 0) or 0)
         dedupe = False
         batch_size = top_cfg.scheduling.write_batch_size
-        arrow_filename = outputs.tinystories_filename
+        stage_dir_name = outputs.tinystories_dir or "tinystories"
     elif stage_key == "wikipedia":
         min_tokens = int(stage_cfg_map.get("min_tokens", 0) or 0)
-        # Temporarily disable deduplication to minimise memory footprint during streaming.
         dedupe = False
         batch_size = top_cfg.scheduling.write_batch_size
-        arrow_filename = outputs.wikipedia_filename
+        stage_dir_name = outputs.wikipedia_dir or "wikipedia"
     else:
         # Fallbacks
         min_tokens = 0
         dedupe = True
         batch_size = top_cfg.scheduling.write_batch_size
-        arrow_filename = f"{stage_name}.arrow"
+        stage_dir_name = stage_key
         dedupe_mask = None
         dedupe_max_keys = None
 
@@ -607,80 +607,84 @@ def stage_tokenize(
 
     output_root = _as_path(outputs.processed_root)
     output_root.mkdir(parents=True, exist_ok=True)
-    arrow_path = output_root / arrow_filename
+    stage_output_dir = output_root / stage_dir_name
+    schema = _arrow_schema()
+    shard_writer: ShardWriter | None = None
+    manifest: List[Dict[str, Any]] = []
+    if not top_cfg.dry_run:
+        if stage_output_dir.exists():
+            shutil.rmtree(stage_output_dir)
+        stage_output_dir.mkdir(parents=True, exist_ok=True)
+        shard_writer = ShardWriter(stage_output_dir, stage_key, schema, rows_per_shard)
 
     stats = RunningStats()
-    schema = _arrow_schema()
+    record_stream = tokenize_records(
+        tokenizer,
+        texts,
+        min_tokens,
+        context_length,
+        pads_to_context,
+        dedupe,
+        stats,
+        workers=worker_count,
+        dedupe_mask=dedupe_mask,
+        dedupe_max_keys=dedupe_max_keys,
+    )
 
     if top_cfg.dry_run:
         LOGGER.info("[dry-run] Tokenizing '%s' without writing output.", stage_name)
-        for i, _ in zip(
-            range(200),
-            tokenize_records(
-                tokenizer,
-                texts,
-                min_tokens,
-                context_length,
-                pads_to_context,
-                dedupe,
-                stats,
-                workers=worker_count,
-                dedupe_mask=dedupe_mask,
-                dedupe_max_keys=dedupe_max_keys,
-            ),
-        ):
+        for _ in zip(range(200), record_stream):
             pass
     else:
-        with ArrowBatchWriter(arrow_path, schema, batch_size) as writer:
-            for rows in _iter_chunks(
-                tokenize_records(
-                    tokenizer,
-                    texts,
-                    min_tokens,
-                    context_length,
-                    pads_to_context,
-                    dedupe,
-                    stats,
-                    workers=worker_count,
-                    dedupe_mask=dedupe_mask,
-                    dedupe_max_keys=dedupe_max_keys,
-                ),
-                batch_size,
-            ):
-                writer.write(rows)
+        assert shard_writer is not None
+        for rows in _iter_chunks(record_stream, batch_size):
+            shard_writer.append(rows)
+        shard_writer.close()
+        manifest = shard_writer.manifest
+        manifest_path = stage_output_dir / "manifest.json"
+        with manifest_path.open("w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "stage": stage_name,
+                    "total_records": stats.records,
+                    "total_tokens": stats.tokens,
+                    "shards": manifest,
+                },
+                handle,
+                indent=2,
+            )
 
     LOGGER.info(
-        "Stage '%s' done | records=%d tokens=%d duplicates=%d discarded=%d -> %s",
+        "Stage '%s' done | records=%d tokens=%d duplicates=%d discarded=%d",
         stage_name,
         stats.records,
         stats.tokens,
         stats.duplicates,
         stats.discarded,
-        arrow_path,
     )
-    return stats.to_dict()
+    stage_stats = stats.to_dict()
+    if not top_cfg.dry_run:
+        stage_stats["output_dir"] = str(stage_output_dir)
+        stage_stats["shards"] = manifest
+    return stage_stats
 
 
 def stage_merge(top_cfg: TopConfig) -> Dict[str, Any]:
-    """
-    Minimal merge: just verifies both Arrow files exist and writes a merged file header.
-    (You can extend this to actually concatenate batches if needed.)
-    """
+    """Write a simple manifest pointing at the generated stage directories."""
     out = top_cfg.outputs
     root = _as_path(out.processed_root)
-    tinystories = root / out.tinystories_filename
-    wikipedia = root / out.wikipedia_filename
+    tinystories_dir = root / (out.tinystories_dir or "tinystories")
+    wikipedia_dir = root / (out.wikipedia_dir or "wikipedia")
     merged = root / out.merged_filename
 
-    existing = [p for p in (tinystories, wikipedia) if p.exists()]
-    if not existing:
-        LOGGER.warning("No stage outputs found to merge in %s.", root)
-        return {}
-
-    # Simple merge: copy the first as "merged"; real merging could read and append batches
-    shutil.copy2(existing[0], merged)
-    LOGGER.info("Wrote (placeholder) merged file -> %s", merged)
-    return {"merged_bytes": merged.stat().st_size, "sources_present": [str(p) for p in existing]}
+    manifest = {
+        "tinystories": str(tinystories_dir) if tinystories_dir.exists() else None,
+        "wikipedia": str(wikipedia_dir) if wikipedia_dir.exists() else None,
+    }
+    with merged.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+    LOGGER.info("Wrote merged manifest -> %s", merged)
+    return manifest
 
 
 # --------------------------------------------------------------------------------------
@@ -765,8 +769,9 @@ def load_combined_config(user_cfg_path: Optional[str]) -> TopConfig:
     # If nothing provided, default to TinyStories
     if not stages:
         stages["tiny_stories"] = TinyStoriesStageCfg().__dict__
-        # Also set minimal outputs so the run is self-contained
-        outputs.tinystories_filename = outputs.tinystories_filename or "tinystories.arrow"
+        # Ensure output directories exist
+        outputs.tinystories_dir = outputs.tinystories_dir or "tinystories"
+        outputs.wikipedia_dir = outputs.wikipedia_dir or "wikipedia"
 
     return TopConfig(
         tokenizer=tok,

@@ -8,8 +8,6 @@ prompts/
 __pycache__
 testing/
 logs/
-*.pub
-id_rsa
 node_modules/
 .env
 checkpoints/
@@ -18,3 +16,4 @@ trained_models/
 .DS_Store
 *checkpoints/
 teacher_out/
+a.md

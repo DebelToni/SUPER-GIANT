@@ -86,7 +86,7 @@ RUN s5cmd version
 # ── Runtime env (filled via env-file or flags) ────────────────────────────────
 ENV TS_AUTHKEY="" \
     S3_ENDPOINT="" \
-    S3_BUCKET="ml-home" \
+    S3_BUCKET="giant-data" \
     S3_ACCESS_KEY_ID="" \
     S3_SECRET_ACCESS_KEY="" \
     AWS_REGION="us-east-1" \
@@ -95,8 +95,8 @@ ENV TS_AUTHKEY="" \
     RCLONE_VFS_CACHE_MODE="full" \
     RCLONE_VFS_WRITE_BACK="2s" \
     RCLONE_CONCURRENCY="64" \
-    HF_HOME="/root/ml-home/hf" \
-    TRANSFORMERS_CACHE="/root/ml-home/hf/transformers" \
+    HF_HOME="/root/giant-data/hf" \
+    TRANSFORMERS_CACHE="/root/giant-data/hf/transformers" \
     RCLONE_CONFIG="/root/.config/rclone/rclone.conf"
 
 # ── Hardened entrypoint: tailscale up → rclone remote → mount/bisync → sshd ──
@@ -117,7 +117,7 @@ export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_S3_FORCE_PATH_STYLE="true"
 export S3_ENDPOINT_URL="${S3_ENDPOINT:-}"
 
-MOUNTPOINT="${MOUNTPOINT:-/root/ml-home}"
+MOUNTPOINT="${MOUNTPOINT:-/root/giant-data}"
 CACHE_DIR="${RCLONE_CACHE_DIR:-/tmp/rclone-cache}"
 CONCURRENCY="${RCLONE_CONCURRENCY:-64}"
 WRITE_BACK="${RCLONE_VFS_WRITE_BACK:-2s}"
@@ -206,11 +206,11 @@ if [[ "${MOUNT_BUCKET:-0}" = "0" || ! -e /dev/fuse ]]; then
     touch "${MOUNTPOINT}/.rclonestate"
   fi
 
-  cat > /usr/local/bin/mlhome-bisync-loop.sh <<'LOOP'
+cat > /usr/local/bin/mlhome-bisync-loop.sh <<'LOOP'
 #!/usr/bin/env bash
 set -euo pipefail
-SRC="${MOUNTPOINT:-/root/ml-home}"
-DST="mlstore:${S3_BUCKET:-ml-home}"
+SRC="${MOUNTPOINT:-/root/giant-data}"
+DST="mlstore:${S3_BUCKET:-giant-data}"
 CONF="${RCLONE_CONFIG:-/root/.config/rclone/rclone.conf}"
 while true; do
   rclone bisync "${SRC}" "${DST}" --max-delete 100000 --create-empty-src-dirs --config "$CONF" || true
@@ -245,4 +245,3 @@ RUN mkdir -p /workspace/app
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []
-

@@ -1,63 +1,71 @@
 from __future__ import annotations
 
 import argparse
-import pickle
 import time
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
-from checkpoint_io import load_npz
 
 from omegaconf import OmegaConf
-CONFIG_PATH = Path(__file__).resolve().parent / "Config.yml"
-Config = OmegaConf.load(CONFIG_PATH)
 
 from GiantGPT import GiantGPT
+from checkpoint_manager import latest as latest_checkpoint
+from checkpoint_io import load_npz
 from jit_inference import init_inference_state, make_prefill_and_decode_fns
 
 from jax import config as jax_config
+
 jax_config.update("jax_default_matmul_precision", "tensorfloat32")
 
 
-def build_model() -> GiantGPT:
-    """Build model using Config.yml settings, matching Generate_text_fast.py"""
-    if Config.use_custom_tokenizer:
-        tok = PreTrainedTokenizerFast.from_pretrained(Config.custom_tokenizer_path)
-    else:
-        tok = AutoTokenizer.from_pretrained(Config.tokenizer_name)
+MODEL_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = MODEL_DIR.parent
 
+
+def load_configs() -> OmegaConf:
+    global_cfg = OmegaConf.load(PROJECT_ROOT / "Global_Config.yml")
+    local_cfg = OmegaConf.load(MODEL_DIR / "Config.yml")
+    cfg = OmegaConf.merge(global_cfg, local_cfg)
+
+    def resolve_path(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        path = Path(value)
+        if path.is_absolute() or not cfg.paths.get("data_root"):
+            return str(path)
+        return str(Path(cfg.paths.data_root) / path)
+
+    base_root = Path(cfg.paths.get("data_root", PROJECT_ROOT))
+    cfg.paths.data_root = str(base_root)
+
+    for key in ("processed_data_root", "dataloader_state_root", "logs_root"):
+        if key in cfg.paths and cfg.paths[key] is not None:
+            cfg.paths[key] = resolve_path(cfg.paths[key]) or cfg.paths[key]
+
+    if cfg.qa_finetune.get("answers_arrow"):
+        cfg.qa_finetune.answers_arrow = resolve_path(cfg.qa_finetune.answers_arrow)
+
+    if cfg.qa_finetune.get("checkpoint_dir"):
+        cfg.qa_finetune.checkpoint_dir = resolve_path(cfg.qa_finetune.checkpoint_dir)
+
+    return cfg
+
+
+def build_model(cfg: OmegaConf, vocab_size: int) -> GiantGPT:
+    model_cfg = cfg.model
     return GiantGPT(
-        vocab_size=len(tok),
-        context_length=Config.context_length,
-        d_model=Config.embedding_size,
-        n_heads=Config.num_heads,
-        d_ff=Config.feed_forward_size,
-        n_layers=Config.num_layers,
+        vocab_size=vocab_size,
+        context_length=model_cfg.context_length,
+        d_model=model_cfg.embedding_size,
+        n_heads=model_cfg.num_heads,
+        d_ff=model_cfg.feed_forward_size,
+        n_layers=model_cfg.num_layers,
         dropout_rate=0.0,
     )
-
-
-def _numpy_or_jax_array(x):
-    """Ensure leaves are JAX arrays – helpful if checkpoint stored NumPy."""
-    return jnp.asarray(x) if not isinstance(x, jax.Array) else x
-
-
-def load_checkpoint(path: Path):
-    """Return a PyTree of JAX arrays living on *CPU* (device_put later)."""
-    ext = path.suffix.lower()
-    if ext in {".pkl", ".pickle"}:
-        with path.open("rb") as f:
-            params = pickle.load(f)
-    elif ext == ".npz":
-        params = load_npz(path)
-    else:
-        arr = np.load(path, allow_pickle=True)
-        params = arr.item() if hasattr(arr, "item") else arr
-    return jax.tree_util.tree_map(_numpy_or_jax_array, params)
 
 
 def preprocess_prompt_no_EOS(tokenizer, prompt: str, max_len: int):

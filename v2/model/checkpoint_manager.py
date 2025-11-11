@@ -1,8 +1,9 @@
 # checkpoint_manager.py
 import os, re, glob
-from typing import Tuple, Optional
+from typing import Optional
 
 from checkpoint_io import save_npz, load_npz
+from flax import serialization
 
 
 def _step_from_name(fname: str) -> int:
@@ -33,3 +34,30 @@ def load(path: str):
     """Return (*params*, step_number)."""
     return load_npz(path), _step_from_name(path)
 
+
+def _opt_state_name(step: int) -> str:
+    return f"opt_state_{step:07d}.msgpack"
+
+
+def save_opt_state(opt_state, step: int, ckpt_dir: str = "checkpoints") -> str:
+    """
+    Serialize the Optax optimizer state alongside model params.
+    """
+    os.makedirs(ckpt_dir, exist_ok=True)
+    path = os.path.join(ckpt_dir, _opt_state_name(step))
+    with open(path, "wb") as handle:
+        handle.write(serialization.to_bytes(opt_state))
+    return path
+
+
+def load_opt_state(step: int, ckpt_dir: str = "checkpoints"):
+    """
+    Return serialized optimizer bytes for *step* or None if missing.
+    Callers should pass the bytes through flax.serialization.from_bytes
+    using a freshly-initialized opt_state template.
+    """
+    path = os.path.join(ckpt_dir, _opt_state_name(step))
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as handle:
+        return handle.read()

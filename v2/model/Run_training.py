@@ -25,8 +25,10 @@ from arrow_data_loader import (
 from checkpoint_manager import latest as latest_ckpt
 from checkpoint_manager import load as load_ckpt
 from checkpoint_manager import save as save_ckpt
+from checkpoint_manager import save_opt_state, load_opt_state
 from optimizer_utils import create_weight_decay_mask
 from flax import core as flax_core
+from flax import serialization
 
 jax.config.update("jax_default_matmul_precision", "tensorfloat32")
 
@@ -306,7 +308,19 @@ def main() -> None:
         else:
             ckpt_path = resume_request
         params, global_step = load_ckpt(ckpt_path)
+        if isinstance(params, dict):
+            params = flax_core.freeze(params)
         opt_state = optimizer.init(params)
+        resume_dir = str(Path(ckpt_path).parent)
+        opt_bytes = load_opt_state(global_step, resume_dir)
+        if opt_bytes is not None:
+            try:
+                opt_state = serialization.from_bytes(opt_state, opt_bytes)
+                print(f"▶ Resumed optimizer state from {resume_dir}")
+            except Exception as exc:
+                print(f"⚠ Failed to restore optimizer state ({exc}); reinitializing.")
+        else:
+            print("⚠ No optimizer state found; proceeding with fresh AdamW buffers.")
         print(f"▶ Resumed parameters from {ckpt_path} at step {global_step}")
 
     # Restore dataloader state if available
@@ -373,6 +387,7 @@ def main() -> None:
 
             if global_step % checkpoint_every == 0:
                 ckpt_file = save_ckpt(params, global_step, checkpoint_dir)
+                save_opt_state(opt_state, global_step, checkpoint_dir)
                 print(f"💾 checkpoint → {ckpt_file}")
                 stage_states[runtime.config.name] = runtime.loader.state_dict()
                 save_dataloader_state(
@@ -397,6 +412,7 @@ def main() -> None:
         stage_step_total = 0
 
     final_ckpt = save_ckpt(params, global_step, checkpoint_dir)
+    save_opt_state(opt_state, global_step, checkpoint_dir)
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),
         {

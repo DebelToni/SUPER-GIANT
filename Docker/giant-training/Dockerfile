@@ -1,3 +1,13 @@
+# ---- build s5cmd (static, CGO disabled) --------------------------------------
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS s5cmd-builder
+ARG TARGETOS
+ARG TARGETARCH
+ARG S5VER=v2.3.0
+ENV CGO_ENABLED=0 GOFLAGS="-buildvcs=false"
+RUN apk add --no-cache git
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go install -ldflags="-s -w" github.com/peak/s5cmd/v2@${S5VER}
+
+# ---- main image --------------------------------------------------------------
 # CUDA 12.9 + cuDNN + Python 3.11 + JAX stack
 FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
@@ -32,7 +42,7 @@ RUN set -eux; \
     node -v && npm -v && \
     rm -rf /var/lib/apt/lists/*
 
-# ── SSH server: password-only root login ────────────────────────────────────────
+# ── SSH server: password-only root login ───────────────────────────────────────
 RUN mkdir -p /var/run/sshd && \
     # Set root password
     echo 'root:dev' | chpasswd && \
@@ -45,14 +55,18 @@ RUN mkdir -p /var/run/sshd && \
       'ChallengeResponseAuthentication no' \
       'UsePAM yes' >> /etc/ssh/sshd_config
 
-# ── Ensure venv is always active (interactive and non-interactive) ─────────────
+# ── Ensure venv is always active (interactive and non-interactive) ────────────
 # 1) For non-interactive and SSH-command sessions: set via PAM's /etc/environment
 RUN printf '%s\n' \
       'VIRTUAL_ENV=/opt/venv' \
       'PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
       >> /etc/environment
-# 2) For interactive shells: source the activate scrip
+# 2) For interactive shells: source the activate script
 RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activate-venv.sh
+
+# ── s5cmd from builder (static binary) ─────────────────────────────────────────
+COPY --from=s5cmd-builder /go/bin/s5cmd /usr/local/bin/s5cmd
+RUN s5cmd version
 
 EXPOSE 22
 
@@ -60,6 +74,6 @@ EXPOSE 22
 WORKDIR /workspace/app
 RUN mkdir -p /workspace/app
 
-# Start SSH daemon in the foreground 
+# Start SSH daemon in the foreground
 CMD ["/usr/sbin/sshd","-D"]
 

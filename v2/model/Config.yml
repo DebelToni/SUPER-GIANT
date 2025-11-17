@@ -1,16 +1,20 @@
 model:
-  embedding_size: 512
-  num_heads: 8
-  num_layers: 6
-  feed_forward_size: 2048
-  dropout_rate: 0.05
-  activation: silu
+  # core dims
+  embedding_size: 640 # d_model
+  num_heads: 10 # d_head = 64
+  num_layers: 16
+  feed_forward_size: 2560 # ~4 * d_model
+  # attention details
+  num_kv_heads: 8 # GQA: fewer KV heads than Q heads
+  rope_dim: 64 # full head dim = d_model / num_heads
+  # context
+  context_length: 2048 # train mostly ≤1024 now, but supports 2k later
+  # regularization / activations
+  dropout_rate: 0.02 # small but non-zero for 2B tokens
+  activation: silu # or swiglu if your impl supports it
+  # dtypes
   param_dtype: float32
-  compute_dtype: float32
-  # compute_dtype: bfloat16
-  rope_dim: 8
-  num_kv_heads: 8
-  context_length: 1024
+  compute_dtype: bfloat16 # keep float32 if you haven't wired bf16 yet
 
 optimizer:
   base_learning_rate: 2.0e-4
@@ -28,30 +32,71 @@ training:
   gradient_accumulation: 1
   max_epochs: 3
   seed: 0
-  log_every: 100
-  checkpoint_every: 1000
-  # device: gpu
-  device: cpu
+  log_every: 10000
+  checkpoint_every: 20000
+  device: gpu
   label_smoothing: 0.0
 
 stages:
-  - name: warmup_tinystories
-    dataset: tinystories
-    seq_len: 256
+  - name: sentences_warmup
+    dataset: sentences_short
+    seq_len: 128
     epochs: 1
-    end_ratio: 0.1
-    shuffle: true
-    fraction: 0.1
-  - name: wiki_medium
-    dataset: wikipedia
-    seq_len: 512
-    epochs: 1
-    end_ratio: 0.4
+    end_ratio: 0.05
     shuffle: true
     fraction: 1.0
-  - name: wiki_long
-    dataset: wikipedia
+  - name: simple_wiki_lm
+    dataset: simple_wiki_lm
+    seq_len: 128
+    epochs: 1
+    end_ratio: 0.125
+    shuffle: true
+    fraction: 1.0
+  - name: simple_wiki_core
+    dataset: simple_wiki
+    seq_len: 128
+    epochs: 1
+    end_ratio: 0.2
+    shuffle: true
+    fraction: 1.0
+  - name: finewiki_l256
+    dataset: finewiki_l256
+    seq_len: 256
+    epochs: 1
+    end_ratio: 0.48
+    shuffle: true
+    fraction: 1.0
+  - name: finewiki_l512
+    dataset: finewiki_l512
+    seq_len: 512
+    epochs: 1
+    end_ratio: 0.6
+    shuffle: true
+    fraction: 1.0
+  - name: open_textbooks
+    dataset: open_textbooks_l512
+    seq_len: 512
+    epochs: 1
+    end_ratio: 0.8
+    shuffle: true
+    fraction: 1.0
+  - name: fineweb_edu_l512
+    dataset: fineweb_edu_l512
+    seq_len: 512
+    epochs: 1
+    end_ratio: 0.875
+    shuffle: true
+    fraction: 1.0
+  - name: fineweb_edu_l1024
+    dataset: fineweb_edu_l1024
     seq_len: 1024
+    epochs: 1
+    end_ratio: 0.95
+    shuffle: true
+    fraction: 1.0
+  - name: definitions_short
+    dataset: definitions_short
+    seq_len: 128
     epochs: 1
     end_ratio: 1.0
     shuffle: true

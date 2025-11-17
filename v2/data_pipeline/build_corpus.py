@@ -6,38 +6,38 @@ import gzip
 import json
 import logging
 import os
-import time
 import shutil
-from dataclasses import dataclass
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
-from collections import deque
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
-from datasets import load_dataset, IterableDataset, DatasetDict
+from datasets import load_dataset
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
-try:
-    from huggingface_hub import snapshot_download
-except Exception:
-    snapshot_download = None
+
 from cleaning import normalise_text
 
-# --------------------------------------------------------------------------------------
-# Logging
-# --------------------------------------------------------------------------------------
+try:
+    from huggingface_hub import snapshot_download
+except Exception:  # pragma: no cover - optional dependency
+    snapshot_download = None
+
+
 LOGGER = logging.getLogger("build_corpus")
 LOGGER.setLevel(logging.INFO)
 _handler = logging.StreamHandler()
 _handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
 LOGGER.addHandler(_handler)
 
-# --------------------------------------------------------------------------------------
-# Config structures (mirror your /mnt/data/Config.yml and /mnt/data/Global_Config.yml)
-# --------------------------------------------------------------------------------------
+
+DEFAULT_TEXT_FIELDS = ("text", "content", "body", "article", "story", "completion")
+
 
 @dataclass
 class TokenizerCfg:
@@ -46,7 +46,7 @@ class TokenizerCfg:
     use_custom: bool = False
     custom_path: str = ""
     hf_fallback: Optional[str] = None
-    pad_token_override: Optional[str] = None  # from Global_Config.yml
+    pad_token_override: Optional[str] = None
 
 
 @dataclass
@@ -58,90 +58,106 @@ class PathsCfg:
 
 
 @dataclass
-class IOcfg:
-    shard_size_tokens: int = 2048
-    validation_fraction: float = 0.01
-    min_sequence_tokens: int = 128
-
-
-@dataclass
 class TrainingDefaultsCfg:
-    progressive_sequence_lengths: List[int] = None
-    lr_milestones: List[float] = None
-    warmup_steps: int = 1000
-    grad_accumulation: int = 2
+    progressive_sequence_lengths: Optional[List[int]] = None
+    lr_milestones: Optional[List[float]] = None
+    warmup_steps: int = 0
+    grad_accumulation: int = 1
     global_seed: int = 0
 
 
 @dataclass
 class OutputsCfg:
-    processed_root: str = "dataset_artifacts/base_corpus"
-    tinystories_dir: str = "tinystories"
-    wikipedia_dir: str = "wikipedia"
-    merged_filename: str = "merged_training.arrow"
+    processed_root: str = "dataset_artifacts"
+    rows_per_shard: int = 65536
+    manifest_filename: str = "datasets_manifest.json"
     stats_filename: str = "dataset_stats.json"
 
 
 @dataclass
 class SchedulingCfg:
-    validation_fraction: float = 0.01
-    seed: int = 42
-    shuffle_buffer_size: int = 65536
-    wiki_num_workers: int = 8
-    write_batch_size: int = 1024
-    tokenization_workers: Optional[int] = None
+    seed: int = 4212
+    write_batch_size: int = 256
+    dry_run_preview_rows: int = 200
 
 
 @dataclass
-class TinyStoriesStageCfg:
-    dataset_name: str = "roneneldan/TinyStories"
-    dataset_split: str = "train"
+class StageSourceCfg:
+    type: str = "huggingface"
+    dataset_name: Optional[str] = None
+    dataset_config: Optional[str] = None
+    split: str = "train"
     streaming: bool = True
-    warmup_fraction: float = 0.0
-    context_length: int = 256
-    max_records: Optional[int] = None
-    min_tokens: int = 0
-    rows_per_shard: int = 65536
+    data_files: Optional[Any] = None
+    text_field: Optional[str] = None
+    text_fields: List[str] = field(default_factory=list)
+    join_fields: List[str] = field(default_factory=list)
+    join_separator: str = " \n"
+    text_template: Optional[str] = None
+    json_root: Optional[str] = None
+    file_glob: str = "**/*.json"
+    max_documents: Optional[int] = None
 
 
 @dataclass
-class WikipediaStageCfg:
-    raw_root: str = ""
-    file_glob: str = "**/*.json"
-    text_field: str = "text"
-    context_length: int = 1024
+class StageCfg:
+    name: str = ""
+    description: str = ""
+    output_dir: Optional[str] = None
+    sequence_length: int = 512
+    target_tokens: Optional[int] = None
+    target_sequences: Optional[int] = None
     min_tokens: int = 0
-    warmup_fraction: float = 1.0
-    normalization: Dict[str, bool] = None
-    pads_to_context: bool = True
-    deduplicate: bool = True
-    dedup_shingle_size: int = 12
+    pack_sequences: bool = True
+    add_eos: bool = True
+    emit_final_partial: bool = True
+    long_document_strategy: str = "random_window"
+    sequential_window_stride: Optional[int] = None
+    max_windows_per_document: Optional[int] = None
+    drop_remainder_windows: bool = False
+    normalization: Dict[str, Any] = field(default_factory=dict)
+    deduplicate: bool = False
     dedup_hash_bits: int = 21
     dedup_max_keys: Optional[int] = None
-    max_files: Optional[int] = None
-    max_records: Optional[int] = None
-    rows_per_shard: int = 65536
+    rows_per_shard: Optional[int] = None
+    max_documents: Optional[int] = None
+    seed_offset: Optional[int] = None
+    sources: List[StageSourceCfg] = field(default_factory=list)
 
 
 @dataclass
 class TopConfig:
-    # merged from both YAMLs
     tokenizer: TokenizerCfg
     paths: PathsCfg
-    io: IOcfg
     training_defaults: TrainingDefaultsCfg
     outputs: OutputsCfg
     scheduling: SchedulingCfg
-    stages: Dict[str, Any]  # per-stage configs (tiny_stories, wikipedia)
+    stages: List[StageCfg]
     dry_run: bool = False
 
 
-# --------------------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------------------
+@dataclass
+class StageStats:
+    documents: int = 0
+    unique_documents: int = 0
+    duplicates: int = 0
+    discarded: int = 0
+    sequences: int = 0
+    tokens: int = 0
 
-def _as_path(p: str | Path) -> Path:
-    return p if isinstance(p, Path) else Path(p)
+    def to_dict(self) -> Dict[str, int]:
+        return {
+            "documents": self.documents,
+            "unique_documents": self.unique_documents,
+            "duplicates": self.duplicates,
+            "discarded": self.discarded,
+            "sequences": self.sequences,
+            "tokens": self.tokens,
+        }
+
+
+def _as_path(value: str | Path) -> Path:
+    return value if isinstance(value, Path) else Path(value)
 
 
 def _resolve_path(base: Optional[str], value: Optional[str]) -> Optional[str]:
@@ -154,7 +170,6 @@ def _resolve_path(base: Optional[str], value: Optional[str]) -> Optional[str]:
 
 
 def _open_text_stream(path: Path):
-    """Open *path* for streaming text reads, handling common compressions."""
     suffix = path.suffix.lower()
     if suffix == ".gz":
         return gzip.open(path, "rt", encoding="utf-8", errors="ignore")
@@ -164,11 +179,8 @@ def _open_text_stream(path: Path):
 
 
 def _stream_json_records(path: Path, chunk_size: int = 65536) -> Iterator[Any]:
-    """Yield JSON objects from *path* without loading the full file into RAM."""
     decoder = json.JSONDecoder()
     buffer = ""
-    in_array = False
-
     with _open_text_stream(path) as handle:
         for chunk in iter(lambda: handle.read(chunk_size), ""):
             if not chunk:
@@ -178,70 +190,29 @@ def _stream_json_records(path: Path, chunk_size: int = 65536) -> Iterator[Any]:
                 buffer = buffer.lstrip()
                 if not buffer:
                     break
-                ch = buffer[0]
-                if ch == "[":
-                    in_array = True
+                if buffer[0] in ",]":
                     buffer = buffer[1:]
                     continue
-                if ch == "]":
-                    in_array = False
-                    buffer = buffer[1:]
-                    continue
-                if ch == "," and in_array:
+                if buffer[0] == "[":
                     buffer = buffer[1:]
                     continue
                 try:
                     obj, idx = decoder.raw_decode(buffer)
                 except json.JSONDecodeError:
-                    # Need more data: break inner loop and read another chunk
                     break
                 yield obj
                 buffer = buffer[idx:]
-
-    # Flush any trailing buffered object (handles files that end without newline)
-    while buffer:
-        buffer = buffer.lstrip()
-        if not buffer:
-            break
-        ch = buffer[0]
-        if ch in ",]":
-            buffer = buffer[1:]
-            continue
-        obj, idx = decoder.raw_decode(buffer)
-        yield obj
-        buffer = buffer[idx:]
+    buffer = buffer.lstrip()
+    if buffer:
+        try:
+            obj, _ = decoder.raw_decode(buffer)
+            yield obj
+        except json.JSONDecodeError:
+            pass
 
 
-def _iter_chunks(iterable: Iterable[Any], n: int) -> Iterator[List[Any]]:
-    buf: List[Any] = []
-    for x in iterable:
-        buf.append(x)
-        if len(buf) >= n:
-            yield buf
-            buf = []
-    if buf:
-        yield buf
-
-
-def _maybe_hash(s: str) -> int:
-    # fast stable hash for dedup (not cryptographic)
-    return hash(s)
-
-
-@dataclass
-class RunningStats:
-    records: int = 0
-    tokens: int = 0
-    duplicates: int = 0
-    discarded: int = 0
-
-    def to_dict(self) -> Dict[str, int]:
-        return {
-            "records": self.records,
-            "tokens": self.tokens,
-            "duplicates": self.duplicates,
-            "discarded": self.discarded,
-        }
+def _maybe_hash(text: str) -> int:
+    return hash(text)
 
 
 class ShardWriter:
@@ -276,14 +247,7 @@ class ShardWriter:
         self._shard_index += 1
 
 
-# --------------------------------------------------------------------------------------
-# Tokenizer handling (with Xet hardening)
-# --------------------------------------------------------------------------------------
-
 def _materialize_tokenizer_dir(src: Path, cache_dir: Optional[str]) -> Path:
-    """
-    Copy typical tokenizer files to a fully local directory to avoid lazy/remote FS reads.
-    """
     dst = Path(cache_dir or ".cache") / "tokenizer.materialized"
     dst.mkdir(parents=True, exist_ok=True)
     needed = [
@@ -307,9 +271,7 @@ def _materialize_tokenizer_dir(src: Path, cache_dir: Optional[str]) -> Path:
 
 
 def load_tokenizer(tok_cfg: TokenizerCfg) -> PreTrainedTokenizerBase:
-    # Avoid flaky Xet-enabled chunk downloads by default.
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-
     last_err: Optional[BaseException] = None
     for attempt in range(3):
         try:
@@ -319,25 +281,25 @@ def load_tokenizer(tok_cfg: TokenizerCfg) -> PreTrainedTokenizerBase:
                 tokenizer = AutoTokenizer.from_pretrained(local_dir, use_fast=True)
             else:
                 tokenizer = AutoTokenizer.from_pretrained(
-                    tok_cfg.name, use_fast=True, cache_dir=tok_cfg.cache_dir
+                    tok_cfg.name,
+                    use_fast=True,
+                    cache_dir=tok_cfg.cache_dir,
                 )
             if tok_cfg.pad_token_override:
                 tokenizer.pad_token = tok_cfg.pad_token_override
             break
-        except Exception as e:
-            last_err = e
-            time.sleep(1.5 * (attempt + 1))
+        except Exception as exc:  # pragma: no cover - retry path
+            last_err = exc
+            time_wait = 1.5 * (attempt + 1)
+            LOGGER.warning("Tokenizer load failed (attempt %d): %s", attempt + 1, exc)
+            time.sleep(time_wait)
     else:
         if snapshot_download is None:
             raise last_err
         repo = tok_cfg.name if not tok_cfg.use_custom else tok_cfg.hf_fallback
         if repo is None:
             raise last_err
-        local_dir = snapshot_download(
-            repo_id=repo,
-            local_dir=tok_cfg.cache_dir,
-            local_dir_use_symlinks=False,
-        )
+        local_dir = snapshot_download(repo_id=repo, local_dir=tok_cfg.cache_dir, local_dir_use_symlinks=False)
         tokenizer = AutoTokenizer.from_pretrained(local_dir, use_fast=True)
         if tok_cfg.pad_token_override:
             tokenizer.pad_token = tok_cfg.pad_token_override
@@ -350,304 +312,358 @@ def load_tokenizer(tok_cfg: TokenizerCfg) -> PreTrainedTokenizerBase:
     return tokenizer
 
 
-def _trim_padding(tokens: List[int], pad_id: int) -> List[int]:
-    # remove trailing pad tokens
-    i = len(tokens) - 1
-    while i >= 0 and tokens[i] == pad_id:
-        i -= 1
-    return tokens[: i + 1]
+class SequenceEmitter:
+    def __init__(
+        self,
+        stage: StageCfg,
+        tokenizer: PreTrainedTokenizerBase,
+        rng: np.random.Generator,
+        stats: StageStats,
+    ) -> None:
+        self.stage = stage
+        self.tokenizer = tokenizer
+        self.rng = rng
+        self.stats = stats
+        self.seq_len = int(stage.sequence_length)
+        eos = tokenizer.eos_token_id
+        if eos is None:
+            eos = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.sep_token_id
+        self.eos_id = eos if eos is not None else 0
+        self.pack_buffer: List[int] = []
+        self._done = False
 
+    @property
+    def done(self) -> bool:
+        return self._done
 
-# --------------------------------------------------------------------------------------
-# Dataset readers (NO dataset-scripts)
-# --------------------------------------------------------------------------------------
+    def _check_targets(self) -> None:
+        target_tokens = self.stage.target_tokens
+        target_sequences = self.stage.target_sequences
+        if target_tokens is not None and self.stats.tokens >= target_tokens:
+            self._done = True
+        if target_sequences is not None and self.stats.sequences >= target_sequences:
+            self._done = True
 
-def iter_tiny_stories(cfg: TinyStoriesStageCfg) -> Iterable[str]:
-    """Stream TinyStories from the Hub without dataset scripts."""
-    ds = load_dataset(cfg.dataset_name, split=cfg.dataset_split, streaming=cfg.streaming)
-    count = 0
-    warmup_cut = None
-    if cfg.warmup_fraction and cfg.warmup_fraction > 0:
-        # Just emit a fraction then stop (useful for quick tests)
-        warmup_cut = cfg.warmup_fraction
-
-    total = None
-    # If not streaming, we can know length
-    if not cfg.streaming and isinstance(ds, DatasetDict) is False:
-        try:
-            total = len(ds)  # type: ignore
-        except Exception:
-            total = None
-
-    for i, row in enumerate(ds):  # type: ignore
-        # Choose a reasonable text field
-        for key in ("text", "content", "story", "completion", "output"):
-            if key in row and isinstance(row[key], str):
-                yield row[key]
-                break
-        count += 1
-        if warmup_cut is not None and total is not None and total > 0:
-            if (i + 1) / total >= warmup_cut:
-                break
-
-
-def iter_wikipedia(cfg: WikipediaStageCfg) -> Iterable[str]:
-    """Stream Wikipedia JSON/JSONL dumps without loading full files into RAM."""
-    root = _as_path(cfg.raw_root)
-    if not root.exists():
-        raise FileNotFoundError(f"wikipedia.raw_root not found: {root}")
-
-    files = sorted(root.rglob(cfg.file_glob))
-    if cfg.max_files:
-        files = files[: cfg.max_files]
-    if cfg.warmup_fraction is not None and 0 < cfg.warmup_fraction < 1.0 and files:
-        limit = max(1, int(len(files) * cfg.warmup_fraction))
-        files = files[:limit]
-
-    emitted = 0
-    norm_opts = SimpleNamespace(**(cfg.normalization or {}))
-    text_keys = (cfg.text_field, "text", "article", "content", "body")
-
-    def _normalise(text: Optional[str]) -> Optional[str]:
-        if not isinstance(text, str):
-            return None
-        cleaned = normalise_text(text, norm_opts) if cfg.normalization else text
-        return cleaned.strip() if cleaned and cleaned.strip() else None
-
-    def _yield_text_fields(obj: Any) -> Iterator[str]:
-        if isinstance(obj, dict):
-            for key in text_keys:
-                value = obj.get(key)
-                if isinstance(value, str):
-                    yield value
-                    break
-        elif isinstance(obj, list):
-            for item in obj:
-                yield from _yield_text_fields(item)
-
-    for path in files:
-        if cfg.max_records and emitted >= cfg.max_records:
+    def encode_batch(self, texts: List[str]) -> Iterator[Dict[str, Any]]:
+        if not texts:
             return
-        try:
-            for record in _stream_json_records(path):
-                if cfg.max_records and emitted >= cfg.max_records:
-                    return
-                for raw_text in _yield_text_fields(record):
-                    if cfg.max_records and emitted >= cfg.max_records:
-                        return
-                    text = _normalise(raw_text)
-                    if not text:
-                        continue
-                    emitted += 1
-                    yield text
-        except Exception as exc:
-            LOGGER.warning("Failed to stream %s: %s", path, exc)
-            continue
-
-
-def load_text_iterable(stage_name: str, stages_cfg: Dict[str, Any]) -> Tuple[Iterable[str], int, bool]:
-    """
-    Returns (iterator, context_length, pads_to_context)
-    """
-    sn = stage_name.lower()
-    if sn == "tiny_stories":
-        cfg = TinyStoriesStageCfg(**stages_cfg["tiny_stories"])
-        return iter_tiny_stories(cfg), cfg.context_length, False
-    if sn == "wikipedia":
-        cfg = WikipediaStageCfg(**stages_cfg["wikipedia"])
-        return iter_wikipedia(cfg), cfg.context_length, cfg.pads_to_context
-    # If someone asks for 'openwebtext', fail fast with an actionable message.
-    if sn == "openwebtext":
-        raise RuntimeError(
-            "Support for dataset scripts like 'openwebtext.py' was removed in datasets>=4.0. "
-            "Use another source (e.g., TinyStories/Wikipedia) or pin datasets<4.0."
-        )
-    raise KeyError(f"Unknown stage '{stage_name}'. Check your Config.yml.")
-
-
-# --------------------------------------------------------------------------------------
-# Tokenization
-# --------------------------------------------------------------------------------------
-
-def tokenize_records(
-    tokenizer: PreTrainedTokenizerBase,
-    texts: Iterable[str],
-    min_tokens: int,
-    max_tokens: int,
-    pads_to_context: bool,
-    dedupe: bool,
-    stats: RunningStats,
-    workers: Optional[int] = None,
-    dedupe_mask: Optional[int] = None,
-    dedupe_max_keys: Optional[int] = None,
-) -> Iterator[Dict[str, Any]]:
-    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else -1
-    seen_hashes: set[int] = set() if dedupe else set()
-    seen_queue: Optional[deque[int]] = deque() if dedupe and dedupe_max_keys else None
-
-    def iter_candidates() -> Iterator[str]:
-        for text in texts:
-            stats.records += 1
-            if dedupe:
-                h = _maybe_hash(text)
-                if dedupe_mask is not None:
-                    h &= dedupe_mask
-                if h in seen_hashes:
-                    stats.duplicates += 1
-                    continue
-                seen_hashes.add(h)
-                if seen_queue is not None:
-                    seen_queue.append(h)
-                    if dedupe_max_keys is not None and len(seen_queue) > dedupe_max_keys:
-                        old = seen_queue.popleft()
-                        if old in seen_hashes:
-                            seen_hashes.remove(old)
-            yield text
-
-    def prepare_batch(batch: List[str]) -> List[np.ndarray]:
-        encoded = tokenizer(
-            batch,
-            add_special_tokens=True,
-            padding="max_length" if max_tokens and pads_to_context else False,
-            truncation=True if max_tokens else False,
-            max_length=max_tokens if max_tokens else None,
+        encoded = self.tokenizer(
+            texts,
+            add_special_tokens=False,
+            padding=False,
+            truncation=False,
             return_attention_mask=False,
         )["input_ids"]
+        for tokens in encoded:
+            if self.done:
+                return
+            yield from self.consume_tokens(tokens)
+            if self.done:
+                return
 
-        outputs: List[np.ndarray] = []
-        for ids in encoded:
-            if not pads_to_context and pad_id != -1:
-                ids = _trim_padding(ids, pad_id)
-            arr = np.asarray(ids, dtype=np.int32)
-            outputs.append(arr)
-        return outputs
+    def consume_tokens(self, tokens: Iterable[int]) -> Iterator[Dict[str, Any]]:
+        ids = [int(t) for t in tokens]
+        if len(ids) < self.stage.min_tokens:
+            self.stats.discarded += 1
+            return
+        if len(ids) >= self.seq_len:
+            yield from self._emit_long(ids)
+        else:
+            yield from self._emit_short(ids)
 
-    batch_size = max(1, workers or 1)
-    buffer: List[str] = []
-    for text in iter_candidates():
-        buffer.append(text)
-        if len(buffer) >= batch_size:
-            for arr in prepare_batch(buffer):
-                stats.tokens += int(arr.shape[0])
-                if arr.shape[0] < max(min_tokens, 0):
-                    stats.discarded += 1
-                    continue
-                yield {"input_ids": arr.tolist(), "length": int(arr.shape[0])}
-            buffer.clear()
+    def _emit_long(self, tokens: List[int]) -> Iterator[Dict[str, Any]]:
+        strategy = (self.stage.long_document_strategy or "random_window").lower()
+        seq_len = self.seq_len
+        length = len(tokens)
+        if strategy == "sequential":
+            stride = int(self.stage.sequential_window_stride or seq_len)
+            max_windows = int(self.stage.max_windows_per_document or 0)
+            emitted = 0
+            offset = 0
+            while offset < length:
+                window = tokens[offset : offset + seq_len]
+                if not window:
+                    break
+                if len(window) < self.stage.min_tokens:
+                    break
+                row = self._emit_sequence(window)
+                if row:
+                    yield row
+                emitted += 1
+                if self.done:
+                    return
+                if max_windows and emitted >= max_windows:
+                    return
+                if len(window) < seq_len:
+                    if self.stage.drop_remainder_windows:
+                        return
+                    break
+                offset += stride
+            return
 
-    if buffer:
-        for arr in prepare_batch(buffer):
-            stats.tokens += int(arr.shape[0])
-            if arr.shape[0] < max(min_tokens, 0):
-                stats.discarded += 1
+        max_start = max(0, length - seq_len)
+        start = int(self.rng.integers(0, max_start + 1)) if max_start > 0 else 0
+        window = tokens[start : start + seq_len]
+        row = self._emit_sequence(window)
+        if row:
+            yield row
+
+    def _emit_short(self, tokens: List[int]) -> Iterator[Dict[str, Any]]:
+        if self.stage.pack_sequences:
+            seq = list(tokens)
+            if self.stage.add_eos:
+                seq.append(self.eos_id)
+            self.pack_buffer.extend(seq)
+            while len(self.pack_buffer) >= self.seq_len:
+                chunk = self.pack_buffer[: self.seq_len]
+                del self.pack_buffer[: self.seq_len]
+                row = self._emit_sequence(chunk)
+                if row:
+                    yield row
+                if self.done:
+                    return
+        else:
+            seq = list(tokens)
+            if self.stage.add_eos and len(seq) < self.seq_len:
+                seq.append(self.eos_id)
+            row = self._emit_sequence(seq)
+            if row:
+                yield row
+
+    def flush_remainder(self) -> Iterator[Dict[str, Any]]:
+        if not self.stage.pack_sequences or not self.stage.emit_final_partial:
+            return
+        if not self.pack_buffer or self.done:
+            return
+        chunk = list(self.pack_buffer)
+        self.pack_buffer.clear()
+        row = self._emit_sequence(chunk)
+        if row:
+            yield row
+
+    def _emit_sequence(self, seq: List[int]) -> Optional[Dict[str, Any]]:
+        if not seq:
+            return None
+        if len(seq) > self.seq_len:
+            seq = seq[: self.seq_len]
+        length = len(seq)
+        self.stats.sequences += 1
+        self.stats.tokens += length
+        row = {"input_ids": seq, "length": length}
+        self._check_targets()
+        return row
+
+
+def _extract_text(row: Dict[str, Any], source: StageSourceCfg) -> Optional[str]:
+    if source.text_template:
+        safe_map = defaultdict(str)
+        for key, value in row.items():
+            if isinstance(value, (str, int, float)):
+                safe_map[key] = value
+        try:
+            text = source.text_template.format_map(safe_map)
+        except KeyError:
+            text = None
+        if text:
+            return str(text)
+
+    if source.join_fields:
+        parts = []
+        for key in source.join_fields:
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+        if parts:
+            return source.join_separator.join(parts)
+
+    candidates: List[str] = []
+    if source.text_field:
+        candidates.append(source.text_field)
+    candidates.extend(source.text_fields)
+    keys = candidates or list(DEFAULT_TEXT_FIELDS)
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _iter_hf_source(source: StageSourceCfg) -> Iterator[str]:
+    if not source.dataset_name:
+        raise ValueError("HuggingFace source requires 'dataset_name'.")
+    kwargs: Dict[str, Any] = {}
+    if source.dataset_config:
+        kwargs["name"] = source.dataset_config
+    if source.data_files is not None:
+        kwargs["data_files"] = source.data_files
+    ds = load_dataset(
+        source.dataset_name,
+        split=source.split,
+        streaming=source.streaming,
+        **kwargs,
+    )
+    count = 0
+    for row in ds:
+        text = _extract_text(row, source) if isinstance(row, dict) else None
+        if text:
+            yield text
+            count += 1
+            if source.max_documents and count >= source.max_documents:
+                break
+
+
+def _iter_json_dir(source: StageSourceCfg) -> Iterator[str]:
+    if not source.json_root:
+        raise ValueError("json_dir source requires 'json_root'.")
+    root = _as_path(source.json_root)
+    files = sorted(root.rglob(source.file_glob))
+    count = 0
+    for path in files:
+        for record in _stream_json_records(path):
+            if not isinstance(record, dict):
                 continue
-            yield {"input_ids": arr.tolist(), "length": int(arr.shape[0])}
+            text = _extract_text(record, source)
+            if text:
+                yield text
+                count += 1
+                if source.max_documents and count >= source.max_documents:
+                    return
 
 
-# --------------------------------------------------------------------------------------
-# Stage runners
-# --------------------------------------------------------------------------------------
+def iter_stage_text(stage: StageCfg) -> Iterator[str]:
+    for source in stage.sources:
+        source_type = (source.type or "huggingface").lower()
+        if source_type in {"hf", "huggingface"}:
+            yield from _iter_hf_source(source)
+        elif source_type in {"json", "jsonl", "json_dir"}:
+            yield from _iter_json_dir(source)
+        else:
+            raise ValueError(f"Unknown source.type '{source.type}' for stage {stage.name}")
+
+
+def iter_stage_rows(
+    stage: StageCfg,
+    tokenizer: PreTrainedTokenizerBase,
+    rng: np.random.Generator,
+    stats: StageStats,
+    batch_size: int,
+) -> Iterator[Dict[str, Any]]:
+    emitter = SequenceEmitter(stage, tokenizer, rng, stats)
+    norm = SimpleNamespace(**(stage.normalization or {}))
+    seen_hashes: set[int] = set()
+    dedupe_queue: Optional[deque[int]] = None
+    dedup_mask = None
+    if stage.deduplicate:
+        if stage.dedup_hash_bits:
+            dedup_mask = (1 << int(stage.dedup_hash_bits)) - 1
+        if stage.dedup_max_keys:
+            dedupe_queue = deque()
+
+    batch: List[str] = []
+    doc_limit = stage.max_documents
+    for raw_text in iter_stage_text(stage):
+        if emitter.done:
+            break
+        if doc_limit and stats.documents >= doc_limit:
+            break
+        if not isinstance(raw_text, str):
+            continue
+        stats.documents += 1
+        text = raw_text.strip()
+        if stage.normalization:
+            text = normalise_text(text, norm)
+        text = text.strip()
+        if not text:
+            stats.discarded += 1
+            continue
+        if stage.deduplicate:
+            h = _maybe_hash(text)
+            if dedup_mask is not None:
+                h &= dedup_mask
+            if h in seen_hashes:
+                stats.duplicates += 1
+                continue
+            seen_hashes.add(h)
+            if dedupe_queue is not None:
+                dedupe_queue.append(h)
+                if stage.dedup_max_keys and len(dedupe_queue) > stage.dedup_max_keys:
+                    old = dedupe_queue.popleft()
+                    if old in seen_hashes:
+                        seen_hashes.remove(old)
+        stats.unique_documents += 1
+        batch.append(text)
+        if len(batch) >= batch_size:
+            yield from emitter.encode_batch(batch)
+            batch.clear()
+    if batch and not emitter.done:
+        yield from emitter.encode_batch(batch)
+    if not emitter.done:
+        yield from emitter.flush_remainder()
+
 
 def _arrow_schema() -> pa.Schema:
-    return pa.schema(
-        [
-            pa.field("input_ids", pa.list_(pa.int32())),
-            pa.field("length", pa.int32()),
-        ]
-    )
+    return pa.schema([
+        pa.field("input_ids", pa.list_(pa.int32())),
+        pa.field("length", pa.int32()),
+    ])
 
 
-def stage_tokenize(
-    top_cfg: TopConfig,
-    stage_name: str,
-    tokenizer: PreTrainedTokenizerBase,
-) -> Dict[str, Any]:
-    outputs = top_cfg.outputs
-    stages_cfg = top_cfg.stages
-
-    texts, context_length, pads_to_context = load_text_iterable(stage_name, stages_cfg)
-
-    stage_key = stage_name.lower()
-    stage_cfg_map = stages_cfg.get(stage_key, {})
-
-    worker_count = stage_cfg_map.get("tokenization_workers")
-    if worker_count is None:
-        if stage_key == "wikipedia" and top_cfg.scheduling.wiki_num_workers:
-            worker_count = top_cfg.scheduling.wiki_num_workers
-        else:
-            worker_count = top_cfg.scheduling.tokenization_workers
-    if worker_count is None or worker_count <= 0:
-        worker_count = max(1, os.cpu_count() or 1)
-
-    # per-stage knobs
-    dedupe_mask = None
-    dedupe_max_keys = None
-    rows_per_shard = int(stage_cfg_map.get("rows_per_shard") or 65536)
-    stage_dir_name = stage_key
-    if stage_key == "tiny_stories":
-        min_tokens = int(stage_cfg_map.get("min_tokens", 0) or 0)
-        dedupe = False
-        batch_size = top_cfg.scheduling.write_batch_size
-        stage_dir_name = outputs.tinystories_dir or "tinystories"
-    elif stage_key == "wikipedia":
-        min_tokens = int(stage_cfg_map.get("min_tokens", 0) or 0)
-        dedupe = False
-        batch_size = top_cfg.scheduling.write_batch_size
-        stage_dir_name = outputs.wikipedia_dir or "wikipedia"
-    else:
-        # Fallbacks
-        min_tokens = 0
-        dedupe = True
-        batch_size = top_cfg.scheduling.write_batch_size
-        stage_dir_name = stage_key
-        dedupe_mask = None
-        dedupe_max_keys = None
-
-    LOGGER.info("Stage '%s' using %d tokenization workers.", stage_name, worker_count)
-
-    output_root = _as_path(outputs.processed_root)
+def stage_tokenize(top_cfg: TopConfig, stage: StageCfg, tokenizer: PreTrainedTokenizerBase, index: int) -> Dict[str, Any]:
+    rows_per_shard = int(stage.rows_per_shard or top_cfg.outputs.rows_per_shard)
+    output_root = _as_path(top_cfg.outputs.processed_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    stage_dir_name = stage.output_dir or stage.name
     stage_output_dir = output_root / stage_dir_name
-    schema = _arrow_schema()
-    shard_writer: ShardWriter | None = None
-    manifest: List[Dict[str, Any]] = []
     if not top_cfg.dry_run:
         if stage_output_dir.exists():
             shutil.rmtree(stage_output_dir)
         stage_output_dir.mkdir(parents=True, exist_ok=True)
-        shard_writer = ShardWriter(stage_output_dir, stage_key, schema, rows_per_shard)
 
-    stats = RunningStats()
-    record_stream = tokenize_records(
+    rng_seed = (top_cfg.scheduling.seed or 0) + (stage.seed_offset or 0) + index * 7919
+    rng = np.random.default_rng(rng_seed)
+    stats = StageStats()
+    record_stream = iter_stage_rows(
+        stage,
         tokenizer,
-        texts,
-        min_tokens,
-        context_length,
-        pads_to_context,
-        dedupe,
+        rng,
         stats,
-        workers=worker_count,
-        dedupe_mask=dedupe_mask,
-        dedupe_max_keys=dedupe_max_keys,
+        batch_size=max(1, top_cfg.scheduling.write_batch_size),
     )
 
+    manifest: List[Dict[str, Any]] = []
+    shard_writer: Optional[ShardWriter] = None
+    if not top_cfg.dry_run:
+        shard_writer = ShardWriter(stage_output_dir, stage_dir_name, _arrow_schema(), rows_per_shard)
+
+    preview = top_cfg.scheduling.dry_run_preview_rows
     if top_cfg.dry_run:
-        LOGGER.info("[dry-run] Tokenizing '%s' without writing output.", stage_name)
-        for _ in zip(range(200), record_stream):
-            pass
+        count = 0
+        for _ in record_stream:
+            count += 1
+            if preview and count >= preview:
+                break
+        LOGGER.info("[dry-run] Stage '%s' previewed %d sequences", stage.name, count)
     else:
         assert shard_writer is not None
-        for rows in _iter_chunks(record_stream, batch_size):
-            shard_writer.append(rows)
+        batch_buffer: List[Dict[str, Any]] = []
+        for row in record_stream:
+            batch_buffer.append(row)
+            if len(batch_buffer) >= top_cfg.scheduling.write_batch_size:
+                shard_writer.append(batch_buffer)
+                batch_buffer = []
+        if batch_buffer:
+            shard_writer.append(batch_buffer)
         shard_writer.close()
         manifest = shard_writer.manifest
-        manifest_path = stage_output_dir / "manifest.json"
-        with manifest_path.open("w", encoding="utf-8") as handle:
+        with (stage_output_dir / "manifest.json").open("w", encoding="utf-8") as handle:
             json.dump(
                 {
-                    "stage": stage_name,
-                    "total_records": stats.records,
+                    "stage": stage.name,
+                    "description": getattr(stage, "description", ""),
+                    "target_tokens": stage.target_tokens,
+                    "total_records": stats.sequences,
                     "total_tokens": stats.tokens,
+                    "documents": stats.documents,
                     "shards": manifest,
                 },
                 handle,
@@ -655,41 +671,40 @@ def stage_tokenize(
             )
 
     LOGGER.info(
-        "Stage '%s' done | records=%d tokens=%d duplicates=%d discarded=%d",
-        stage_name,
-        stats.records,
+        "Stage '%s' done | documents=%d sequences=%d tokens=%d duplicates=%d discarded=%d",
+        stage.name,
+        stats.documents,
+        stats.sequences,
         stats.tokens,
         stats.duplicates,
         stats.discarded,
     )
     stage_stats = stats.to_dict()
+    stage_stats["target_tokens"] = stage.target_tokens
+    stage_stats["sequence_length"] = stage.sequence_length
+    stage_stats["output_dir"] = str(stage_output_dir)
     if not top_cfg.dry_run:
-        stage_stats["output_dir"] = str(stage_output_dir)
         stage_stats["shards"] = manifest
     return stage_stats
 
 
-def stage_merge(top_cfg: TopConfig) -> Dict[str, Any]:
-    """Write a simple manifest pointing at the generated stage directories."""
-    out = top_cfg.outputs
-    root = _as_path(out.processed_root)
-    tinystories_dir = root / (out.tinystories_dir or "tinystories")
-    wikipedia_dir = root / (out.wikipedia_dir or "wikipedia")
-    merged = root / out.merged_filename
-
-    manifest = {
-        "tinystories": str(tinystories_dir) if tinystories_dir.exists() else None,
-        "wikipedia": str(wikipedia_dir) if wikipedia_dir.exists() else None,
-    }
-    with merged.open("w", encoding="utf-8") as handle:
+def stage_merge(top_cfg: TopConfig, stages: List[StageCfg]) -> Dict[str, Any]:
+    root = _as_path(top_cfg.outputs.processed_root)
+    manifest = {}
+    for stage in stages:
+        stage_dir = root / (stage.output_dir or stage.name)
+        entry = {
+            "path": str(stage_dir),
+            "sequence_length": stage.sequence_length,
+            "target_tokens": stage.target_tokens,
+        }
+        manifest[stage.name] = entry
+    manifest_path = root / top_cfg.outputs.manifest_filename
+    with manifest_path.open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
-    LOGGER.info("Wrote merged manifest -> %s", merged)
+    LOGGER.info("Wrote dataset manifest → %s", manifest_path)
     return manifest
 
-
-# --------------------------------------------------------------------------------------
-# Config loading
-# --------------------------------------------------------------------------------------
 
 def _find_default(path_candidates: List[str]) -> Optional[str]:
     for p in path_candidates:
@@ -698,32 +713,72 @@ def _find_default(path_candidates: List[str]) -> Optional[str]:
     return None
 
 
+def _parse_stage_sources(raw_sources: Iterable[Any]) -> List[StageSourceCfg]:
+    sources: List[StageSourceCfg] = []
+    for src in raw_sources:
+        if src is None:
+            continue
+        src_dict = dict(src)
+        cfg = StageSourceCfg(
+            type=src_dict.get("type", "huggingface"),
+            dataset_name=src_dict.get("dataset_name"),
+            dataset_config=src_dict.get("dataset_config"),
+            split=src_dict.get("split", "train"),
+            streaming=bool(src_dict.get("streaming", True)),
+            data_files=src_dict.get("data_files"),
+            text_field=src_dict.get("text_field"),
+            text_fields=list(src_dict.get("text_fields", []) or []),
+            join_fields=list(src_dict.get("join_fields", []) or []),
+            join_separator=str(src_dict.get("join_separator", " \n")),
+            text_template=src_dict.get("text_template"),
+            json_root=src_dict.get("json_root"),
+            file_glob=src_dict.get("file_glob", "**/*.json"),
+            max_documents=src_dict.get("max_documents"),
+        )
+        sources.append(cfg)
+    return sources
+
+
+def _parse_stages(corpus_cfg: OmegaConf, outputs: OutputsCfg) -> List[StageCfg]:
+    if "stages" not in corpus_cfg or corpus_cfg.get("stages") is None:
+        raise ValueError("No 'stages' section found in Config.yml")
+    stage_map = OmegaConf.to_container(corpus_cfg["stages"], resolve=True)
+    stages: List[StageCfg] = []
+    for name, raw_stage in stage_map.items():
+        raw_dict = dict(raw_stage or {})
+        raw_dict.setdefault("name", name)
+        raw_dict.setdefault("output_dir", raw_dict.get("output_dir", name))
+        raw_dict["sources"] = _parse_stage_sources(raw_dict.get("sources", []))
+        stage_cfg = StageCfg(**raw_dict)
+        stage_cfg.sequence_length = int(stage_cfg.sequence_length)
+        stage_cfg.min_tokens = int(stage_cfg.min_tokens or 0)
+        stage_cfg.rows_per_shard = int(stage_cfg.rows_per_shard or outputs.rows_per_shard)
+        if stage_cfg.target_tokens is not None:
+            stage_cfg.target_tokens = int(stage_cfg.target_tokens)
+        if stage_cfg.target_sequences is not None:
+            stage_cfg.target_sequences = int(stage_cfg.target_sequences)
+        if stage_cfg.dedup_max_keys is not None:
+            stage_cfg.dedup_max_keys = int(stage_cfg.dedup_max_keys)
+        if not stage_cfg.sources:
+            raise ValueError(f"Stage '{stage_cfg.name}' has no sources defined")
+        stages.append(stage_cfg)
+    return stages
+
+
 def load_combined_config(user_cfg_path: Optional[str]) -> TopConfig:
-    """
-    Combines your Global_Config.yml and Config.yml if present.
-    If --config is provided, it can be either a single YAML with both trees,
-    or just the corpus Config.yml (we'll still try to auto-load Global_Config.yml).
-    """
-    # Try to auto-detect both files in CWD
     script_dir = Path(__file__).resolve().parent
     corpus_cfg_path = user_cfg_path or _find_default(
         [
             "Config.yml",
             "config.yml",
-            "configs/Config.yml",
-            "configs/config.yml",
             str(script_dir / "Config.yml"),
             str(script_dir / "config.yml"),
         ]
     )
-    global_cfg_path = _find_default(
-        [
-            "Global_Config.yml",
-            "global_config.yml",
-            "configs/Global_Config.yml",
-            "configs/global_config.yml",
-        ]
-    )
+    global_cfg_path = _find_default([
+        "Global_Config.yml",
+        "global_config.yml",
+    ])
 
     corpus_cfg = OmegaConf.create({})
     global_cfg = OmegaConf.create({})
@@ -732,26 +787,18 @@ def load_combined_config(user_cfg_path: Optional[str]) -> TopConfig:
         corpus_cfg = OmegaConf.load(corpus_cfg_path)
         LOGGER.info("Loaded dataset config: %s", corpus_cfg_path)
     else:
-        LOGGER.info("No Config.yml found; defaulting to TinyStories only.")
+        raise FileNotFoundError("Config.yml not found; cannot build datasets.")
 
     if global_cfg_path and Path(global_cfg_path).exists():
         global_cfg = OmegaConf.load(global_cfg_path)
         LOGGER.info("Loaded global config: %s", global_cfg_path)
 
-    # Build pieces with sensible defaults + overrides from YAMLs
     tok = TokenizerCfg(**(global_cfg.get("tokenizer") or {}))
     paths = PathsCfg(**(global_cfg.get("paths") or {}))
-    io_cfg = IOcfg(**(global_cfg.get("io") or {}))
-    train_def = TrainingDefaultsCfg(**(global_cfg.get("training_defaults") or {}))
+    train_defaults = TrainingDefaultsCfg(**(global_cfg.get("training_defaults") or {}))
     outputs = OutputsCfg(**(corpus_cfg.get("outputs") or {}))
-    sched = SchedulingCfg(**(corpus_cfg.get("scheduling") or {}))
-
-    # Stages dict (present keys from corpus config)
-    stages: Dict[str, Any] = {}
-    if "tiny_stories" in corpus_cfg:
-        stages["tiny_stories"] = dict(corpus_cfg["tiny_stories"])
-    if "wikipedia" in corpus_cfg:
-        stages["wikipedia"] = dict(corpus_cfg["wikipedia"])
+    scheduling = SchedulingCfg(**(corpus_cfg.get("scheduling") or {}))
+    stages = _parse_stages(corpus_cfg, outputs)
 
     base_prefix = paths.data_root or ""
     if base_prefix:
@@ -762,39 +809,28 @@ def load_combined_config(user_cfg_path: Optional[str]) -> TopConfig:
     if paths.logs_root:
         paths.logs_root = _resolve_path(base_prefix, paths.logs_root)
     outputs.processed_root = _resolve_path(base_prefix, outputs.processed_root) or outputs.processed_root
-    if "wikipedia" in stages:
-        raw_root = stages["wikipedia"].get("raw_root")
-        stages["wikipedia"]["raw_root"] = _resolve_path(base_prefix, raw_root)
-
-    # If nothing provided, default to TinyStories
-    if not stages:
-        stages["tiny_stories"] = TinyStoriesStageCfg().__dict__
-        # Ensure output directories exist
-        outputs.tinystories_dir = outputs.tinystories_dir or "tinystories"
-        outputs.wikipedia_dir = outputs.wikipedia_dir or "wikipedia"
+    for stage in stages:
+        for source in stage.sources:
+            if source.json_root:
+                source.json_root = _resolve_path(base_prefix, source.json_root)
 
     return TopConfig(
         tokenizer=tok,
         paths=paths,
-        io=io_cfg,
-        training_defaults=train_def,
+        training_defaults=train_defaults,
         outputs=outputs,
-        scheduling=sched,
+        scheduling=scheduling,
         stages=stages,
         dry_run=False,
     )
 
 
-# --------------------------------------------------------------------------------------
-# CLI / Orchestration
-# --------------------------------------------------------------------------------------
-
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--config", type=str, default=None, help="Path to corpus Config.yml. If omitted, auto-detects.")
-    p.add_argument("--stage", type=str, default="all", help="Stage name ('tiny_stories'/'wikipedia') or 'all'.")
-    p.add_argument("--dry-run", action="store_true", help="Run without writing outputs.")
-    return p.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default=None, help="Path to Config.yml (optional)")
+    parser.add_argument("--stage", type=str, default="all", help="Stage name or 'all'")
+    parser.add_argument("--dry-run", action="store_true", help="Tokenize without writing shards")
+    return parser.parse_args()
 
 
 def main() -> None:
@@ -803,39 +839,35 @@ def main() -> None:
     if args.dry_run:
         top_cfg.dry_run = True
 
-    # Tokenizer
     tokenizer = load_tokenizer(top_cfg.tokenizer)
-
     np.random.seed(top_cfg.training_defaults.global_seed or top_cfg.scheduling.seed)
 
-    # Determine stages
-    if args.stage == "all":
-        stage_list = list(top_cfg.stages.keys())
-        if not stage_list:
-            LOGGER.error("No stages discovered in config. Nothing to do.")
-            return
+    stage_lookup = {stage.name: stage for stage in top_cfg.stages}
+    if args.stage != "all":
+        key = args.stage.strip()
+        if key not in stage_lookup:
+            available = ", ".join(stage_lookup.keys())
+            raise KeyError(f"Stage '{key}' not found. Available stages: {available}")
+        stages_to_run = [stage_lookup[key]]
     else:
-        stage_list = [args.stage]
+        stages_to_run = list(top_cfg.stages)
 
-    # Run
-    all_stats: Dict[str, Any] = {}
-    for stg in stage_list:
-        st = stage_tokenize(top_cfg, stg, tokenizer)
-        all_stats[f"stage_{stg}"] = st
+    stats_bundle: Dict[str, Any] = {}
+    for idx, stage in enumerate(stages_to_run):
+        stats_bundle[stage.name] = stage_tokenize(top_cfg, stage, tokenizer, idx)
 
-    # Optional merge (only if more than one stage)
-    if len(stage_list) > 1:
-        merge_stats = stage_merge(top_cfg)
-        if merge_stats:
-            all_stats["merge"] = merge_stats
+    if not top_cfg.dry_run and stages_to_run:
+        manifest = stage_merge(top_cfg, stages_to_run)
+        stats_bundle["manifest"] = manifest
 
-    # Write stats
     stats_path = _as_path(top_cfg.outputs.processed_root) / top_cfg.outputs.stats_filename
-    _as_path(top_cfg.outputs.processed_root).mkdir(parents=True, exist_ok=True)
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
     with stats_path.open("w", encoding="utf-8") as handle:
-        json.dump(all_stats, handle, indent=2)
+        json.dump(stats_bundle, handle, indent=2)
     LOGGER.info("Wrote stats → %s", stats_path)
 
 
 if __name__ == "__main__":
+    import time
+
     main()

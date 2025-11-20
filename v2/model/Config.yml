@@ -3,35 +3,36 @@ model:
   num_heads: 10
   num_layers: 16
   feed_forward_size: 2560
-  num_kv_heads: 5
   rope_dim: 64
   context_length: 2048
-  dropout_rate: 0.02
+  dropout_rate: 0.0
   activation: silu
   use_remat: false
   param_dtype: float32
-  compute_dtype: bfloat16
+  compute_dtype: float32 ###
 
 optimizer:
-  base_learning_rate: 2.0e-4
-  min_learning_rate: 2.0e-5
-  weight_decay: 0.05
+  base_learning_rate: 3.0e-4
+  min_learning_rate: 3.0e-5
+  warmup_steps: 2000
+  weight_decay: 0.10
   gradient_clip_norm: 1.0
-  warmup_steps: 1000
+
   weight_decay_exclusions:
     - bias
     - scale
     - embedding
 
 training:
-  batch_size: 8
+  batch_size: 4 ####
   gradient_accumulation: 1
   max_epochs: 3
   seed: 0
-  log_every: 10000
+  log_every: 2000
   checkpoint_every: 20000
-  device: cpu
+  device: cpu ####
   label_smoothing: 0.0
+  scan_chunk: 8
 
 stages:
   - name: sentences_warmup
@@ -41,6 +42,7 @@ stages:
     end_ratio: 0.05
     shuffle: true
     fraction: 1.0
+
   - name: simple_wiki_lm
     dataset: simple_wiki_lm
     seq_len: 128
@@ -48,13 +50,15 @@ stages:
     end_ratio: 0.125
     shuffle: true
     fraction: 1.0
+
   - name: simple_wiki_core
     dataset: simple_wiki
     seq_len: 128
     epochs: 1
-    end_ratio: 0.2
+    end_ratio: 0.20
     shuffle: true
     fraction: 1.0
+
   - name: finewiki_l256
     dataset: finewiki_l256
     seq_len: 256
@@ -62,20 +66,23 @@ stages:
     end_ratio: 0.48
     shuffle: true
     fraction: 1.0
+
   - name: finewiki_l512
     dataset: finewiki_l512
     seq_len: 512
     epochs: 1
-    end_ratio: 0.6
+    end_ratio: 0.60
     shuffle: true
     fraction: 1.0
+
   - name: open_textbooks
     dataset: open_textbooks_l512
     seq_len: 512
     epochs: 1
-    end_ratio: 0.8
+    end_ratio: 0.80
     shuffle: true
     fraction: 1.0
+
   - name: fineweb_edu_l512
     dataset: fineweb_edu_l512
     seq_len: 512
@@ -83,6 +90,7 @@ stages:
     end_ratio: 0.875
     shuffle: true
     fraction: 1.0
+
   - name: fineweb_edu_l1024
     dataset: fineweb_edu_l1024
     seq_len: 1024
@@ -90,6 +98,7 @@ stages:
     end_ratio: 0.95
     shuffle: true
     fraction: 1.0
+
   - name: definitions_short
     dataset: definitions_short
     seq_len: 128

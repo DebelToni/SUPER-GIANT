@@ -22,3 +22,5 @@ io:
   shard_size_tokens: 2048
   validation_fraction: 0.01
   min_sequence_tokens: 128
+# export XLA_PYTHON_CLIENT_PREALLOCATE=true
+# export XLA_PYTHON_CLIENT_MEM_FRACTION=1.0

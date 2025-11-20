@@ -307,6 +307,13 @@ def parse_args() -> argparse.Namespace:
     cli.add_argument("--checkpoint_dir", default="checkpoints")
     cli.add_argument("--checkpoint_every", type=int, default=None)
     cli.add_argument("--resume", nargs="?", const="latest", default=None)
+    cli.add_argument(
+        "--scan_chunk",
+        type=int,
+        default=None,
+        help="Number of steps to fuse with lax.scan inside a single compiled call (reduces host dispatch overhead). "
+             "Defaults to training.scan_chunk in the config.",
+    )
     return cli.parse_args()
 
 
@@ -413,6 +420,31 @@ def main() -> None:
         runtime.loader.load_state(state_dict)
 
     base_rng = jax.random.PRNGKey(seed)
+    cfg_chunk = int(getattr(cfg.training, "scan_chunk", 1))
+    chunk_size = max(1, int(args.scan_chunk)) if args.scan_chunk is not None else max(1, cfg_chunk)
+
+    def _stack_batches(batches):
+        return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *batches)
+
+    @jax.jit
+    def _run_chunk(params, opt_state, batch_chunk, start_step):
+        def body(carry, batch):
+            params, opt_state, step = carry
+            dropout_rng = jax.random.fold_in(base_rng, step)
+            params, opt_state, loss = train_step(
+                params,
+                opt_state,
+                batch,
+                model=model,
+                optimizer=optimizer,
+                dropout_rng=dropout_rng,
+            )
+            return (params, opt_state, step + 1), loss
+
+        (params, opt_state, _), losses = jax.lax.scan(
+            body, (params, opt_state, start_step), batch_chunk
+        )
+        return params, opt_state, losses
 
     start = time.time()
     for stage_idx in range(current_stage_idx, len(stage_runtimes)):
@@ -438,63 +470,64 @@ def main() -> None:
             runtime.loader, size=2 if IS_GPU else 0
         )
         while completed_in_stage < stage_steps_target:
-            try:
-                batch = next(batch_iter)
-            except StopIteration:
+            batch_list = []
+            for _ in range(chunk_size):
+                try:
+                    batch_list.append(next(batch_iter))
+                except StopIteration:
+                    break
+            if not batch_list:
                 break
-            dropout_rng = jax.random.fold_in(base_rng, global_step)
-            params, opt_state, loss = train_step(
-                params,
-                opt_state,
-                batch,
-                model=model,
-                optimizer=optimizer,
-                dropout_rng=dropout_rng,
-            )
-            global_step += 1
-            completed_in_stage += 1
-            last_loss = float(loss)
-            pbar.update(1)
 
-            if global_step % cfg.training.log_every == 0:
-                elapsed = time.time() - start
-                ppl = float(np.exp(loss)) if loss < 20 else float("inf")
-                print(
-                    f"step {global_step:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
-                    f"loss {loss:.4f} ppl {ppl:.2f} ({elapsed:.1f}s)"
-                )
-                start = time.time()
+            chunk = _stack_batches(batch_list)
+            params, opt_state, losses = _run_chunk(params, opt_state, chunk, global_step)
+            losses = np.asarray(jax.device_get(losses))
 
-            if global_step % checkpoint_every == 0:
-                ckpt_file = save_training_state(
-                    cfg=cfg,
-                    params=params,
-                    opt_state=opt_state,
-                    checkpoint_dir=checkpoint_dir,
-                    global_step=global_step,
-                    stage_idx=stage_idx,
-                    completed_in_stage=completed_in_stage,
-                    stage_states=stage_states,
-                    runtime=runtime,
-                )
-                print(f"💾 checkpoint → {ckpt_file}")
+            for loss_val in losses:
+                global_step += 1
+                completed_in_stage += 1
+                last_loss = float(loss_val)
+                pbar.update(1)
 
-            if _stop_requested:
-                ckpt_file = save_training_state(
-                    cfg=cfg,
-                    params=params,
-                    opt_state=opt_state,
-                    checkpoint_dir=checkpoint_dir,
-                    global_step=global_step,
-                    stage_idx=stage_idx,
-                    completed_in_stage=completed_in_stage,
-                    stage_states=stage_states,
-                    runtime=runtime,
-                )
-                print(f"💾 checkpoint (signal) → {ckpt_file}")
-                print("[signal] Checkpoint saved after signal; exiting early.")
-                pbar.close()
-                return
+                if global_step % cfg.training.log_every == 0:
+                    elapsed = time.time() - start
+                    ppl = float(np.exp(loss_val)) if loss_val < 20 else float("inf")
+                    print(
+                        f"step {global_step:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
+                        f"loss {loss_val:.4f} ppl {ppl:.2f} ({elapsed:.1f}s)"
+                    )
+                    start = time.time()
+
+                if global_step % checkpoint_every == 0:
+                    ckpt_file = save_training_state(
+                        cfg=cfg,
+                        params=params,
+                        opt_state=opt_state,
+                        checkpoint_dir=checkpoint_dir,
+                        global_step=global_step,
+                        stage_idx=stage_idx,
+                        completed_in_stage=completed_in_stage,
+                        stage_states=stage_states,
+                        runtime=runtime,
+                    )
+                    print(f"💾 checkpoint → {ckpt_file}")
+
+                if _stop_requested:
+                    ckpt_file = save_training_state(
+                        cfg=cfg,
+                        params=params,
+                        opt_state=opt_state,
+                        checkpoint_dir=checkpoint_dir,
+                        global_step=global_step,
+                        stage_idx=stage_idx,
+                        completed_in_stage=completed_in_stage,
+                        stage_states=stage_states,
+                        runtime=runtime,
+                    )
+                    print(f"💾 checkpoint (signal) → {ckpt_file}")
+                    print("[signal] Checkpoint saved after signal; exiting early.")
+                    pbar.close()
+                    return
 
             stage_states[runtime.config.name] = runtime.loader.state_dict()
 

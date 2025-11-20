@@ -1,6 +1,7 @@
 model:
   embedding_size: 640
   num_heads: 10
+  num_kv_heads: 5
   num_layers: 16
   feed_forward_size: 2560
   rope_dim: 64
@@ -30,6 +31,8 @@ training:
   seed: 0
   log_every: 2000
   checkpoint_every: 20000
+  mini_checkpoint_every: 200
+  mini_max_to_keep: 3
   device: cpu ####
   label_smoothing: 0.0
   scan_chunk: 8

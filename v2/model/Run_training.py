@@ -7,7 +7,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -15,6 +14,7 @@ import optax
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
+from async_mini_checkpoint import AsyncMiniCheckpointManager
 from GiantGPT import GiantGPT
 from Training_step import train_step
 from arrow_data_loader import (
@@ -36,7 +36,7 @@ _stop_requested = False
 
 
 def _signal_handler(signum, frame):
-    """Mark that we should checkpoint+exit after finishing the current step."""
+    """Mark that we should exit after finishing the current in-flight chunk."""
     global _stop_requested
     if _stop_requested:
         return
@@ -44,7 +44,7 @@ def _signal_handler(signum, frame):
         name = signal.Signals(signum).name
     except ValueError:
         name = str(signum)
-    print(f"\n[signal] Caught {name}; will checkpoint and exit after this step...", flush=True)
+    print(f"\n[signal] Caught {name}; will exit after the current chunk...", flush=True)
     _stop_requested = True
 
 
@@ -372,17 +372,52 @@ def main() -> None:
     checkpoint_dir = str(checkpoint_path)
     checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
 
+    training_cfg = cfg.training
+    mini_every = int(getattr(training_cfg, "mini_checkpoint_every", max(1, checkpoint_every // 10)))
+    mini_max_to_keep = int(getattr(training_cfg, "mini_max_to_keep", 3))
+    mini_ckpt_dir = Path(checkpoint_dir) / "mini"
+    mini_ckpt_mgr = AsyncMiniCheckpointManager(
+        ckpt_dir=mini_ckpt_dir,
+        max_to_keep=mini_max_to_keep,
+    )
+
+    stage_states: Dict[str, Dict[str, int]] = {
+        runtime.config.name: runtime.loader.state_dict() for runtime in stage_runtimes
+    }
+    current_stage_idx = 0
+    stage_step_total = 0
+
     resume_request = args.resume
-    if resume_request and resume_request != "latest":
+    mini_state_template = {
+        "params": params,
+        "opt_state": opt_state,
+        "global_step": global_step,
+        "stage_index": current_stage_idx,
+        "stage_step_total": stage_step_total,
+        "stage_states": stage_states,
+    }
+    resumed_from_mini = False
+
+    if resume_request == "latest":
+        restored_state, restored_step = mini_ckpt_mgr.restore_latest(mini_state_template)
+        if restored_step:
+            params = restored_state["params"]
+            opt_state = restored_state["opt_state"]
+            global_step = int(restored_state.get("global_step", restored_step))
+            current_stage_idx = int(restored_state.get("stage_index", 0))
+            stage_step_total = int(restored_state.get("stage_step_total", 0))
+            stage_states = restored_state.get("stage_states", {})
+            resumed_from_mini = True
+            print(f"↩ Resumed from mini checkpoint at step {restored_step}")
+        else:
+            resume_request = "latest_full"
+    elif resume_request and resume_request != "latest":
         resume_path = Path(resume_request)
         if not resume_path.is_absolute():
             resume_request = str((base_root / resume_path).resolve())
-    else:
-        resume_request = args.resume
 
-    # Resume if requested
-    if resume_request:
-        if resume_request == "latest":
+    if resume_request and not resumed_from_mini:
+        if resume_request == "latest_full":
             ckpt_path = latest_ckpt(checkpoint_dir)
             if ckpt_path is None:
                 raise FileNotFoundError("No checkpoints available to resume from.")
@@ -404,16 +439,14 @@ def main() -> None:
             print("⚠ No optimizer state found; proceeding with fresh AdamW buffers.")
         print(f"▶ Resumed parameters from {ckpt_path} at step {global_step}")
 
-    # Restore dataloader state if available
-    loader_state = load_dataloader_state(dataloader_state_path(cfg, global_step)) if global_step else None
-    stage_states: Dict[str, Dict[str, int]] = {}
-    current_stage_idx = 0
-    stage_step_total = 0
-    if loader_state:
-        current_stage_idx = int(loader_state.get("stage_index", 0))
-        stage_step_total = int(loader_state.get("stage_step_total", 0))
-        stage_states = loader_state.get("stage_states", {})
-        print(f"▶ Restored dataloader state at stage {current_stage_idx} step {stage_step_total}")
+    loader_state = None
+    if not resumed_from_mini:
+        loader_state = load_dataloader_state(dataloader_state_path(cfg, global_step)) if global_step else None
+        if loader_state:
+            current_stage_idx = int(loader_state.get("stage_index", 0))
+            stage_step_total = int(loader_state.get("stage_step_total", 0))
+            stage_states = loader_state.get("stage_states", {})
+            print(f"▶ Restored dataloader state at stage {current_stage_idx} step {stage_step_total}")
 
     for idx, runtime in enumerate(stage_runtimes):
         state_dict = stage_states.get(runtime.config.name, {"epoch": 0, "step_in_epoch": 0})
@@ -489,6 +522,8 @@ def main() -> None:
                 last_loss = float(loss_val)
                 pbar.update(1)
 
+                stage_states[runtime.config.name] = runtime.loader.state_dict()
+
                 if global_step % cfg.training.log_every == 0:
                     elapsed = time.time() - start
                     ppl = float(np.exp(loss_val)) if loss_val < 20 else float("inf")
@@ -497,6 +532,17 @@ def main() -> None:
                         f"loss {loss_val:.4f} ppl {ppl:.2f} ({elapsed:.1f}s)"
                     )
                     start = time.time()
+
+                if mini_every and (global_step % mini_every == 0):
+                    mini_state = {
+                        "params": params,
+                        "opt_state": opt_state,
+                        "global_step": global_step,
+                        "stage_index": stage_idx,
+                        "stage_step_total": completed_in_stage,
+                        "stage_states": stage_states,
+                    }
+                    mini_ckpt_mgr.save(global_step, mini_state)
 
                 if global_step % checkpoint_every == 0:
                     ckpt_file = save_training_state(
@@ -513,23 +559,10 @@ def main() -> None:
                     print(f"💾 checkpoint → {ckpt_file}")
 
                 if _stop_requested:
-                    ckpt_file = save_training_state(
-                        cfg=cfg,
-                        params=params,
-                        opt_state=opt_state,
-                        checkpoint_dir=checkpoint_dir,
-                        global_step=global_step,
-                        stage_idx=stage_idx,
-                        completed_in_stage=completed_in_stage,
-                        stage_states=stage_states,
-                        runtime=runtime,
-                    )
-                    print(f"💾 checkpoint (signal) → {ckpt_file}")
-                    print("[signal] Checkpoint saved after signal; exiting early.")
+                    mini_ckpt_mgr.wait_until_finished(timeout=4.0)
+                    print("[signal] Stop requested; exiting after current chunk.")
                     pbar.close()
                     return
-
-            stage_states[runtime.config.name] = runtime.loader.state_dict()
 
         pbar.close()
         if last_loss is not None:
@@ -551,6 +584,7 @@ def main() -> None:
             "stage_states": stage_states,
         },
     )
+    mini_ckpt_mgr.wait_until_finished(timeout=10.0)
     print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
     print("→ Use this checkpoint as --init_checkpoint for the QA finetune stage.")
 

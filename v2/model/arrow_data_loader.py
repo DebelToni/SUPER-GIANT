@@ -235,8 +235,11 @@ class StageDataLoader:
 
 def save_dataloader_state(path: Path, state: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
         json.dump(state, handle, indent=2)
+    # Atomic rename avoids partial JSON reads after crashes.
+    tmp_path.replace(path)
 
 
 def load_dataloader_state(path: Path) -> Optional[Dict]:

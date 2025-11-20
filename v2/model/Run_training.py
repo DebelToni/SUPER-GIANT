@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,26 @@ from flax import core as flax_core
 from flax import serialization
 
 jax.config.update("jax_default_matmul_precision", "tensorfloat32")
+
+
+_stop_requested = False
+
+
+def _signal_handler(signum, frame):
+    """Mark that we should checkpoint+exit after finishing the current step."""
+    global _stop_requested
+    if _stop_requested:
+        return
+    try:
+        name = signal.Signals(signum).name
+    except ValueError:
+        name = str(signum)
+    print(f"\n[signal] Caught {name}; will checkpoint and exit after this step...", flush=True)
+    _stop_requested = True
+
+
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 @dataclass
@@ -228,6 +249,33 @@ def dataloader_state_path(cfg: OmegaConf, step: int) -> Path:
     return root / f"state_{step:07d}.json"
 
 
+def save_training_state(
+    *,
+    cfg: OmegaConf,
+    params,
+    opt_state,
+    checkpoint_dir: str,
+    global_step: int,
+    stage_idx: int,
+    completed_in_stage: int,
+    stage_states: Dict[str, Dict[str, int]],
+    runtime: StageRuntime,
+):
+    """Persist params, optimizer, and dataloader progress atomically."""
+    ckpt_file = save_ckpt(params, global_step, checkpoint_dir)
+    save_opt_state(opt_state, global_step, checkpoint_dir)
+    stage_states[runtime.config.name] = runtime.loader.state_dict()
+    save_dataloader_state(
+        dataloader_state_path(cfg, global_step),
+        {
+            "stage_index": stage_idx,
+            "stage_step_total": completed_in_stage,
+            "stage_states": stage_states,
+        },
+    )
+    return ckpt_file
+
+
 def parse_args() -> argparse.Namespace:
     cli = argparse.ArgumentParser("SUPER-GIANT training")
     cli.add_argument("--checkpoint_dir", default="checkpoints")
@@ -386,18 +434,35 @@ def main() -> None:
                 start = time.time()
 
             if global_step % checkpoint_every == 0:
-                ckpt_file = save_ckpt(params, global_step, checkpoint_dir)
-                save_opt_state(opt_state, global_step, checkpoint_dir)
-                print(f"💾 checkpoint → {ckpt_file}")
-                stage_states[runtime.config.name] = runtime.loader.state_dict()
-                save_dataloader_state(
-                    dataloader_state_path(cfg, global_step),
-                    {
-                        "stage_index": stage_idx,
-                        "stage_step_total": completed_in_stage,
-                        "stage_states": stage_states,
-                    },
+                ckpt_file = save_training_state(
+                    cfg=cfg,
+                    params=params,
+                    opt_state=opt_state,
+                    checkpoint_dir=checkpoint_dir,
+                    global_step=global_step,
+                    stage_idx=stage_idx,
+                    completed_in_stage=completed_in_stage,
+                    stage_states=stage_states,
+                    runtime=runtime,
                 )
+                print(f"💾 checkpoint → {ckpt_file}")
+
+            if _stop_requested:
+                ckpt_file = save_training_state(
+                    cfg=cfg,
+                    params=params,
+                    opt_state=opt_state,
+                    checkpoint_dir=checkpoint_dir,
+                    global_step=global_step,
+                    stage_idx=stage_idx,
+                    completed_in_stage=completed_in_stage,
+                    stage_states=stage_states,
+                    runtime=runtime,
+                )
+                print(f"💾 checkpoint (signal) → {ckpt_file}")
+                print("[signal] Checkpoint saved after signal; exiting early.")
+                pbar.close()
+                return
 
             stage_states[runtime.config.name] = runtime.loader.state_dict()
 

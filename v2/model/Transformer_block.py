@@ -1,4 +1,3 @@
-# Transfomer block with jax's cuDNN fused attention
 from __future__ import annotations
 
 from typing import Optional
@@ -34,23 +33,7 @@ PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
 COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
 
 from jax import config as jax_config
-jax_config.update("jax_default_matmul_precision", MODEL_CFG.compute_dtype)  
-
-class EPU(nn.Module):
-    """Clipped exponential unit with learnable min, max, k (JAX/Flax).
-    Forward: exp(k * clip(x, min, max))"""
-    @nn.compact
-    def __call__(self, x):
-        # min in [-5,-2], max in [1,4], k in [0,1)
-        m = self.param("min", lambda key: jax.random.randint(key, shape=(), minval=-5, maxval=-1).astype(PARAM_DTYPE))
-        M = self.param("max", lambda key: jax.random.randint(key, shape=(), minval=1, maxval=5).astype(PARAM_DTYPE))
-        k = self.param(
-            "k",
-            lambda key: jax.random.uniform(key, shape=(), minval=0.0, maxval=1.0, dtype=jnp.dtype(PARAM_DTYPE)),
-        )
-        m, M, k = m.astype(x.dtype), M.astype(x.dtype), k.astype(x.dtype)
-        x_clamped = jnp.clip(x, a_min=m, a_max=M)
-        return jnp.exp(k * x_clamped)  
+jax_config.update("jax_default_matmul_precision", MODEL_CFG.compute_dtype)
 
 def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)
@@ -83,10 +66,7 @@ class NativeJaxSelfAttention(nn.Module):
         assert(self.rotary_dim <= self.head_dim), "less than or equal to head_dim"
         assert(self.rotary_dim % 2 == 0), "rotary_dim must be even"
 
-        # self.q_proj = nn.Dense(self.qkv_features, use_bias=False, name="q_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
-        # self.k_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="k_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
-        # self.v_proj = nn.Dense(self.num_kv * self.head_dim, use_bias=False, name="v_proj", dtype=self.dtype, param_dtype=Config.param_dtype)
-        total_out = self.qkv_features + 2 * self.num_kv * self.head_dim  # (num_heads*head_dim) + 2*(num_kv*head_dim)
+        total_out = self.qkv_features + 2 * self.num_kv * self.head_dim
         self.qkv_proj = nn.Dense(
             total_out,
             use_bias=False,
@@ -107,16 +87,12 @@ class NativeJaxSelfAttention(nn.Module):
     @nn.compact
     def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
         b, l, _ = x.shape
-        # head_dim = self.qkv_features // self.num_heads
-        
+
         head_dim = self.head_dim
         q_size   = self.num_heads * head_dim
         kv_size  = self.num_kv * head_dim
 
-        # q = self.q_proj(x).reshape(b, l, self.num_heads, head_dim)
-        # k = self.k_proj(x).reshape(b, l, self.num_kv, head_dim)
-        # v = self.v_proj(x).reshape(b, l, self.num_kv, head_dim)
-        qkv = self.qkv_proj(x)  # (b, l, q_size + 2*kv_size)
+        qkv = self.qkv_proj(x)
 
         q_chunk, k_chunk, v_chunk = jnp.split(qkv, [q_size, q_size + kv_size], axis=-1)
         q = q_chunk.reshape(b, l, self.num_heads, head_dim)
@@ -132,9 +108,6 @@ class NativeJaxSelfAttention(nn.Module):
         angles   = jnp.einsum('i,j->ij', seq, inv_freq)
         emb      = jnp.repeat(angles, 2, axis=-1)
 
-        # sin, cos = jnp.sin(emb).astype(self.dtype), jnp.cos(emb).astype(self.dtype)
-        # sin, cos = sin[None, :, None, :], cos[None, :, None, :]
-        # q, k = apply_rope(q, sin, cos), apply_rope(k, sin, cos)
 
         sin, cos = jnp.sin(emb)[None, :, None, :], jnp.cos(emb)[None, :, None, :]
         sin = sin.astype(self.dtype); cos = cos.astype(self.dtype)
@@ -174,20 +147,6 @@ class NativeJaxSelfAttention(nn.Module):
             attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
             attn_bias = attn_bias[None, None, None, :]
 
-            # if Config.device == "gpu":
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         bias=attn_bias,
-            #         is_causal=False,
-            #         implementation="cudnn",
-            #     )
-            # else:
-            #     y = jax.nn.dot_product_attention(
-            #         q, k, v,
-            #         bias=attn_bias,
-            #         is_causal=False,
-            #         implementation="xla",
-            #     )
             y = jax.nn.dot_product_attention(q, k, v, bias=attn_bias, is_causal=False)
 
             y = y.reshape(b, 1, self.qkv_features)
@@ -196,10 +155,6 @@ class NativeJaxSelfAttention(nn.Module):
             if False:
                 q = q / jnp.sqrt(head_dim)
 
-            # if Config.device == "gpu":
-            #     y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
-            # else:
-            #     y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="xla")
             y = jax.nn.dot_product_attention(q, k, v, is_causal=True)
             y = y.reshape(b, l, self.qkv_features)
 
@@ -246,13 +201,7 @@ class TinyTransformerBlock(nn.Module):
             )(h_norm)
 
             u, v = jnp.split(h_proj, 2, axis=-1)
-            # Choose activation per config (default SiLU).
-            # Supported: "silu" (SwiGLU: silu(u) * v), "epu" (EPU(u) * v)
-            act_name = str(getattr(MODEL_CFG, "activation", "silu")).lower()
-            if act_name == "epu":
-                h_gate = EPU(name="epu")(u)
-            else:
-                h_gate = nn.silu(u)
+            h_gate = nn.silu(u)
             h_ffn = h_gate * v
 
             h_ffn = nn.Dense(

@@ -18,7 +18,10 @@ def save(params, step: int, ckpt_dir: str = "checkpoints") -> str:
     """
     os.makedirs(ckpt_dir, exist_ok=True)
     path = os.path.join(ckpt_dir, f"step_{step:07d}.npz")
-    save_npz(params, path)
+    tmp_path = path + ".tmp"
+    # Write to temp file then atomically rename to avoid partial checkpoints.
+    save_npz(params, tmp_path)
+    os.replace(tmp_path, path)
     return path
 
 
@@ -45,8 +48,10 @@ def save_opt_state(opt_state, step: int, ckpt_dir: str = "checkpoints") -> str:
     """
     os.makedirs(ckpt_dir, exist_ok=True)
     path = os.path.join(ckpt_dir, _opt_state_name(step))
-    with open(path, "wb") as handle:
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "wb") as handle:
         handle.write(serialization.to_bytes(opt_state))
+    os.replace(tmp_path, path)
     return path
 
 

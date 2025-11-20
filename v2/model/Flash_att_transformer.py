@@ -15,7 +15,7 @@ CONFIG_PATH = Path(__file__).resolve().parent / "Config.yml"
 Config = OmegaConf.load(CONFIG_PATH)
 
 from jax import config as jax_config
-jax_config.update("jax_default_matmul_precision", Config.compute_dtype)  
+jax_config.update("jax_default_matmul_precision", Config.compute_dtype)
 
 def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)
@@ -48,11 +48,9 @@ class NativeJaxSelfAttention(nn.Module):
         self.head_dim = self.qkv_features // self.num_heads
         assert (self.rotary_dim <= self.head_dim), "less than or equal to head_dim"
         assert (self.rotary_dim % 2 == 0), "rotary_dim must be even"
-        # Enforce *vanilla* MHA (no grouped/multi-query): HK == H
         assert self.num_kv == self.num_heads, "vanilla attention only: set num_kv == num_heads"
 
-        # Combined qkv projection (q_size + 2*kv_size)
-        total_out = self.qkv_features + 2 * self.num_kv * self.head_dim  # == 3 * qkv_features when num_kv == num_heads
+        total_out = self.qkv_features + 2 * self.num_kv * self.head_dim
         self.qkv_proj = nn.Dense(
             total_out,
             use_bias=False,
@@ -75,11 +73,10 @@ class NativeJaxSelfAttention(nn.Module):
         q_size = self.num_heads * head_dim
         kv_size = self.num_kv * head_dim
 
-        qkv = self.qkv_proj(x)  # (b, l, q_size + 2*kv_size)
+        qkv = self.qkv_proj(x)
         q_chunk, k_chunk, v_chunk = jnp.split(qkv, [q_size, q_size + kv_size], axis=-1)
 
         q = q_chunk.reshape(b, l, self.num_heads, head_dim)
-        # Vanilla MHA: K,V have H heads (no grouped query)
         k = k_chunk.reshape(b, l, self.num_heads, head_dim)
         v = v_chunk.reshape(b, l, self.num_heads, head_dim)
 
@@ -99,19 +96,16 @@ class NativeJaxSelfAttention(nn.Module):
             cached_k = self.variable("cache", "k", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
             cached_v = self.variable("cache", "v", jnp.zeros, (b, self.num_heads, Config.context_length, head_dim), self.dtype)
 
-            # write current k/v into cache (k,v shape: (b, l, H, d) -- typically l==1 in streaming)
             cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k.squeeze(1))
             cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v.squeeze(1))
 
-            # Build (b, key_len, H, d) and call FlashAttention with causal mask
             k_full = jnp.swapaxes(cached_k.value, 1, 2)
             v_full = jnp.swapaxes(cached_v.value, 1, 2)
-            y_heads = flash_mha(q, k_full, v_full, is_causal=True)   # (b, l, H, d)
+            y_heads = flash_mha(q, k_full, v_full, is_causal=True)
             y = y_heads.reshape(b, l, self.qkv_features)
 
         else:
-            # Full-seq path (b, l, H, d) with causal mask via FlashAttention
-            y_heads = flash_mha(q, k, v, is_causal=True)             # (b, l, H, d)
+            y_heads = flash_mha(q, k, v, is_causal=True)
             y = y_heads.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)

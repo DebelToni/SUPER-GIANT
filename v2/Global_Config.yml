@@ -6,7 +6,7 @@ tokenizer:
   pad_token_override: null
 
 paths:
-  data_root: "/Volumes/SSD/giant-data"
+  data_root: "/Volumes/SSD/r2"
   processed_data_root: "dataset_artifacts"
   dataloader_state_root: "checkpoints/dataloader_state"
   logs_root: "logs"

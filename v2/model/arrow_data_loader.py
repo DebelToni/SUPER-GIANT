@@ -189,8 +189,10 @@ class StageDataLoader:
         self.step_in_epoch = int(state.get("step_in_epoch", 0))
         shard_pos = int(state.get("shard_pos", 0))
         row_ptr = int(state.get("row_ptr", 0))
-        self._rows_consumed = int(state.get("rows_consumed", 0))
+        saved_rows_consumed = int(state.get("rows_consumed", 0))
         self._prepare_epoch()
+        # _prepare_epoch resets counters; restore consumed rows before loading shard.
+        self._rows_consumed = saved_rows_consumed
         if not self._shard_order:
             raise RuntimeError("Dataset contains no shards")
         target_pos = min(max(shard_pos, 0), len(self._shard_order) - 1)
@@ -223,12 +225,14 @@ class StageDataLoader:
         self.step_in_epoch += 1
 
         seq_len = self.seq_len
-        inputs = batch_tokens[:, : seq_len - 1]
-        targets = batch_tokens[:, 1:seq_len]
-        eff_lengths = np.clip(batch_lengths, 2, seq_len)
+        inputs = batch_tokens
+        pad_col = np.full((self.batch_size, 1), self.pad_token_id, dtype=batch_tokens.dtype)
+        targets = np.concatenate([batch_tokens[:, 1:], pad_col], axis=1)
+        eff_lengths = np.clip(batch_lengths, 1, seq_len)
+        valid_target_len = np.maximum(eff_lengths - 1, 0)
         mask = np.zeros_like(inputs, dtype=np.float32)
-        positions = np.arange(seq_len - 1)[None, :]
-        mask[positions < (eff_lengths[:, None] - 1)] = 1.0
+        positions = np.arange(seq_len)[None, :]
+        mask[positions < valid_target_len[:, None]] = 1.0
 
         return {"input": inputs, "target": targets, "mask": mask}
 

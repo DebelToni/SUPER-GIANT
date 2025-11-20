@@ -31,8 +31,6 @@ from optimizer_utils import create_weight_decay_mask
 from flax import core as flax_core
 from flax import serialization
 
-jax.config.update("jax_default_matmul_precision", "tensorfloat32")
-
 
 _stop_requested = False
 

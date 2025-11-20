@@ -33,7 +33,9 @@ PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
 COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
 
 from jax import config as jax_config
-jax_config.update("jax_default_matmul_precision", MODEL_CFG.compute_dtype)
+jax_config.update("jax_default_matmul_precision", MODEL_CFG.compute_dtype)  
+
+IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
 
 def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)
@@ -47,6 +49,16 @@ def apply_partial_rope(x, sin, cos, rot_dim):
     x_rot, x_pass = jnp.split(x, [rot_dim], axis=-1)
     x_rot = (x_rot * cos) + (_rotate_every_two(x_rot) * sin)
     return jnp.concatenate([x_rot, x_pass], axis=-1)
+
+
+def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype):
+    inv_freq = 1.0 / (10000 ** (jnp.arange(0, rotary_dim, 2) / rotary_dim))
+    positions = jnp.arange(seq_len)
+    angles = jnp.einsum("i,j->ij", positions, inv_freq)
+    emb = jnp.repeat(angles, 2, axis=-1)
+    sin = jnp.sin(emb)[None, :, None, :].astype(dtype)
+    cos = jnp.cos(emb)[None, :, None, :].astype(dtype)
+    return sin, cos
 
 class NativeJaxSelfAttention(nn.Module):
     """Multi‑head self‑attention using jax.nn.dot_product_attention (cuDNN)."""
@@ -83,6 +95,10 @@ class NativeJaxSelfAttention(nn.Module):
         )
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
+        # Precompute rotary embeddings once and slice per call.
+        self._rope_sin, self._rope_cos = _build_rope_cache(
+            MODEL_CFG.context_length, self.rotary_dim, self.dtype
+        )
 
     @nn.compact
     def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
@@ -100,17 +116,25 @@ class NativeJaxSelfAttention(nn.Module):
         v = v_chunk.reshape(b, l, self.num_kv,  head_dim)
 
         if self.num_kv != self.num_heads:
-            k = jnp.repeat(k, self.num_heads // self.num_kv, axis=2)
-            v = jnp.repeat(v, self.num_heads // self.num_kv, axis=2)
+            group = max(1, self.num_heads // self.num_kv)
+            kv_indices = jnp.arange(self.num_heads) // group
+            k = jnp.take(k, kv_indices, axis=2)
+            v = jnp.take(v, kv_indices, axis=2)
 
-        inv_freq = 1.0 / (10000 ** (jnp.arange(0, self.rotary_dim, 2) / self.rotary_dim))
-        seq      = jnp.array([cur_index]) if use_kv_cache else jnp.arange(l)
-        angles   = jnp.einsum('i,j->ij', seq, inv_freq)
-        emb      = jnp.repeat(angles, 2, axis=-1)
-
-
-        sin, cos = jnp.sin(emb)[None, :, None, :], jnp.cos(emb)[None, :, None, :]
-        sin = sin.astype(self.dtype); cos = cos.astype(self.dtype)
+        if use_kv_cache:
+            sin = jax.lax.dynamic_slice(
+                self._rope_sin,
+                (0, cur_index, 0, 0),
+                (1, 1, 1, self.rotary_dim),
+            )
+            cos = jax.lax.dynamic_slice(
+                self._rope_cos,
+                (0, cur_index, 0, 0),
+                (1, 1, 1, self.rotary_dim),
+            )
+        else:
+            sin = self._rope_sin[:, :l, :, :]
+            cos = self._rope_cos[:, :l, :, :]
 
         q = apply_partial_rope(q, sin, cos, self.rotary_dim)
         k = apply_partial_rope(k, sin, cos, self.rotary_dim)
@@ -147,7 +171,8 @@ class NativeJaxSelfAttention(nn.Module):
             attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
             attn_bias = attn_bias[None, None, None, :]
 
-            y = jax.nn.dot_product_attention(q, k, v, bias=attn_bias, is_causal=False)
+            impl = "cudnn" if IS_GPU else "xla"
+            y = jax.nn.dot_product_attention(q, k, v, bias=attn_bias, is_causal=False, implementation=impl)
 
             y = y.reshape(b, 1, self.qkv_features)
 
@@ -155,7 +180,8 @@ class NativeJaxSelfAttention(nn.Module):
             if False:
                 q = q / jnp.sqrt(head_dim)
 
-            y = jax.nn.dot_product_attention(q, k, v, is_causal=True)
+            impl = "cudnn" if IS_GPU else "xla"
+            y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation=impl)
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)
@@ -174,7 +200,6 @@ class TinyTransformerBlock(nn.Module):
 
     @nn.compact
     def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
-        @nn.remat
         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
             residual = h
             h_norm = RMSNorm(name="rms1", dtype=self.dtype)(h)
@@ -213,4 +238,6 @@ class TinyTransformerBlock(nn.Module):
             h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)
             return residual + h_ffn
 
-        return _block(self, x)
+        use_remat = bool(getattr(MODEL_CFG, "use_remat", False))
+        block_fn = nn.remat(_block) if use_remat else _block
+        return block_fn(self, x)

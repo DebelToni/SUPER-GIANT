@@ -54,6 +54,9 @@ signal.signal(signal.SIGTERM, _signal_handler)
 signal.signal(signal.SIGINT, _signal_handler)
 
 
+IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
+
+
 @dataclass
 class StageConfig:
     name: str
@@ -262,6 +265,7 @@ def save_training_state(
     runtime: StageRuntime,
 ):
     """Persist params, optimizer, and dataloader progress atomically."""
+    os.makedirs(checkpoint_dir, exist_ok=True)
     ckpt_file = save_ckpt(params, global_step, checkpoint_dir)
     save_opt_state(opt_state, global_step, checkpoint_dir)
     stage_states[runtime.config.name] = runtime.loader.state_dict()
@@ -274,6 +278,30 @@ def save_training_state(
         },
     )
     return ckpt_file
+
+
+def _prefetch_to_device(iterator, size: int = 2):
+    """Simple host prefetcher to keep device fed."""
+    if size <= 0:
+        for batch in iterator:
+            yield batch
+        return
+
+    it = iter(iterator)
+    buf = []
+    try:
+        for _ in range(size):
+            buf.append(jax.device_put(next(it)))
+    except StopIteration:
+        buf.clear()
+
+    while buf:
+        batch = buf.pop(0)
+        yield batch
+        try:
+            buf.append(jax.device_put(next(it)))
+        except StopIteration:
+            buf.clear()
 
 
 def parse_args() -> argparse.Namespace:
@@ -408,8 +436,14 @@ def main() -> None:
         )
         last_loss = None
 
+        batch_iter = _prefetch_to_device(
+            runtime.loader, size=2 if IS_GPU else 0
+        )
         while completed_in_stage < stage_steps_target:
-            batch = next(runtime.loader)
+            try:
+                batch = next(batch_iter)
+            except StopIteration:
+                break
             dropout_rng = jax.random.fold_in(base_rng, global_step)
             params, opt_state, loss = train_step(
                 params,

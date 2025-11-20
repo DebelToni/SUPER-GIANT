@@ -8,6 +8,7 @@ model:
   context_length: 2048
   dropout_rate: 0.02
   activation: silu
+  use_remat: false
   param_dtype: float32
   compute_dtype: bfloat16
 
@@ -29,7 +30,7 @@ training:
   seed: 0
   log_every: 10000
   checkpoint_every: 20000
-  device: gpu
+  device: cpu
   label_smoothing: 0.0
 
 stages:

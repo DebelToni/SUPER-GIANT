@@ -1,20 +1,15 @@
 model:
-  # core dims
-  embedding_size: 640 # d_model
-  num_heads: 10 # d_head = 64
+  embedding_size: 640
+  num_heads: 10
   num_layers: 16
-  feed_forward_size: 2560 # ~4 * d_model
-  # attention details
-  num_kv_heads: 8 # GQA: fewer KV heads than Q heads
-  rope_dim: 64 # full head dim = d_model / num_heads
-  # context
-  context_length: 2048 # train mostly ≤1024 now, but supports 2k later
-  # regularization / activations
-  dropout_rate: 0.02 # small but non-zero for 2B tokens
-  activation: silu # or swiglu if your impl supports it
-  # dtypes
+  feed_forward_size: 2560
+  num_kv_heads: 5
+  rope_dim: 64
+  context_length: 2048
+  dropout_rate: 0.02
+  activation: silu
   param_dtype: float32
-  compute_dtype: bfloat16 # keep float32 if you haven't wired bf16 yet
+  compute_dtype: bfloat16
 
 optimizer:
   base_learning_rate: 2.0e-4

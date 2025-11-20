@@ -75,6 +75,9 @@ class NativeJaxSelfAttention(nn.Module):
             self.qkv_features % self.num_heads == 0
         ), "qkv_features must be divisible by num_heads"
         self.head_dim = self.qkv_features // self.num_heads
+        assert (
+            self.num_heads % self.num_kv == 0
+        ), "num_heads must be divisible by num_kv_heads for grouped attention"
         assert(self.rotary_dim <= self.head_dim), "less than or equal to head_dim"
         assert(self.rotary_dim % 2 == 0), "rotary_dim must be even"
 
@@ -103,6 +106,8 @@ class NativeJaxSelfAttention(nn.Module):
     @nn.compact
     def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
         b, l, _ = x.shape
+        # Flash attention (cuDNN) supports bias only when sequence length is even; fall back otherwise.
+        impl = "cudnn" if (IS_GPU and l >= 128 and l % 2 == 0) else "xla"
 
         head_dim = self.head_dim
         q_size   = self.num_heads * head_dim
@@ -115,11 +120,10 @@ class NativeJaxSelfAttention(nn.Module):
         k = k_chunk.reshape(b, l, self.num_kv,  head_dim)
         v = v_chunk.reshape(b, l, self.num_kv,  head_dim)
 
+        group = max(1, self.num_heads // self.num_kv)
+        kv_indices = None
         if self.num_kv != self.num_heads:
-            group = max(1, self.num_heads // self.num_kv)
             kv_indices = jnp.arange(self.num_heads) // group
-            k = jnp.take(k, kv_indices, axis=2)
-            v = jnp.take(v, kv_indices, axis=2)
 
         if use_kv_cache:
             sin = jax.lax.dynamic_slice(
@@ -146,42 +150,50 @@ class NativeJaxSelfAttention(nn.Module):
                 "cache",
                 "k",
                 jnp.zeros,
-                (b, self.num_heads, MODEL_CFG.context_length, head_dim),
+                (b, self.num_kv, MODEL_CFG.context_length, head_dim),
                 self.dtype,
             )
             cached_v = self.variable(
                 "cache",
                 "v",
                 jnp.zeros,
-                (b, self.num_heads, MODEL_CFG.context_length, head_dim),
+                (b, self.num_kv, MODEL_CFG.context_length, head_dim),
                 self.dtype,
             )
 
 
-            cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k.squeeze(1))
-            cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v.squeeze(1))
-            k = jnp.swapaxes(cached_k.value, 1, 2)
-            v = jnp.swapaxes(cached_v.value, 1, 2)
+            k_to_cache = jnp.swapaxes(k, 1, 2)  # (b, num_kv, l, hd)
+            v_to_cache = jnp.swapaxes(v, 1, 2)
+            if l == 1:
+                cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k_to_cache[:, :, 0, :])
+                cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v_to_cache[:, :, 0, :])
+            else:
+                cached_k.value = cached_k.value.at[:, :, cur_index : cur_index + l, :].set(k_to_cache)
+                cached_v.value = cached_v.value.at[:, :, cur_index : cur_index + l, :].set(v_to_cache)
 
-            if False:
-                q = q / jnp.sqrt(head_dim)
-
-            key_len   = k.shape[1]
-            valid     = jnp.arange(key_len) <= cur_index
+            k_full = jnp.swapaxes(cached_k.value, 1, 2)  # (b, context, num_kv, hd)
+            v_full = jnp.swapaxes(cached_v.value, 1, 2)
+            if kv_indices is not None:
+                k_full = jnp.take(k_full, kv_indices, axis=2)
+                v_full = jnp.take(v_full, kv_indices, axis=2)
+            key_len = k_full.shape[1]
+            cur_max = cur_index + (l - 1)
+            valid = jnp.arange(key_len) <= cur_max
             attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
             attn_bias = attn_bias[None, None, None, :]
-
-            impl = "cudnn" if IS_GPU else "xla"
-            y = jax.nn.dot_product_attention(q, k, v, bias=attn_bias, is_causal=False, implementation=impl)
-
-            y = y.reshape(b, 1, self.qkv_features)
+            y = jax.nn.dot_product_attention(
+                q, k_full, v_full, bias=attn_bias, is_causal=False, implementation=impl
+            )
+            y = y.reshape(b, l, self.qkv_features)
 
         else:
             if False:
                 q = q / jnp.sqrt(head_dim)
 
-            impl = "cudnn" if IS_GPU else "xla"
-            y = jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation=impl)
+            k_full = k if kv_indices is None else jnp.take(k, kv_indices, axis=2)
+            v_full = v if kv_indices is None else jnp.take(v, kv_indices, axis=2)
+
+            y = jax.nn.dot_product_attention(q, k_full, v_full, is_causal=True, implementation=impl)
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)

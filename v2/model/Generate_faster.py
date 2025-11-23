@@ -247,7 +247,16 @@ def main():
     decode_time = time.perf_counter() - decode_start
 
     generated = jnp.concatenate([prompt, tokens_new], axis=1)
-    text = tokenizer.decode(np.asarray(generated[0]), skip_special_tokens=True)
+    full_tokens = np.asarray(generated[0])
+    text = tokenizer.decode(full_tokens, skip_special_tokens=True)
+
+    stop_on_eos = bool(getattr(cfg, "inference", {}).get("stop_on_eos", False)) if isinstance(cfg, dict) else bool(getattr(getattr(cfg, "inference", {}), "stop_on_eos", False))
+    eos_id = tokenizer.eos_token_id
+    if stop_on_eos and eos_id is not None:
+        idx = np.where(full_tokens == eos_id)[0]
+        if idx.size > 0:
+            cut = int(idx[0])
+            text = tokenizer.decode(full_tokens[:cut], skip_special_tokens=True) + "<EOS>"
 
     print("\n==================== RESULT ====================")
     print(text)

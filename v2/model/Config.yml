@@ -136,3 +136,6 @@ evaluate:
   batch_size: 1
   seed: 42
   checkpoint_dir: "checkpoints"
+
+inference:
+  stop_on_eos: true

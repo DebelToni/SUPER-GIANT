@@ -151,13 +151,13 @@ def encode_segment(tokenizer, text: str) -> List[int]:
     return tokenizer.encode(text, add_special_tokens=False)
 
 
-def trim_generated(ids: np.ndarray, eos_id: Optional[int]) -> np.ndarray:
-    if ids.size == 0 or eos_id is None:
-        return ids
+def trim_generated(ids: np.ndarray, eos_id: Optional[int], stop_on_eos: bool) -> Tuple[np.ndarray, bool]:
+    if ids.size == 0 or eos_id is None or not stop_on_eos:
+        return ids, False
     idx = np.where(ids == eos_id)[0]
     if idx.size == 0:
-        return ids
-    return ids[: idx[0]]
+        return ids, False
+    return ids[: idx[0]], True
 
 
 def block_tree(tree) -> None:
@@ -317,8 +317,11 @@ def main():
             rng_key=sample_key,
         )
 
-        trimmed = trim_generated(tokens_new, tokenizer.eos_token_id)
-        response_text = tokenizer.decode(trimmed, skip_special_tokens=True).strip()
+        stop_on_eos = bool(getattr(cfg.inference, "stop_on_eos", False)) if hasattr(cfg, "inference") else False
+        trimmed, hit_eos = trim_generated(tokens_new, tokenizer.eos_token_id, stop_on_eos)
+        response_text = tokenizer.decode(trimmed if hit_eos else tokens_new, skip_special_tokens=True).strip()
+        if hit_eos:
+            response_text = response_text + "<EOS>"
 
         if args.chat:
             history_tokens.extend(trimmed.tolist())

@@ -101,70 +101,82 @@ class QwenAttention(nn.Module):
         )
 
     @nn.compact
-    def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(
+        self,
+        x,
+        *,
+        deterministic: bool,
+        use_kv_cache: bool = False,
+        cur_index: Optional[int] = None,
+    ):
+        # x: [B, L, d_model]
         b, l, _ = x.shape
-        q = self.q_proj(x).reshape(b, l, self.num_heads, self.head_dim)
-        k = self.k_proj(x).reshape(b, l, self.num_kv, self.head_dim)
-        v = self.v_proj(x).reshape(b, l, self.num_kv, self.head_dim)
 
+        # Projections -> [B, L, heads, head_dim]
+        q = self.q_proj(x).reshape(b, l, self.num_heads, self.head_dim)
+        k = self.k_proj(x).reshape(b, l, self.num_kv,   self.head_dim)
+        v = self.v_proj(x).reshape(b, l, self.num_kv,   self.head_dim)
+
+        # ---- RoPE ----
+        # _rope_sin/_rope_cos: [1, context_length, 1, rope_dim]
         if use_kv_cache:
+            assert cur_index is not None, "cur_index required with kv cache"
+            # In your pipeline, L == 1 when use_kv_cache=True, but this works for L > 1 too.
             sin = jax.lax.dynamic_slice(
-                self._rope_sin, (0, cur_index, 0, 0), (1, 1, 1, self.rope_dim)
+                self._rope_sin, (0, cur_index, 0, 0), (1, l, 1, self.rope_dim)
             )
             cos = jax.lax.dynamic_slice(
-                self._rope_cos, (0, cur_index, 0, 0), (1, 1, 1, self.rope_dim)
+                self._rope_cos, (0, cur_index, 0, 0), (1, l, 1, self.rope_dim)
             )
         else:
-            sin = self._rope_sin[:, :l, :, :]
+            sin = self._rope_sin[:, :l, :, :]  # [1, L, 1, rope_dim]
             cos = self._rope_cos[:, :l, :, :]
 
+        # q,k: [B, L, heads, head_dim] / [B, L, kv_heads, head_dim]
         q = apply_partial_rope(q, sin, cos, self.rope_dim)
         k = apply_partial_rope(k, sin, cos, self.rope_dim)
 
-        group = max(1, self.num_heads // self.num_kv)
-
+        # ---- KV cache ----
         if use_kv_cache:
-            assert cur_index is not None, "cur_index required with kv cache"
+            # Cache layout: [B, S, K, H] to match jax.nn.dot_product_attention
+            cache_shape = (b, MODEL_CFG.context_length, self.num_kv, self.head_dim)
+
             cached_k = self.variable(
-                "cache",
-                "k",
-                jnp.zeros,
-                (b, self.num_kv, MODEL_CFG.context_length, self.head_dim),
-                self.dtype,
+                "cache", "k", jnp.zeros, cache_shape, self.dtype
             )
             cached_v = self.variable(
-                "cache",
-                "v",
-                jnp.zeros,
-                (b, self.num_kv, MODEL_CFG.context_length, self.head_dim),
-                self.dtype,
+                "cache", "v", jnp.zeros, cache_shape, self.dtype
             )
 
-            k_to_cache = jnp.swapaxes(k, 1, 2)
-            v_to_cache = jnp.swapaxes(v, 1, 2)
-
+            # Write current block [B, L, K, H] into sequence axis at cur_index
             cached_k.value = jax.lax.dynamic_update_slice(
-                cached_k.value, k_to_cache, (0, 0, cur_index, 0)
+                cached_k.value, k, (0, cur_index, 0, 0)
             )
             cached_v.value = jax.lax.dynamic_update_slice(
-                cached_v.value, v_to_cache, (0, 0, cur_index, 0)
+                cached_v.value, v, (0, cur_index, 0, 0)
             )
 
-            k_full = jnp.swapaxes(cached_k.value, 1, 2)  # [b, ctx, n_kv, hd]
-            v_full = jnp.swapaxes(cached_v.value, 1, 2)
-            k_full = jnp.repeat(k_full, repeats=group, axis=2)  # -> [b, ctx, n_heads, hd]
-            v_full = jnp.repeat(v_full, repeats=group, axis=2)
+            k_full = cached_k.value  # [B, S, K, H]
+            v_full = cached_v.value
+
             key_len = k_full.shape[1]
             cur_max = cur_index + (l - 1)
             valid = jnp.arange(key_len) <= cur_max
-            bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
-            bias = bias[None, None, None, :]
-            y = jax.nn.dot_product_attention(q, k_full, v_full, bias=bias, is_causal=False)
-        else:
-            k_full = jnp.repeat(k, repeats=group, axis=2)
-            v_full = jnp.repeat(v, repeats=group, axis=2)
-            y = jax.nn.dot_product_attention(q, k_full, v_full, is_causal=True)
+            bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)  # [S]
+            bias = bias[None, None, None, :]  # [1, 1, 1, S]
 
+            # JAX handles GQA/MQA: q: [B,T,N,H], k/v: [B,S,K,H]
+            y = jax.nn.dot_product_attention(
+                q, k_full, v_full, bias=bias, is_causal=False
+            )
+        else:
+            # No cache: just self-attention with full sequence
+            # q: [B,L,N,H], k/v: [B,L,K,H]
+            y = jax.nn.dot_product_attention(
+                q, k, v, is_causal=True
+            )
+
+        # y: [B, L, N, H] -> [B, L, d_model]
         y = y.reshape(b, l, self.num_heads * self.head_dim)
         y = self.o_proj(y)
         y = self.dropout(y, deterministic=deterministic)

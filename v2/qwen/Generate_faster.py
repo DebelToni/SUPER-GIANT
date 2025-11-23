@@ -112,6 +112,29 @@ def make_step_fn(model: QwenGPT, temperature: float, top_k: Optional[int]):
     return step_fn
 
 
+def _select_device():
+    target = getattr(Config.model, "device", "auto")
+    if target == "cpu":
+        return jax.devices("cpu")[0]
+    if target == "gpu":
+        try:
+            gpus = jax.devices("gpu")
+            if gpus:
+                return gpus[0]
+        except RuntimeError:
+            pass
+        print("⚠ Requested GPU but none available; falling back to CPU.")
+        return jax.devices("cpu")[0]
+    # auto
+    try:
+        gpus = jax.devices("gpu")
+        if gpus:
+            return gpus[0]
+    except RuntimeError:
+        pass
+    return jax.devices("cpu")[0]
+
+
 def generate(
     params: dict,
     model: QwenGPT,
@@ -123,7 +146,7 @@ def generate(
     *,
     return_stats: bool = False,
 ) -> str | Tuple[str, Dict[str, Any]]:
-    device = jax.devices(Config.model.get("device", "cpu"))[0] if hasattr(Config.model, "device") else jax.devices()[0]
+    device = _select_device()
     params = jax.device_put(params, device)
 
     cache = init_caches(model, params)
@@ -179,19 +202,25 @@ def generate(
     tokens.block_until_ready()
     decode_time_s = time.perf_counter() - t1
 
-    out = tokenizer.decode(
-        tokens[0, :tokens.shape[1] - pad_len + max_new_tokens],
-        skip_special_tokens=True,
-    )
+    full_tokens = np.asarray(tokens[0, :tokens.shape[1] - pad_len + max_new_tokens])
+    decoded = tokenizer.decode(full_tokens, skip_special_tokens=True)
+
+    stop_on_eos = bool(getattr(Config.inference, "stop_on_eos", False))
+    eos_id = tokenizer.eos_token_id
+    if stop_on_eos and eos_id is not None:
+        idx = np.where(full_tokens == eos_id)[0]
+        if idx.size > 0:
+            cut = int(idx[0])
+            decoded = tokenizer.decode(full_tokens[:cut], skip_special_tokens=True) + "<EOS>"
 
     if return_stats:
-        return out, {
+        return decoded, {
             "prefill_tokens": int(prompt_ids.shape[0]),
             "generated_tokens": int(max_new_tokens),
             "prefill_time_s": float(prefill_time_s),
             "decode_time_s": float(decode_time_s),
         }
-    return out
+    return decoded
 
 
 def resolve_checkpoint(path_arg: str | None) -> Path:

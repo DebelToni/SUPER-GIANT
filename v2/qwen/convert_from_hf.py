@@ -6,12 +6,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import argparse
 
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM
-
-QWEN_ID = "Qwen/Qwen2.5-0.5B"
 
 
 def to_numpy(t: torch.Tensor, transpose: bool = False) -> np.ndarray:
@@ -28,8 +27,13 @@ def bias_or_zeros(sd, key, out_dim):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Convert Qwen HF weights to JAX npz.")
+    parser.add_argument("--model_id", default="Qwen/Qwen2.5-0.5B-Instruct", help="HF model id")
+    parser.add_argument("--out_dir", default="/Volumes/SSD/r2/qwen25_0.5b_instruct", help="Output directory for npz")
+    args = parser.parse_args()
+
     model = AutoModelForCausalLM.from_pretrained(
-        QWEN_ID,
+        args.model_id,
         torch_dtype=torch.float32,
         device_map="cpu",
         use_auth_token=os.environ.get("HF_TOKEN"),
@@ -71,9 +75,10 @@ def main():
         kv[base + ("mlp", "up_proj", "kernel")] = to_numpy(sd[prefix + "mlp.up_proj.weight"], transpose=True)
         kv[base + ("mlp", "down_proj", "kernel")] = to_numpy(sd[prefix + "mlp.down_proj.weight"], transpose=True)
 
-    out_dir = Path(os.environ.get("QWEN_OUT_DIR", "/Volumes/SSD/r2/qwen25_0.5b"))
+    out_dir = Path(os.environ.get("QWEN_OUT_DIR", args.out_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "qwen25_0.5b.npz"
+    name = args.model_id.split("/")[-1].replace(".", "_")
+    out_path = out_dir / f"{name}.npz"
     np.savez(out_path, **{"/".join(k): v for k, v in kv.items()})
     print(f"Saved {out_path} with {len(kv)} tensors")
 

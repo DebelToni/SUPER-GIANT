@@ -214,8 +214,8 @@ def parse_args() -> argparse.Namespace:
         description="Interactive text generation for SUPER-GIANT with optional chat history.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--checkpoint", type=str, default=None,
-                        help="Path to a checkpoint (.npz). Use 'latest' to pick the newest file from --checkpoint_dir.")
+    parser.add_argument("--checkpoint", type=str, default="latest",
+                        help="Path to a checkpoint (.npz). Defaults to the newest file in --checkpoint_dir.")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints",
                         help="Directory (relative to data_root) when --checkpoint is omitted or set to 'latest'.")
     parser.add_argument("--prompt", type=str, default=None,

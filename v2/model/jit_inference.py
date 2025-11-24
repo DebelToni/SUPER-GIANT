@@ -73,7 +73,7 @@ def _apply_with_cache(
 def make_prefill_and_decode_fns(model: GiantGPT):
     """
     Returns two JIT-compiled functions:
-      * prefill(params, nonparam, prompt_tokens) -> (nonparam, t, last_tok_2d)
+      * prefill(params, nonparam, prompt_tokens) -> (nonparam, last_pos, last_tok_2d)
       * decode(params, nonparam, last_tok_2d, t, steps, do_sample, top_k, temperature, rng_key)
           -> (tokens_new [B, steps], nonparam)
     We capture `model` in the closure (static to the JIT).
@@ -101,7 +101,9 @@ def make_prefill_and_decode_fns(model: GiantGPT):
             nonparam, t = nonparam, t0
             last_tok_2d = jnp.zeros((B, 1), dtype=jnp.int32)
 
-        return nonparam, t, last_tok_2d
+        # Return index of the last processed token so decoding starts at that position.
+        last_pos = jnp.maximum(t - 1, jnp.array(0, jnp.int32))
+        return nonparam, last_pos, last_tok_2d
 
     def _top_k_logits(logits: Array, k: int) -> Array:
         """Mask everything below the kth largest logit."""
@@ -120,7 +122,7 @@ def make_prefill_and_decode_fns(model: GiantGPT):
         params: PyTree,
         nonparam: PyTree,
         last_tok_2d: Array,         # [B, 1] (the last prompt token or previous generated)
-        t: Array,                   # scalar int32, current position in sequence
+        t: Array,                   # scalar int32, index of last_tok_2d in the sequence
         *,
         steps: int,                 # number of new tokens to generate
         do_sample: bool = False,
@@ -159,4 +161,3 @@ def make_prefill_and_decode_fns(model: GiantGPT):
         return out, nonparam
 
     return prefill, decode
-

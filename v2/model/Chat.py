@@ -17,8 +17,6 @@ from checkpoint_io import load_npz
 from checkpoint_manager import latest as latest_ckpt
 from jit_inference import init_inference_state, make_prefill_and_decode_fns
 
-jax.config.update("jax_default_matmul_precision", "tensorfloat32")
-
 
 def load_configs() -> OmegaConf:
     model_dir = Path(__file__).resolve().parent
@@ -244,6 +242,7 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     cfg = load_configs()
+    jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
 
     if args.steps <= 0:
         raise ValueError("steps must be > 0")

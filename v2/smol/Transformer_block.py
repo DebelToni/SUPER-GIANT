@@ -38,6 +38,7 @@ jax_config.update("jax_default_matmul_precision", MODEL_CFG.compute_dtype)
 IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
 
 def _rotate_every_two(x):
+    # LLaMA-style rotation: split the last dim in half and swap with a sign flip.
     x1, x2 = jnp.split(x, 2, axis=-1)
     return jnp.concatenate((-x2, x1), axis=-1)
 
@@ -55,7 +56,8 @@ def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype):
     inv_freq = 1.0 / (10000 ** (jnp.arange(0, rotary_dim, 2) / rotary_dim))
     positions = jnp.arange(seq_len)
     angles = jnp.einsum("i,j->ij", positions, inv_freq)
-    emb = jnp.repeat(angles, 2, axis=-1)
+    # Duplicate the full frequency matrix (not each element) to form pairs.
+    emb = jnp.concatenate([angles, angles], axis=-1)
     sin = jnp.sin(emb)[None, :, None, :].astype(dtype)
     cos = jnp.cos(emb)[None, :, None, :].astype(dtype)
     return sin, cos

@@ -1,31 +1,19 @@
 model:
   embedding_size: 576
   num_heads: 9
+  num_kv_heads: 3
   num_layers: 30
   feed_forward_size: 1536
-  num_kv_heads: 3
-  vocab_size: 49152
-  rope_theta: 10000.0
+  rope_dim: 64
   context_length: 2048
   dropout_rate: 0.0
   activation: silu
-  rms_norm_eps: 1.0e-5
+  use_remat: false
   param_dtype: float32
   compute_dtype: float32
-  device: auto
-
-tokenizer:
-  name: "HuggingFaceTB/SmolLM-135M"
-  cache_dir: "tokenizer_cache"
-
-paths:
-  checkpoint_dir: "/Volumes/SSD/r2/smol/SmolLM-135M"
-
-generate:
-  temperature: 0.7
-  top_k: 50
-  max_new_tokens: 64
-  seed: 0
 
 inference:
   stop_on_eos: true
+
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"

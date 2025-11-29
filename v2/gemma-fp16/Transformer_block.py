@@ -33,7 +33,16 @@ PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
 COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
 
 from jax import config as jax_config
-jax_config.update("jax_default_matmul_precision", MODEL_CFG.compute_dtype)  
+_default_precision = "float32"
+_compute_str = str(MODEL_CFG.compute_dtype).lower()
+if _compute_str in ("bfloat16", "bf16"):
+    _default_precision = "bfloat16"
+elif _compute_str in ("float32", "fp32"):
+    _default_precision = "float32"
+elif _compute_str in ("float16", "fp16"):
+    _default_precision = "bfloat16"  # closest supported matmul precision
+
+jax_config.update("jax_default_matmul_precision", _default_precision)
 
 IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
 

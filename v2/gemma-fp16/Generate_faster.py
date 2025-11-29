@@ -99,7 +99,6 @@ def load_tokenizer(cfg: OmegaConf):
             cache_dir=tok_cfg.cache_dir,
             use_default_system_prompt=False,
         )
-    # Avoid growing vocab; align pad with eos when needed.
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
@@ -174,7 +173,11 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     cfg = load_configs()
-    jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
+    compute_str = str(cfg.model.compute_dtype).lower()
+    if compute_str in ("bfloat16", "bf16"):
+        jax.config.update("jax_default_matmul_precision", "bfloat16")
+    else:
+        jax.config.update("jax_default_matmul_precision", "float32")
 
     temperature = 0.0 if args.greedy else max(args.temperature, 0.0)
     if args.steps <= 0:
@@ -261,6 +264,9 @@ def main():
 
     generated = jnp.concatenate([prompt, tokens_new], axis=1)
     full_tokens = np.asarray(generated[0])
+    if args.verbose:
+        print(f"[debug] full token ids ({full_tokens.shape[0]}): {full_tokens.tolist()}")
+        print(f"[debug] new token ids: {np.asarray(tokens_new[0]).tolist()}")
     text = tokenizer.decode(full_tokens, skip_special_tokens=True)
 
     stop_on_eos = bool(getattr(cfg, "inference", {}).get("stop_on_eos", False)) if isinstance(cfg, dict) else bool(getattr(getattr(cfg, "inference", {}), "stop_on_eos", False))

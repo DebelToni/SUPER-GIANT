@@ -42,7 +42,7 @@ def _to_dtype(name: str) -> jnp.dtype:
 
 
 def _rms_scale_from_gemma2(weight_tensor: "torch.Tensor") -> np.ndarray:
-    """Map Gemma-2 Gemma2RMSNorm.weight -> Flax RMSNorm.scale (scale = 1 + weight)."""
+    """Map Gemma2RMSNorm.weight -> Flax RMSNorm.scale (scale = 1 + weight)."""
     w = _to_numpy(weight_tensor)
     return 1.0 + w
 
@@ -85,7 +85,7 @@ def build_flax_skeleton(
 
 
 def _to_numpy(t: torch.Tensor) -> np.ndarray:
-    # Store everything as float32; JAX will cast as needed.
+    # Store as float32 for CPU compatibility.
     return t.detach().cpu().numpy().astype(np.float32)
 
 
@@ -120,6 +120,7 @@ def convert_gemma_to_flax(
     # 2. Read config & sanity-check against gemma-bg Config.yml
     vocab_size = int(hf_cfg.vocab_size)
     ctx_len = int(getattr(hf_cfg, "max_position_embeddings", hf_cfg.max_position_ids if hasattr(hf_cfg, "max_position_ids") else MODEL_CFG.context_length))
+    target_ctx = int(MODEL_CFG.context_length)
     hidden_size = int(hf_cfg.hidden_size)
     n_heads = int(hf_cfg.num_attention_heads)
     n_kv = int(hf_cfg.num_key_value_heads)
@@ -138,6 +139,7 @@ def convert_gemma_to_flax(
     print(f"  num_hidden_layers   = {n_layers}")
     print(f"  intermediate_size   = {intermediate_size}")
     print(f"  max_position_embeds = {ctx_len}")
+    print(f"  target_context_len  = {target_ctx}")
 
     # Cross-check with your config
     assert hidden_size == MODEL_CFG.embedding_size, \
@@ -150,14 +152,14 @@ def convert_gemma_to_flax(
         f"Config mismatch: num_layers={n_layers} vs cfg.num_layers={MODEL_CFG.num_layers}"
     assert intermediate_size == MODEL_CFG.feed_forward_size, \
         f"Config mismatch: intermediate_size={intermediate_size} vs cfg.feed_forward_size={MODEL_CFG.feed_forward_size}"
-    assert ctx_len == MODEL_CFG.context_length, \
-        f"Config mismatch: max_position_embeddings={ctx_len} vs cfg.context_length={MODEL_CFG.context_length}"
+    if ctx_len < target_ctx:
+        raise ValueError(f"HF context_length ({ctx_len}) is smaller than target cfg ({target_ctx}).")
     assert attn_qkv_dim == MODEL_CFG.attn_qkv_dim, \
         f"Config mismatch: attn_qkv_dim={attn_qkv_dim} vs cfg.attn_qkv_dim={MODEL_CFG.attn_qkv_dim}"
 
     # 3. Build Flax skeleton
     print("[JAX] Building GiantGPT skeleton...")
-    _, params = build_flax_skeleton(vocab_size, ctx_len)
+    _, params = build_flax_skeleton(vocab_size, target_ctx)
 
     # 4. Map weights
 
@@ -209,7 +211,6 @@ def convert_gemma_to_flax(
         block["fc1"]["kernel"] = np.concatenate([gate, up], axis=1)  # (hidden, 2*d_ff)
         block["fc2"]["kernel"] = down  # (d_ff, hidden)
 
-    # 5. Save as NPZ with flattened keys
     print("[MAP] Final RMSNorm...")
     params["final_norm"]["scale"] = _rms_scale_from_gemma2(sd["model.norm.weight"])
 
@@ -228,8 +229,8 @@ def main():
             paths = cfg.get("paths", {}) if hasattr(cfg, "get") else {}
             data_root = paths.get("data_root")
             if data_root:
-                return str(Path(data_root).expanduser() / "gemma-bg" / "bggpt-gemma-2-2.6b-it.npz")
-        return "checkpoints/bggpt-gemma-2-2.6b-it.npz"
+                return str(Path(data_root).expanduser() / "gemma-fp16" / "bggpt-gemma-2-2.6b-it-fp16.npz")
+        return "checkpoints/bggpt-gemma-2-2.6b-it-fp16.npz"
 
     parser = argparse.ArgumentParser()
     parser.add_argument(

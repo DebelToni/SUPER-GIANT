@@ -24,7 +24,7 @@ model:
   dropout_rate: 0.0
   activation: gelu_pytorch_tanh
   use_remat: false
-  param_dtype: float32
+  param_dtype: float16
   compute_dtype: float32
 
 inference:

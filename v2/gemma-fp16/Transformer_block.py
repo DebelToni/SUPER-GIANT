@@ -187,14 +187,14 @@ class NativeJaxSelfAttention(nn.Module):
                 "k",
                 jnp.zeros,
                 (b, self.num_kv, MODEL_CFG.context_length, head_dim),
-                self.dtype,
+                PARAM_DTYPE,
             )
             cached_v = self.variable(
                 "cache",
                 "v",
                 jnp.zeros,
                 (b, self.num_kv, MODEL_CFG.context_length, head_dim),
-                self.dtype,
+                PARAM_DTYPE,
             )
 
 
@@ -207,8 +207,8 @@ class NativeJaxSelfAttention(nn.Module):
                 cached_k.value = cached_k.value.at[:, :, cur_index : cur_index + l, :].set(k_to_cache)
                 cached_v.value = cached_v.value.at[:, :, cur_index : cur_index + l, :].set(v_to_cache)
 
-            k_full = jnp.swapaxes(cached_k.value, 1, 2)  # (b, context, num_kv, hd)
-            v_full = jnp.swapaxes(cached_v.value, 1, 2)
+            k_full = jnp.swapaxes(cached_k.value, 1, 2).astype(self.dtype)  # (b, context, num_kv, hd)
+            v_full = jnp.swapaxes(cached_v.value, 1, 2).astype(self.dtype)
             if kv_indices is not None:
                 k_full = jnp.take(k_full, kv_indices, axis=2)
                 v_full = jnp.take(v_full, kv_indices, axis=2)

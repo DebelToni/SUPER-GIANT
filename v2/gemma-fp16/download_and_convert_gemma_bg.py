@@ -85,8 +85,8 @@ def build_flax_skeleton(
 
 
 def _to_numpy(t: torch.Tensor) -> np.ndarray:
-    # Store as float32 for CPU compatibility.
-    return t.detach().cpu().numpy().astype(np.float32)
+    # Store as float16 to cut parameter footprint; computation will upcast as needed.
+    return t.detach().cpu().numpy().astype(np.float16)
 
 
 def _find_attn_submodule(block_params: Dict) -> str:

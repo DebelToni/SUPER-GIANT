@@ -213,7 +213,7 @@ def main():
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
 
-    params = load_params(checkpoint_path)
+    params_host = load_params(checkpoint_path)
 
     rng = jax.random.PRNGKey(args.seed)
     key_params, key_dropout, key_sample = jax.random.split(rng, 3)
@@ -226,7 +226,11 @@ def main():
         use_kv_cache=True,
     )
 
-    params = jax.device_put(params)
+    params = jax.device_put(params_host)
+    # Drop host copy to reduce RAM usage.
+    del params_host
+    import gc
+    gc.collect()
     nonparam = jax.device_put(nonparam)
 
     prompt = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)

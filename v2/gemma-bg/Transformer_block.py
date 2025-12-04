@@ -82,6 +82,7 @@ class NativeJaxSelfAttention(nn.Module):
     rotary_dim: int = MODEL_CFG.rope_dim
     attn_logit_softcapping: Optional[float] = getattr(MODEL_CFG, "attn_logit_softcapping", None)
     query_pre_attn_scalar: Optional[float] = getattr(MODEL_CFG, "query_pre_attn_scalar", None)
+    context_length: int = MODEL_CFG.context_length
 
     def setup(self):
         assert (
@@ -118,7 +119,7 @@ class NativeJaxSelfAttention(nn.Module):
         self.dropout = nn.Dropout(rate=self.dropout_rate)
         # Precompute rotary embeddings once and slice per call.
         self._rope_sin, self._rope_cos = _build_rope_cache(
-            MODEL_CFG.context_length,
+            self.context_length,
             self.rotary_dim,
             self.dtype,
             getattr(MODEL_CFG, "rope_theta", 10000.0),
@@ -177,14 +178,14 @@ class NativeJaxSelfAttention(nn.Module):
                 "cache",
                 "k",
                 jnp.zeros,
-                (b, self.num_kv, MODEL_CFG.context_length, head_dim),
+                (b, self.num_kv, self.context_length, head_dim),
                 self.dtype,
             )
             cached_v = self.variable(
                 "cache",
                 "v",
                 jnp.zeros,
-                (b, self.num_kv, MODEL_CFG.context_length, head_dim),
+                (b, self.num_kv, self.context_length, head_dim),
                 self.dtype,
             )
 
@@ -250,6 +251,7 @@ class TinyTransformerBlock(nn.Module):
     attn_qkv_dim: int
     dropout_rate: float = 0.1
     dtype: jnp.dtype = COMPUTE_DTYPE
+    context_length: int = MODEL_CFG.context_length
 
     @nn.compact
     def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
@@ -263,6 +265,7 @@ class TinyTransformerBlock(nn.Module):
                 out_features=module.d_model,
                 dropout_rate=module.dropout_rate,
                 dtype=module.dtype,
+                context_length=module.context_length,
             )(h_norm, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
             h = RMSNorm(name="rms_post_attn", dtype=self.dtype, epsilon=1e-6)(h_attn)
             h = residual + h

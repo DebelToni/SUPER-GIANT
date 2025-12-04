@@ -97,17 +97,21 @@ def make_prefill_and_decode_fns(model: GiantGPT):
         nonparam: PyTree,
         prompt_tokens: Array,           # [B, Lp]
     ):
+        """
+        Run the prompt through the model while updating the cache.
+        Avoid accumulating logits to keep prefill memory small.
+        """
         B, Lp = prompt_tokens.shape
         t0 = jnp.array(0, jnp.int32)
 
-        def prefill_step(carry, tok_t_2d):
+        def body(i, carry):
             nonparam, t = carry
-            logits, nonparam = _apply_with_cache(model, params, nonparam, tok_t_2d, t)
-            return (nonparam, t + 1), logits
+            tok_t_2d = prompt_tokens[:, i : i + 1]
+            _, nonparam = _apply_with_cache(model, params, nonparam, tok_t_2d, t)
+            return nonparam, t + 1
 
         if Lp > 0:
-            xs = jnp.expand_dims(jnp.swapaxes(prompt_tokens, 0, 1), -1)  # [Lp, B, 1]
-            (nonparam, t), _ = jax.lax.scan(prefill_step, init=(nonparam, t0), xs=xs)
+            nonparam, t = jax.lax.fori_loop(0, Lp, body, (nonparam, t0))
             last_tok_2d = prompt_tokens[:, -1:]
         else:
             nonparam, t = nonparam, t0

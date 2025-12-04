@@ -61,9 +61,10 @@ class GiantGPT(nn.Module):
                     attn_qkv_dim=MODEL_CFG.attn_qkv_dim,
                     n_heads=self.n_heads,
                     d_ff=self.d_ff,
-                    dropout_rate=self.dropout_rate,
-                    dtype=COMPUTE_DTYPE,
-            )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
+            dropout_rate=self.dropout_rate,
+            dtype=COMPUTE_DTYPE,
+            context_length=self.context_length,
+        )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
 
         x = RMSNorm(name="final_norm", dtype=COMPUTE_DTYPE, epsilon=1e-6)(x)
 

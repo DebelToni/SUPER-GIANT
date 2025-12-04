@@ -104,13 +104,15 @@ def convert_gemma_to_flax(
     hf_repo: str,
     out_path: Path,
     revision: str | None = None,
+    torch_dtype: str = "float16",
 ):
     # 1. Load HF model (CPU, full precision)
     print(f"[HF] Loading model: {hf_repo}")
+    torch_dtype_obj = getattr(torch, torch_dtype)
     hf_model = AutoModelForCausalLM.from_pretrained(
         hf_repo,
         revision=revision,
-        torch_dtype=torch.float32,
+        torch_dtype=torch_dtype_obj,
         device_map=None,
     )
     hf_model.eval()
@@ -246,6 +248,13 @@ def main():
         help="Optional HF revision/tag.",
     )
     parser.add_argument(
+        "--torch-dtype",
+        type=str,
+        default="float16",
+        choices=["float16", "float32", "bfloat16"],
+        help="Torch dtype to load HF weights before conversion (default: float16 to keep RAM low).",
+    )
+    parser.add_argument(
         "--out",
         type=str,
         default=_default_out(),
@@ -255,7 +264,7 @@ def main():
 
     out_path = Path(args.out).expanduser()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    convert_gemma_to_flax(args.hf_repo, out_path, revision=args.revision)
+    convert_gemma_to_flax(args.hf_repo, out_path, revision=args.revision, torch_dtype=args.torch_dtype)
 
 
 if __name__ == "__main__":

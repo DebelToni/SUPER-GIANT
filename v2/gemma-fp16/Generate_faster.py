@@ -130,9 +130,20 @@ def tokenize_prompt(tokenizer, prompt: str, max_len: int, *, strip_eos: bool) ->
     return np.asarray(ids, dtype=np.int32)
 
 
-def load_params(path: Path):
+def load_params(path: Path, *, dtype: jnp.dtype):
     params = load_npz(path)
-    return jax.tree_util.tree_map(lambda x: jnp.asarray(x), params)
+    return jax.tree_util.tree_map(lambda x: jnp.asarray(x, dtype=dtype), params)
+
+
+def dequant_to_f32(params):
+    """
+    Cast a params PyTree to float32 on device in one XLA-compiled pass to avoid
+    host-side re-materialization churn.
+    """
+    @jax.jit
+    def _cast(tree):
+        return jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), tree)
+    return _cast(params)
 
 
 def block_until_ready(tree):
@@ -173,11 +184,9 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     cfg = load_configs()
-    compute_str = str(cfg.model.compute_dtype).lower()
-    if compute_str in ("bfloat16", "bf16"):
-        jax.config.update("jax_default_matmul_precision", "bfloat16")
-    else:
-        jax.config.update("jax_default_matmul_precision", "float32")
+    # mac CPU only: force matmul precision to float32
+    jax.config.update("jax_default_matmul_precision", "float32")
+    target_dtype = jnp.dtype(str(cfg.model.param_dtype))
 
     temperature = 0.0 if args.greedy else max(args.temperature, 0.0)
     if args.steps <= 0:
@@ -213,7 +222,7 @@ def main():
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
 
-    params_host = load_params(checkpoint_path)
+    params_host = load_params(checkpoint_path, dtype=target_dtype)
 
     rng = jax.random.PRNGKey(args.seed)
     key_params, key_dropout, key_sample = jax.random.split(rng, 3)
@@ -226,11 +235,12 @@ def main():
         use_kv_cache=True,
     )
 
-    params = jax.device_put(params_host)
-    # Drop host copy to reduce RAM usage.
+    # Load fp16 weights, place on device, then cast once to fp32 for CPU math.
+    params_dev = jax.device_put(params_host)
     del params_host
     import gc
     gc.collect()
+    params = dequant_to_f32(params_dev)
     nonparam = jax.device_put(nonparam)
 
     prompt = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)

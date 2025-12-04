@@ -24,8 +24,8 @@ model:
   dropout_rate: 0.0
   activation: gelu_pytorch_tanh
   use_remat: false
-  param_dtype: float16
-  compute_dtype: float32
+  param_dtype: float16   # store checkpoints in fp16 on disk
+  compute_dtype: float32 # CPU executes in fp32; cast once on load
 
 inference:
   stop_on_eos: true

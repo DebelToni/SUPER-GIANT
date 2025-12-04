@@ -106,7 +106,7 @@ def make_prefill_and_decode_fns(model: GiantGPT):
 
         def body(i, carry):
             nonparam, t = carry
-            tok_t_2d = prompt_tokens[:, i : i + 1]
+            tok_t_2d = jax.lax.dynamic_slice(prompt_tokens, (0, i), (B, 1))
             _, nonparam = _apply_with_cache(model, params, nonparam, tok_t_2d, t)
             return nonparam, t + 1
 

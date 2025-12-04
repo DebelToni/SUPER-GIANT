@@ -191,12 +191,16 @@ def main():
     context_length = args.max_context or int(cfg.model.context_length)
     if args.chat_template and hasattr(tokenizer, "apply_chat_template"):
         messages = [{"role": "user", "content": args.prompt}]
-        encoded = tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            return_tensors="np",
-        )
-        prompt_ids = encoded[0]
+        try:
+            encoded = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                return_tensors="np",
+            )
+            prompt_ids = encoded[0]
+        except ImportError:
+            print("jinja2 not installed; falling back to plain encoding. Install with `pip install jinja2` to use --chat_template.")
+            prompt_ids = tokenize_prompt(tokenizer, args.prompt, context_length, strip_eos=args.strip_eos)
     else:
         prompt_ids = tokenize_prompt(tokenizer, args.prompt, context_length, strip_eos=args.strip_eos)
 

@@ -565,3 +565,51 @@ def load_bggpt_compressed(
 
     return compressed_model, tokenizer
 
+from transformers import BitsAndBytesConfig
+
+def load_bggpt_compressed_int8(
+    model_name: str = "INSAIT-Institute/BgGPT-Gemma-2-2.6B-IT-v1.0",
+    kv_compression_ratio: float = 1.0,   # you can later set 0.25 etc.
+    rope_factor: float = 1.0,            # later: 8.0 for ~64k
+    device: str = "cuda",
+):
+    """
+    Load BgGPT with bitsandbytes 8-bit weight quantization, then wrap with
+    our compressed-KV + RoPE-scaling model.
+
+    - Weights: int8 under the hood (LLM.int8)
+    - Activations + KV + compressors: fp16
+    """
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_8bit=True,           # turn on 8-bit weights
+        llm_int8_threshold=6.0,      # default threshold
+        llm_int8_has_fp16_weight=False,
+    )
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=bnb_config,  # HF v4.46+ quantization API 
+        device_map=None,                 # single GPU (no sharding, simpler for our wrapper)
+        attn_implementation="eager",
+    ).to(device)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        use_default_system_prompt=False,
+    )
+
+    # Wrap with our compressed KV model.
+    compressed_model = CompressedBgGPTForCausalLM(
+        base_model=base_model,
+        kv_compression_ratio=kv_compression_ratio,
+        rope_factor=rope_factor,
+    ).to(device)
+
+    # Make sure KVCompressor weights are fp16 on the GPU.
+    for module in compressed_model.modules():
+        if isinstance(module, KVCompressor):
+            module.to(device=device, dtype=torch.float16)
+
+    return compressed_model, tokenizer
+

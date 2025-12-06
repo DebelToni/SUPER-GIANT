@@ -535,25 +535,18 @@ class CompressedBgGPTForCausalLM(nn.Module):
 def load_bggpt_compressed(
     model_name: str = "INSAIT-Institute/BgGPT-Gemma-2-2.6B-IT-v1.0",
     kv_compression_ratio: float = 1.0,
-    rope_factor: float = 1.0,        # 1.0 = no RoPE stretch; set 8.0 for ~64k later
+    rope_factor: float = 1.0,
     dtype: torch.dtype = torch.bfloat16,
     device: Optional[str] = None,
 ):
-    """
-    Load BgGPT Gemma-2 2.6B from HF and wrap with compressed KV + RoPE.
-
-    With kv_compression_ratio=1.0 and rope_factor=1.0, this should behave
-    very close to the original Gemma2/BgGPT model (same weights, same
-    scaling, same logit softcapping), just with a custom KV cache.
-    """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     base_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        dtype=dtype,                 # use `dtype`, not deprecated `torch_dtype`
-        attn_implementation="eager", # Gemma2 / BgGPT prefers eager 
-        device_map=None,             # we'll .to(device) after wrapping
+        dtype=dtype,
+        attn_implementation="eager",
+        device_map=None,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -565,6 +558,10 @@ def load_bggpt_compressed(
         base_model=base_model,
         kv_compression_ratio=kv_compression_ratio,
         rope_factor=rope_factor,
-    ).to(device)
+    )
+
+    # 🔴 This is the important part: force *all* params/buffers to same dtype + device
+    compressed_model.to(device=device, dtype=dtype)
 
     return compressed_model, tokenizer
+

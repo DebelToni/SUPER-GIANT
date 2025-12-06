@@ -13,7 +13,7 @@ model:
   # RoPE / positions
   rope_dim: 256
   rope_theta: 10000.0
-  context_length: 2048  # shorter to reduce KV/cache footprint on 16 GB RAM
+  context_length: 2048 # shorter to reduce KV/cache footprint on 16 GB RAM
 
   # Scaling and soft-capping
   query_pre_attn_scalar: 256.0
@@ -24,8 +24,8 @@ model:
   dropout_rate: 0.0
   activation: gelu_pytorch_tanh
   use_remat: false
-  param_dtype: float16   # store checkpoints in fp16 on disk
-  compute_dtype: float32 # CPU executes in fp32; cast once on load
+  param_dtype: bfloat16
+  compute_dtype: bfloat16
 
 inference:
   stop_on_eos: true

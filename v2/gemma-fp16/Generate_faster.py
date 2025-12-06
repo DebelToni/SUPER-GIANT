@@ -135,17 +135,6 @@ def load_params(path: Path, *, dtype: jnp.dtype):
     return jax.tree_util.tree_map(lambda x: jnp.asarray(x, dtype=dtype), params)
 
 
-def dequant_to_f32(params):
-    """
-    Cast a params PyTree to float32 on device in one XLA-compiled pass to avoid
-    host-side re-materialization churn.
-    """
-    @jax.jit
-    def _cast(tree):
-        return jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), tree)
-    return _cast(params)
-
-
 def block_until_ready(tree):
     for leaf in jax.tree_util.tree_leaves(tree):
         if isinstance(leaf, jax.Array):
@@ -184,8 +173,6 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     cfg = load_configs()
-    # mac CPU only: force matmul precision to float32
-    jax.config.update("jax_default_matmul_precision", "float32")
     target_dtype = jnp.dtype(str(cfg.model.param_dtype))
 
     temperature = 0.0 if args.greedy else max(args.temperature, 0.0)
@@ -235,12 +222,11 @@ def main():
         use_kv_cache=True,
     )
 
-    # Load fp16 weights, place on device, then cast once to fp32 for CPU math.
-    params_dev = jax.device_put(params_host)
+    # Keep weights in param_dtype (fp16) on device; modules upcast to compute_dtype as needed.
+    params = jax.device_put(params_host)
     del params_host
     import gc
     gc.collect()
-    params = dequant_to_f32(params_dev)
     nonparam = jax.device_put(nonparam)
 
     prompt = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)

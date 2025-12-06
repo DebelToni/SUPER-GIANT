@@ -592,7 +592,7 @@ def load_bggpt_compressed_int8(
         quantization_config=bnb_config,  # HF v4.46+ quantization API 
         device_map=None,                 # single GPU (no sharding, simpler for our wrapper)
         attn_implementation="eager",
-    ).to(device)
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,

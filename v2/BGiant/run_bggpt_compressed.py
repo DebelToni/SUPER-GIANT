@@ -8,6 +8,7 @@ from bggpt_compressed_kv_model import (
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
     print(f"Using device: {device}")
 
     if device == "cuda":
@@ -22,16 +23,16 @@ def main():
         # Old bf16/float32 path for CPU
         model, tokenizer = load_bggpt_compressed(
             model_name="INSAIT-Institute/BgGPT-Gemma-2-2.6B-IT-v1.0",
-            kv_compression_ratio=1.0,
-            rope_factor=1.0,
-            dtype=torch.bfloat16 if device != "cpu" else torch.float32,
+            kv_compression_ratio=0.75,
+            rope_factor=4.0,
+            #dtype=torch.bfloat16 if device != "cpu" else torch.float32,
             device=device,
         )
 
     messages = [
         {
             "role": "user",
-            "content": "Обясни ми с няколко изречения какво прави този модел.",
+            "content": "How are you? Answer in english.",
         },
     ]
 
@@ -56,7 +57,7 @@ def main():
         )
 
     # Autoregressive generation
-    max_new_tokens = 128
+    max_new_tokens = 10
     with torch.no_grad():
         generated_ids = model.generate(
             input_ids=input_ids,
@@ -71,23 +72,6 @@ def main():
     print("\n--- Generated with BgGPT + compressed wrapper (identity settings) ---")
     print(generated_text)
     print("-----------------------------------------------------------------------")
-
-    # Long-context smoke test
-    long_len = 4096
-    print(f"\nRunning long-context smoke test with length={long_len} ...")
-    long_input = torch.randint(
-        low=0,
-        high=tokenizer.vocab_size,
-        size=(1, long_len),
-        device=device,
-        dtype=torch.long,
-    )
-
-    with torch.no_grad():
-        logits_long, _ = model(long_input, past_key_values=None, use_cache=True)
-
-    print(f"Long test logits shape: {logits_long.shape}")
-
 
 if __name__ == "__main__":
     main()

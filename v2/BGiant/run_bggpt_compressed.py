@@ -17,7 +17,7 @@ def main():
         model_name="INSAIT-Institute/BgGPT-Gemma-2-2.6B-IT-v1.0",
         kv_compression_ratio=1.0,
         rope_factor=1.0,
-        dtype=torch.bfloat16 if device != "cpu" else torch.float32,
+        dtype=torch.bfloat16,
         device=device,
     )
 

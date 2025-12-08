@@ -10,7 +10,7 @@ model:
   activation: silu
   use_remat: false
   param_dtype: float32
-  compute_dtype: float32 ###
+  compute_dtype: bfloat16 ###
 
 optimizer:
   base_learning_rate: 3.0e-4
@@ -33,7 +33,7 @@ training:
   checkpoint_every: 20000
   mini_checkpoint_every: 1000
   mini_max_to_keep: 1
-  device: cpu ####
+  device: gpu ####
   label_smoothing: 0.0
   scan_chunk: 8
 

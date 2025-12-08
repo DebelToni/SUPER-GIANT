@@ -578,7 +578,7 @@ def load_bggpt_compressed_int8(
     our compressed-KV + RoPE-scaling model.
 
     - Weights: int8 under the hood (LLM.int8)
-    - Activations + KV + compressors: fp16
+    - Activations + KV + compressors: bfloat16
     """
 
     bnb_config = BitsAndBytesConfig(
@@ -592,6 +592,7 @@ def load_bggpt_compressed_int8(
         quantization_config=bnb_config,  # HF v4.46+ quantization API 
         device_map=None,                 # single GPU (no sharding, simpler for our wrapper)
         attn_implementation="eager",
+        torch_dtype=torch.bfloat16,      # ensure activations/buffers use bf16
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -606,10 +607,9 @@ def load_bggpt_compressed_int8(
         rope_factor=rope_factor,
     ).to(device)
 
-    # Make sure KVCompressor weights are fp16 on the GPU.
+    # Make sure KVCompressor weights are bf16 on the GPU.
     for module in compressed_model.modules():
         if isinstance(module, KVCompressor):
-            module.to(device=device, dtype=torch.float16)
+            module.to(device=device, dtype=torch.bfloat16)
 
     return compressed_model, tokenizer
-

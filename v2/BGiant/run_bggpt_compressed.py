@@ -31,7 +31,7 @@ def main():
     messages = [
         {
             "role": "user",
-            "content": "How are you? Answer in english.",
+            "content": "Кога е основана българия и от кой?",
         },
     ]
 

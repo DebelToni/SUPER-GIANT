@@ -9,36 +9,43 @@ RUN apk add --no-cache git
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go install -ldflags="-s -w" github.com/peak/s5cmd/v2@${S5VER}
 
 # ---- main image --------------------------------------------------------------
-# CUDA 12.9 + cuDNN + Python 3.13.0 + JAX stack
+# CUDA 12.9 + cuDNN + Python 3.13 + JAX stack
 FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Base packages + build deps for CPython + SSH daemon
+# Base packages + SSH daemon
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git wget curl ca-certificates vim tmux pkg-config \
+        software-properties-common gnupg \
         libssl-dev zlib1g-dev libbz2-dev libreadline-dev             \
         libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev        \
-        libncurses5-dev libgdbm-dev libnss3-dev                      \
         openssh-server                                               \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.13 python3.13-venv python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Build and install Python 3.13.0 from source (keeps system python3 intact)
-ARG PYTHON_VERSION=3.13.0
+# Install Python 3.13 from source and set it as default python
+ENV PYTHON_VERSION=3.13.0
 RUN set -eux; \
     cd /tmp; \
     wget "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz"; \
-    tar -xf "Python-${PYTHON_VERSION}.tgz"; \
+    tar -xzf "Python-${PYTHON_VERSION}.tgz"; \
     cd "Python-${PYTHON_VERSION}"; \
-    ./configure --enable-optimizations --with-lto --prefix=/usr/local; \
+    ./configure --enable-optimizations --with-lto; \
     make -j"$(nproc)"; \
     make altinstall; \
+    ln -sf /usr/local/bin/python3.13 /usr/local/bin/python3; \
+    ln -sf /usr/local/bin/python3.13 /usr/local/bin/python; \
+    /usr/local/bin/python3.13 -m ensurepip; \
+    /usr/local/bin/python3.13 -m pip install --upgrade pip; \
     cd /; \
-    rm -rf /tmp/Python-*; \
-    python3.13 -m ensurepip --upgrade
+    rm -rf "/tmp/Python-${PYTHON_VERSION}"*
 
-# Python virtual env (using 3.13.0)
+# Python virtual env
 ENV VENV_DIR=/opt/venv
-RUN python3.13 -m venv "$VENV_DIR"
+RUN python3.13 -m venv "$VENV_DIR" && \
+    "$VENV_DIR/bin/python" -m pip install --upgrade pip
 # Make venv-default tools used during build
 ENV PATH="$VENV_DIR/bin:$PATH" VIRTUAL_ENV="$VENV_DIR"
 

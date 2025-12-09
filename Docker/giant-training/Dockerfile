@@ -1,3 +1,4 @@
+
 # ---- build s5cmd (static, CGO disabled) --------------------------------------
 FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS s5cmd-builder
 ARG TARGETOS
@@ -8,22 +9,36 @@ RUN apk add --no-cache git
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go install -ldflags="-s -w" github.com/peak/s5cmd/v2@${S5VER}
 
 # ---- main image --------------------------------------------------------------
-# CUDA 12.9 + cuDNN + Python 3.11 + JAX stack
+# CUDA 12.9 + cuDNN + Python 3.13.0 + JAX stack
 FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Base packages + SSH daemon
+# Base packages + build deps for CPython + SSH daemon
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git wget curl ca-certificates vim tmux pkg-config \
-        python3.11 python3.11-venv python3-pip                       \
         libssl-dev zlib1g-dev libbz2-dev libreadline-dev             \
         libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev        \
+        libncurses5-dev libgdbm-dev libnss3-dev                      \
         openssh-server                                               \
     && rm -rf /var/lib/apt/lists/*
 
-# Python virtual env
+# Build and install Python 3.13.0 from source (keeps system python3 intact)
+ARG PYTHON_VERSION=3.13.0
+RUN set -eux; \
+    cd /tmp; \
+    wget "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz"; \
+    tar -xf "Python-${PYTHON_VERSION}.tgz"; \
+    cd "Python-${PYTHON_VERSION}"; \
+    ./configure --enable-optimizations --with-lto --prefix=/usr/local; \
+    make -j"$(nproc)"; \
+    make altinstall; \
+    cd /; \
+    rm -rf /tmp/Python-*; \
+    python3.13 -m ensurepip --upgrade
+
+# Python virtual env (using 3.13.0)
 ENV VENV_DIR=/opt/venv
-RUN python3.11 -m venv "$VENV_DIR"
+RUN python3.13 -m venv "$VENV_DIR"
 # Make venv-default tools used during build
 ENV PATH="$VENV_DIR/bin:$PATH" VIRTUAL_ENV="$VENV_DIR"
 
@@ -76,4 +91,3 @@ RUN mkdir -p /workspace/app
 
 # Start SSH daemon in the foreground
 CMD ["/usr/sbin/sshd","-D"]
-

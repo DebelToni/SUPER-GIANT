@@ -9,22 +9,26 @@ RUN apk add --no-cache git
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go install -ldflags="-s -w" github.com/peak/s5cmd/v2@${S5VER}
 
 # ---- main image --------------------------------------------------------------
-# CUDA 12.9 + cuDNN + Python 3.11 + JAX stack
+# CUDA 12.9 + cuDNN + Python 3.13 + JAX stack
 FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Base packages + SSH daemon
+# Base packages + SSH daemon + Python 3.13 from deadsnakes
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common gnupg \
         build-essential git wget curl ca-certificates vim tmux pkg-config \
-        python3.11 python3.11-venv python3-pip                       \
         libssl-dev zlib1g-dev libbz2-dev libreadline-dev             \
         libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev        \
         openssh-server                                               \
+    && add-apt-repository ppa:deadsnakes/ppa -y                      \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.13 python3.13-venv python3-pip                       \
     && rm -rf /var/lib/apt/lists/*
 
-# Python virtual env
+# Python virtual env (Python 3.13)
 ENV VENV_DIR=/opt/venv
-RUN python3.11 -m venv "$VENV_DIR"
+RUN python3.13 -m venv "$VENV_DIR" && \
+    "$VENV_DIR/bin/python" -m pip install --upgrade pip
 # Make venv-default tools used during build
 ENV PATH="$VENV_DIR/bin:$PATH" VIRTUAL_ENV="$VENV_DIR"
 
@@ -77,4 +81,3 @@ RUN mkdir -p /workspace/app
 
 # Start SSH daemon in the foreground
 CMD ["/usr/sbin/sshd","-D"]
-

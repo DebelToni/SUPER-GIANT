@@ -52,7 +52,7 @@ RUN mkdir -p /var/run/sshd && \
     printf '%s\n' \
       'PermitRootLogin yes' \
       'PasswordAuthentication yes' \
-      'PubkeyAuthentication no' \
+      'PubkeyAuthentication yes' \
       'ChallengeResponseAuthentication no' \
       'UsePAM yes' >> /etc/ssh/sshd_config
 

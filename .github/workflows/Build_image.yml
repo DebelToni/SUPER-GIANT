@@ -6,6 +6,8 @@ on:
       - "Docker/giant-training/**"
       - "Docker/giant-training-S3/**"
       - ".github/workflows/Build_image.yml"
+    branches:
+      - Code-toni
 
 permissions:
   contents: read

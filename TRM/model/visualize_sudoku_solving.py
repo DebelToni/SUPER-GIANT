@@ -36,6 +36,7 @@ def sigmoid(x: float) -> float:
 def parse_args():
     p = argparse.ArgumentParser("Visualize TRM solving a Sudoku (step-by-step)")
     p.add_argument("--config", default=None)
+    p.add_argument("--data_root", default=None, help="Override cfg.paths.data_root (dataset/cache/checkpoints).")
     p.add_argument("--checkpoint_dir", default="checkpoints/trm_sudoku")
     p.add_argument("--checkpoint", default=None, help="Explicit checkpoint path (overrides --checkpoint_dir).")
     p.add_argument("--split", choices=["train", "val"], default="train")
@@ -236,7 +237,13 @@ def main():
     cfg = load_cfg(args.config)
     model = build_model(cfg)
 
-    base_root = Path(cfg.paths.data_root) if "paths" in cfg and cfg.paths.get("data_root") else Path.cwd()
+    if args.data_root is not None:
+        base_root = Path(str(args.data_root)).resolve()
+        if "paths" not in cfg:
+            cfg.paths = OmegaConf.create({})
+        cfg.paths.data_root = str(base_root)
+    else:
+        base_root = Path(cfg.paths.data_root) if "paths" in cfg and cfg.paths.get("data_root") else Path.cwd()
 
     ckpt_path = args.checkpoint
     if ckpt_path is None:

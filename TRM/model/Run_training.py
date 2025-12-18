@@ -95,12 +95,14 @@ def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientT
 def parse_args() -> argparse.Namespace:
     cli = argparse.ArgumentParser("TRM Sudoku training")
     cli.add_argument("--config", default=None, help="Override config path (defaults to model/Config.yml).")
+    cli.add_argument("--data_root", default=None, help="Override cfg.paths.data_root (dataset/cache/checkpoints).")
     cli.add_argument("--checkpoint_dir", default="checkpoints/trm_sudoku")
     cli.add_argument("--checkpoint_every", type=int, default=None)
     cli.add_argument("--resume", nargs="?", const="latest", default=None)
     cli.add_argument("--regen_dataset", action="store_true", help="Regenerate cached Sudoku dataset.")
     cli.add_argument("--max_steps", type=int, default=None, help="Override training.max_steps.")
     cli.add_argument("--batch_size", type=int, default=None, help="Override training.batch_size.")
+    cli.add_argument("--microbatch_size", type=int, default=None, help="Microbatch size for gradient accumulation.")
     cli.add_argument("--supervision_steps", type=int, default=None, help="Override training.supervision_steps.")
     cli.add_argument("--train_samples", type=int, default=None)
     cli.add_argument("--val_samples", type=int, default=None)
@@ -147,7 +149,13 @@ def main() -> None:
     args = parse_args()
     cfg = load_configs(args.config)
 
-    base_root = Path(cfg.paths.data_root) if "paths" in cfg and cfg.paths.get("data_root") else Path.cwd()
+    if args.data_root is not None:
+        base_root = Path(str(args.data_root)).resolve()
+        if "paths" not in cfg:
+            cfg.paths = OmegaConf.create({})
+        cfg.paths.data_root = str(base_root)
+    else:
+        base_root = Path(cfg.paths.data_root) if "paths" in cfg and cfg.paths.get("data_root") else Path.cwd()
 
     seed = int(cfg.training.seed)
     rng_np = np.random.default_rng(seed)
@@ -178,6 +186,16 @@ def main() -> None:
     model = build_model(cfg)
 
     batch_size = int(args.batch_size or cfg.training.batch_size)
+    microbatch_size = args.microbatch_size
+    if microbatch_size is None:
+        microbatch_size = cfg.training.get("microbatch_size", None)
+    microbatch_size = None if microbatch_size is None else int(microbatch_size)
+    if microbatch_size is not None:
+        if microbatch_size <= 0:
+            raise ValueError("--microbatch_size must be > 0")
+        if batch_size % microbatch_size != 0:
+            raise ValueError(f"batch_size ({batch_size}) must be divisible by microbatch_size ({microbatch_size})")
+
     supervision_steps = int(args.supervision_steps or cfg.training.supervision_steps)
     max_steps = int(args.max_steps or cfg.training.max_steps)
     total_steps = max_steps
@@ -251,6 +269,7 @@ def main() -> None:
             optimizer=optimizer,
             dropout_rng=key,
             supervision_steps=supervision_steps,
+            microbatch_size=microbatch_size,
         )
         jax.block_until_ready(loss)
         t1 = time.time()

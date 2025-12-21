@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import re
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import jax
 import jax.numpy as jnp
@@ -40,7 +41,13 @@ def load_tokenizer(cfg: Dict[str, Any]):
     return tokenizer
 
 
-def build_model(cfg: Dict[str, Any], vocab_size: int, context_length: int) -> GiantGPT:
+def build_model(
+    cfg: Dict[str, Any],
+    vocab_size: int,
+    context_length: int,
+    *,
+    layers_to_run: Optional[tuple[int, ...]] = None,
+) -> GiantGPT:
     model_cfg = cfg["model"]
     return GiantGPT(
         vocab_size=vocab_size,
@@ -50,6 +57,7 @@ def build_model(cfg: Dict[str, Any], vocab_size: int, context_length: int) -> Gi
         d_ff=model_cfg["feed_forward_size"],
         n_layers=model_cfg["num_layers"],
         dropout_rate=0.0,
+        layers_to_run=layers_to_run,
     )
 
 
@@ -76,6 +84,29 @@ def block_until_ready(tree):
         if isinstance(leaf, jax.Array):
             leaf.block_until_ready()
 
+def _parse_layer_list(spec: Optional[str]) -> tuple[int, ...]:
+    if spec is None:
+        return ()
+    spec = spec.strip()
+    if not spec:
+        return ()
+    parts = [p for p in re.split(r"[,\s]+", spec) if p]
+    indices: list[int] = []
+    for part in parts:
+        try:
+            indices.append(int(part))
+        except ValueError as exc:
+            raise ValueError(f"Invalid layer index '{part}' in '{spec}'") from exc
+    # De-dupe (preserve order), then sort for a well-defined forward pass.
+    deduped: list[int] = []
+    seen: set[int] = set()
+    for idx in indices:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        deduped.append(idx)
+    return tuple(sorted(deduped))
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fast text generation using the current SUPER-GIANT layout.")
@@ -97,6 +128,18 @@ def parse_args() -> argparse.Namespace:
                         help="Override context length from config.")
     parser.add_argument("--strip_eos", "--no_eos", action="store_true", dest="strip_eos",
                         help="Drop a trailing EOS token from the prompt before generation.")
+    parser.add_argument(
+        "--run_layers",
+        type=str,
+        default=None,
+        help="Comma/space-separated layer indices to run (e.g. '0,1,2,5'). Default: run all layers.",
+    )
+    parser.add_argument(
+        "--skip_layers",
+        type=str,
+        default=None,
+        help="Comma/space-separated layer indices to skip (e.g. '5,12'). Default: skip none.",
+    )
     parser.add_argument("--verbose", action="store_true",
                         help="Print timing stats.")
     return parser.parse_args()
@@ -127,7 +170,28 @@ def main():
     if prompt_ids.size == 0:
         raise ValueError("Prompt produced zero tokens. Provide non-empty text.")
 
-    model = build_model(cfg, len(tokenizer), context_length)
+    n_layers = int(cfg["model"]["num_layers"])
+    if args.run_layers and args.skip_layers:
+        raise ValueError("Pass only one of --run_layers or --skip_layers (not both).")
+    layers_to_run = None
+    if args.run_layers:
+        selected = _parse_layer_list(args.run_layers)
+        for idx in selected:
+            if idx < 0 or idx >= n_layers:
+                raise ValueError(f"--run_layers contains out-of-range layer index {idx} (valid: 0..{n_layers - 1})")
+        layers_to_run = selected
+    elif args.skip_layers:
+        skip = set(_parse_layer_list(args.skip_layers))
+        for idx in skip:
+            if idx < 0 or idx >= n_layers:
+                raise ValueError(f"--skip_layers contains out-of-range layer index {idx} (valid: 0..{n_layers - 1})")
+        kept = tuple(i for i in range(n_layers) if i not in skip)
+        layers_to_run = None if len(kept) == n_layers else kept
+
+    if layers_to_run is not None:
+        print(f"Running transformer layers: {layers_to_run} (total={len(layers_to_run)}/{n_layers})")
+
+    model = build_model(cfg, len(tokenizer), context_length, layers_to_run=layers_to_run)
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0

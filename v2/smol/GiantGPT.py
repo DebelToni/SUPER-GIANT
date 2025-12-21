@@ -38,6 +38,7 @@ class GiantGPT(nn.Module):
     d_ff:           int
     n_layers:       int
     dropout_rate:   float = 0.1
+    layers_to_run: Optional[tuple[int, ...]] = None
 
     @nn.compact
     def __call__(
@@ -61,19 +62,23 @@ class GiantGPT(nn.Module):
         x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
 
         # Decoder blocks
-        for _ in range(self.n_layers):
-            x = TinyTransformerBlock(
+        run_set = set(self.layers_to_run) if self.layers_to_run is not None else None
+        for layer_idx in range(self.n_layers):
+            block = TinyTransformerBlock(
                 d_model=self.d_model,
                 n_heads=self.n_heads,
                 d_ff=self.d_ff,
                 dropout_rate=self.dropout_rate,
                 dtype=COMPUTE_DTYPE,
-            )(
-                x,
-                deterministic=deterministic,
-                use_kv_cache=use_kv_cache,
-                cur_index=cur_index,
+                name=f"TinyTransformerBlock_{layer_idx}",
             )
+            if run_set is None or layer_idx in run_set:
+                x = block(
+                    x,
+                    deterministic=deterministic,
+                    use_kv_cache=use_kv_cache,
+                    cur_index=cur_index,
+                )
 
         # SmolLM/LLaMA-style final RMSNorm
         x = RMSNorm(name="final_norm", dtype=COMPUTE_DTYPE, epsilon=1e-5)(x)

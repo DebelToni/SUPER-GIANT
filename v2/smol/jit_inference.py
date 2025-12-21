@@ -37,11 +37,6 @@ def init_inference_state(
     )
     params = variables["params"]
     nonparam = {k: v for k, v in variables.items() if k != "params"}
-    if use_kv_cache and "cache" not in nonparam:
-        raise ValueError(
-            "Model did not create a 'cache' collection during init. "
-            "Check that GiantGPT uses a Flax variable collection named 'cache' when use_kv_cache=True."
-        )
     return params, nonparam
 
 
@@ -66,7 +61,8 @@ def _apply_with_cache(
         cur_index=cur_idx,
         mutable=["cache"],
     )
-    nonparam_out = {**nonparam, "cache": new_vars["cache"]}
+    cache_updates = new_vars.get("cache")
+    nonparam_out = {**nonparam, "cache": cache_updates} if cache_updates is not None else nonparam
     return logits, nonparam_out
 
 

@@ -3,7 +3,7 @@ import os
 import re
 from typing import Optional
 
-from checkpoint_io import load_npz, save_npz
+from .checkpoint_io import load_npz, save_npz
 from flax import serialization
 
 

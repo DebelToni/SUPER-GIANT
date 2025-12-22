@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -7,16 +8,20 @@ import jax
 import jax.numpy as jnp
 from omegaconf import OmegaConf
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MODEL_DIR = PROJECT_ROOT / "model"
+if str(MODEL_DIR) not in sys.path:
+    sys.path.insert(0, str(MODEL_DIR))
+
 from TRM import TRM
 from jit_inference import init_params, make_jitted_inference
 
 
 def load_cfg():
-    model_dir = Path(__file__).resolve().parent
-    project_root = model_dir.parent
     return OmegaConf.merge(
-        OmegaConf.load(project_root / "Global_Config.yml"),
-        OmegaConf.load(model_dir / "Config.yml"),
+        OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
+        OmegaConf.load(PROJECT_ROOT / "model" / "Config.yml"),
+        OmegaConf.load(Path(__file__).resolve().parent / "Config.yml"),
     )
 
 
@@ -31,6 +36,7 @@ def main():
         tiny_layers=int(mcfg.tiny_layers),
         variant=str(mcfg.variant),
         num_heads=int(mcfg.num_heads),
+        rope_dim=int(mcfg.rope_dim),
         d_ff=int(mcfg.feed_forward_size),
         mixer_hidden=int(mcfg.mixer_hidden),
         dropout_rate=float(mcfg.dropout_rate),

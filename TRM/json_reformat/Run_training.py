@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -14,35 +15,40 @@ from flax import serialization
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MODEL_DIR = PROJECT_ROOT / "model"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if str(MODEL_DIR) not in sys.path:
+    sys.path.insert(0, str(MODEL_DIR))
+
 from TRM import TRM
 from Training_step import eval_step, train_step
-from checkpoint_manager import latest as latest_ckpt
-from checkpoint_manager import load as load_ckpt
-from checkpoint_manager import load_opt_state, save as save_ckpt, save_opt_state
-from optimizer_utils import create_weight_decay_mask
-from sudoku_dataset import format_grid, load_or_generate_dataset
-
-
-IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
+from common.checkpoint_manager import latest as latest_ckpt
+from common.checkpoint_manager import load as load_ckpt
+from common.checkpoint_manager import load_opt_state, save as save_ckpt, save_opt_state
+from common.optimizer_utils import create_weight_decay_mask
+from dataset import decode, load_dataset
 
 
 def load_configs(config_path: str | None = None) -> OmegaConf:
-    model_dir = Path(__file__).resolve().parent
-    project_root = model_dir.parent
-    global_cfg = OmegaConf.load(project_root / "Global_Config.yml")
-    local_cfg = OmegaConf.load(config_path or (model_dir / "Config.yml"))
-    return OmegaConf.merge(global_cfg, local_cfg)
+    json_dir = Path(__file__).resolve().parent
+    global_cfg = OmegaConf.load(PROJECT_ROOT / "Global_Config.yml")
+    model_cfg = OmegaConf.load(PROJECT_ROOT / "model" / "Config.yml")
+    local_cfg = OmegaConf.load(config_path or (json_dir / "Config.yml"))
+    return OmegaConf.merge(global_cfg, model_cfg, local_cfg)
 
 
-def build_model(cfg: OmegaConf) -> TRM:
+def build_model(cfg: OmegaConf, *, vocab_size: int) -> TRM:
     m = cfg.model
     return TRM(
-        vocab_size=int(m.vocab_size),
+        vocab_size=int(vocab_size),
         context_length=int(m.context_length),
         d_model=int(m.embedding_size),
         tiny_layers=int(m.tiny_layers),
         variant=str(m.variant),
         num_heads=int(m.num_heads),
+        rope_dim=int(m.rope_dim),
         d_ff=int(m.feed_forward_size),
         mixer_hidden=int(m.mixer_hidden),
         dropout_rate=float(m.dropout_rate),
@@ -93,38 +99,36 @@ def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientT
 
 
 def parse_args() -> argparse.Namespace:
-    cli = argparse.ArgumentParser("TRM Sudoku training")
-    cli.add_argument("--config", default=None, help="Override config path (defaults to model/Config.yml).")
+    cli = argparse.ArgumentParser("TRM JSON reformat training")
+    cli.add_argument("--config", default=None, help="Override config path (defaults to json_reformat/Config.yml).")
     cli.add_argument("--data_root", default=None, help="Override cfg.paths.data_root (dataset/cache/checkpoints).")
-    cli.add_argument("--checkpoint_dir", default="checkpoints/trm_sudoku")
+    cli.add_argument("--checkpoint_dir", default="checkpoints/trm_json_reformat")
     cli.add_argument("--checkpoint_every", type=int, default=None)
     cli.add_argument("--resume", nargs="?", const="latest", default=None)
-    cli.add_argument("--regen_dataset", action="store_true", help="Regenerate cached Sudoku dataset.")
     cli.add_argument("--max_steps", type=int, default=None, help="Override training.max_steps.")
     cli.add_argument("--batch_size", type=int, default=None, help="Override training.batch_size.")
     cli.add_argument("--microbatch_size", type=int, default=None, help="Microbatch size for gradient accumulation.")
     cli.add_argument("--supervision_steps", type=int, default=None, help="Override training.supervision_steps.")
-    cli.add_argument("--train_samples", type=int, default=None)
-    cli.add_argument("--val_samples", type=int, default=None)
-    cli.add_argument("--min_clues", type=int, default=None)
+    cli.add_argument("--train_path", type=str, default=None)
+    cli.add_argument("--val_path", type=str, default=None)
+    cli.add_argument("--vocab_path", type=str, default=None)
     return cli.parse_args()
 
 
-def _make_batch(rng: np.random.Generator, puzzles: np.ndarray, solutions: np.ndarray, batch_size: int):
-    idx = rng.integers(0, puzzles.shape[0], size=(batch_size,))
+def _make_batch(rng: np.random.Generator, ds, batch_size: int):
+    idx = rng.integers(0, ds["input"].shape[0], size=(batch_size,))
     return {
-        "puzzle": jnp.asarray(puzzles[idx], dtype=jnp.int32),
-        "solution": jnp.asarray(solutions[idx], dtype=jnp.int32),
-        "aug_ids": jnp.zeros((batch_size,), dtype=jnp.int32),
+        "input": jnp.asarray(ds["input"][idx], dtype=jnp.int32),
+        "target": jnp.asarray(ds["target"][idx], dtype=jnp.int32),
+        "mask": jnp.asarray(ds["mask"][idx], dtype=jnp.float32),
     }
 
 
-def _eval_dataset(
-    params, ds, *, model: TRM, batch_size: int, supervision_steps: int
-) -> tuple[float, float, float]:
-    puzzles = ds["puzzle"]
-    solutions = ds["solution"]
-    n = puzzles.shape[0]
+def _eval_dataset(params, ds, *, model: TRM, batch_size: int, supervision_steps: int):
+    inputs = ds["input"]
+    targets = ds["target"]
+    masks = ds["mask"]
+    n = inputs.shape[0]
     n_batches = max(1, (n + batch_size - 1) // batch_size)
     total_solved = 0.0
     total_token = 0.0
@@ -133,9 +137,9 @@ def _eval_dataset(
     for i in range(n_batches):
         sl = slice(i * batch_size, (i + 1) * batch_size)
         batch = {
-            "puzzle": jnp.asarray(puzzles[sl], dtype=jnp.int32),
-            "solution": jnp.asarray(solutions[sl], dtype=jnp.int32),
-            "aug_ids": jnp.zeros((puzzles[sl].shape[0],), dtype=jnp.int32),
+            "input": jnp.asarray(inputs[sl], dtype=jnp.int32),
+            "target": jnp.asarray(targets[sl], dtype=jnp.int32),
+            "mask": jnp.asarray(masks[sl], dtype=jnp.float32),
         }
         solved_acc, token_acc, ce = eval_step(params, batch, model=model, supervision_steps=supervision_steps)
         total_solved += float(solved_acc)
@@ -161,29 +165,29 @@ def main() -> None:
     rng_np = np.random.default_rng(seed)
     rng = jax.random.PRNGKey(seed)
 
-    sudoku_cfg = cfg.sudoku
-    train_samples = int(args.train_samples or sudoku_cfg.train_samples)
-    val_samples = int(args.val_samples or sudoku_cfg.val_samples)
-    min_clues = int(args.min_clues or sudoku_cfg.min_clues)
-    cache_path = Path(str(sudoku_cfg.cache_path))
-    if not cache_path.is_absolute():
-        cache_path = (base_root / cache_path).resolve()
+    json_cfg = cfg.json_reformat
+    train_path = Path(args.train_path or json_cfg.train_path)
+    val_path = Path(args.val_path or json_cfg.val_path)
+    vocab_path = Path(args.vocab_path or json_cfg.vocab_path)
+    if not train_path.is_absolute():
+        train_path = (base_root / train_path).resolve()
+    if not val_path.is_absolute():
+        val_path = (base_root / val_path).resolve()
+    if not vocab_path.is_absolute():
+        vocab_path = (base_root / vocab_path).resolve()
 
-    ds = load_or_generate_dataset(
-        cache_path=str(cache_path),
-        train_samples=train_samples,
-        val_samples=val_samples,
-        min_clues=min_clues,
-        seed=seed,
-        regen=bool(args.regen_dataset),
-        max_remove_attempts=250,
-    )
+    max_len = int(cfg.model.context_length)
+    ds = load_dataset(train_path=train_path, val_path=val_path, vocab_path=vocab_path, max_len=max_len)
+    vocab_size = len(ds.vocab.chars)
 
-    print("[dataset] train:", ds.train_puzzle.shape, "val:", ds.val_puzzle.shape)
-    print("[dataset] example puzzle (0=blank):\n" + format_grid(ds.train_puzzle[0]))
-    print("[dataset] example solution:\n" + format_grid(ds.train_solution[0]))
+    print("[dataset] train:", ds.train_input.shape, "val:", ds.val_input.shape)
+    print("[dataset] vocab:", vocab_size, "context_len:", max_len)
+    sample_raw = decode(ds.train_input[0], ds.vocab)
+    sample_fixed = decode(ds.train_target[0], ds.vocab)
+    print("[dataset] example raw:", sample_raw)
+    print("[dataset] example fixed:", sample_fixed)
 
-    model = build_model(cfg)
+    model = build_model(cfg, vocab_size=vocab_size)
 
     batch_size = int(args.batch_size or cfg.training.batch_size)
     microbatch_size = args.microbatch_size
@@ -208,13 +212,12 @@ def main() -> None:
     checkpoint_every = int(args.checkpoint_every or cfg.training.checkpoint_every)
 
     init_tokens = jnp.zeros((batch_size, model.context_length), dtype=jnp.int32)
-    init_aug = jnp.zeros((batch_size,), dtype=jnp.int32)
     rng, key_params, key_dropout = jax.random.split(rng, 3)
     variables = model.init(
         {"params": key_params, "dropout": key_dropout},
         init_tokens,
         deterministic=False,
-        aug_ids=init_aug,
+        aug_ids=None,
     )
     params = variables["params"]
     if isinstance(params, dict):
@@ -250,14 +253,14 @@ def main() -> None:
     log_every = int(cfg.training.log_every)
     eval_every = int(cfg.training.eval_every)
 
-    train_arrays = {"puzzle": ds.train_puzzle, "solution": ds.train_solution}
-    val_arrays = {"puzzle": ds.val_puzzle, "solution": ds.val_solution}
+    train_arrays = {"input": ds.train_input, "target": ds.train_target, "mask": ds.train_mask}
+    val_arrays = {"input": ds.val_input, "target": ds.val_target, "mask": ds.val_mask}
 
     pbar = tqdm(range(global_step, max_steps), desc="train", dynamic_ncols=True)
     t_compile = None
 
     for step in pbar:
-        batch = _make_batch(rng_np, train_arrays["puzzle"], train_arrays["solution"], batch_size)
+        batch = _make_batch(rng_np, train_arrays, batch_size)
         rng, key = jax.random.split(rng)
 
         t0 = time.time()

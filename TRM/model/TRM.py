@@ -40,6 +40,7 @@ class TRM(nn.Module):
     tiny_layers: int
     variant: str
     num_heads: int
+    rope_dim: int
     d_ff: int
     mixer_hidden: int
 
@@ -157,6 +158,7 @@ class TRM(nn.Module):
             n_layers=self.tiny_layers,
             context_length=self.context_length,
             variant=self.variant,
+            rotary_dim=self.rope_dim,
             mixer_hidden=self.mixer_hidden,
             dropout_rate=self.dropout_rate,
             activation=self.activation,

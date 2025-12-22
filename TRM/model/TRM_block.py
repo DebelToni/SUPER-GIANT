@@ -72,6 +72,7 @@ def _get_activation(name: str) -> Callable[[jnp.ndarray], jnp.ndarray]:
 class NativeJaxSelfAttention(nn.Module):
     num_heads: int
     qkv_features: int
+    context_length: int
     dropout_rate: float = 0.0
     dtype: jnp.dtype = COMPUTE_DTYPE
     rotary_dim: int = int(MODEL_CFG.rope_dim)
@@ -101,9 +102,7 @@ class NativeJaxSelfAttention(nn.Module):
         )
         self.dropout = nn.Dropout(rate=self.dropout_rate)
 
-        self._rope_sin, self._rope_cos = _build_rope_cache(
-            int(MODEL_CFG.context_length), self.rotary_dim, self.dtype
-        )
+        self._rope_sin, self._rope_cos = _build_rope_cache(int(self.context_length), self.rotary_dim, self.dtype)
 
     @nn.compact
     def __call__(self, x, *, deterministic: bool):
@@ -172,6 +171,7 @@ class TinyTRMLayer(nn.Module):
     d_ff: int
     context_length: int
     variant: str = "attn"  # attn | mlp
+    rotary_dim: int = int(MODEL_CFG.rope_dim)
     mixer_hidden: int = int(MODEL_CFG.mixer_hidden)
     dropout_rate: float = 0.0
     activation: str = str(MODEL_CFG.activation)
@@ -188,8 +188,10 @@ class TinyTRMLayer(nn.Module):
                 h_mix = NativeJaxSelfAttention(
                     num_heads=module.n_heads,
                     qkv_features=module.d_model,
+                    context_length=module.context_length,
                     dropout_rate=module.dropout_rate,
                     dtype=module.dtype,
+                    rotary_dim=module.rotary_dim,
                 )(h_norm, deterministic=deterministic)
             elif variant == "mlp":
                 h_mix = TokenMixMLP(
@@ -240,6 +242,7 @@ class TinyRecurrentNet(nn.Module):
     n_layers: int
     context_length: int
     variant: str = str(MODEL_CFG.variant)
+    rotary_dim: int = int(MODEL_CFG.rope_dim)
     mixer_hidden: int = int(MODEL_CFG.mixer_hidden)
     dropout_rate: float = 0.0
     activation: str = str(MODEL_CFG.activation)
@@ -255,6 +258,7 @@ class TinyRecurrentNet(nn.Module):
                 d_ff=self.d_ff,
                 context_length=self.context_length,
                 variant=self.variant,
+                rotary_dim=self.rotary_dim,
                 mixer_hidden=self.mixer_hidden,
                 dropout_rate=self.dropout_rate,
                 activation=self.activation,
@@ -263,4 +267,3 @@ class TinyRecurrentNet(nn.Module):
             )(h, deterministic=deterministic)
         h = RMSNorm(name="rms_out", dtype=self.dtype, epsilon=1e-5)(h)
         return h
-

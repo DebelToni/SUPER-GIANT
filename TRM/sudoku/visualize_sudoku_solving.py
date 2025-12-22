@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -12,9 +13,16 @@ import numpy as np
 from flax import core as flax_core
 from omegaconf import OmegaConf
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MODEL_DIR = PROJECT_ROOT / "model"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if str(MODEL_DIR) not in sys.path:
+    sys.path.insert(0, str(MODEL_DIR))
+
 from TRM import TRM
-from checkpoint_manager import latest as latest_ckpt
-from checkpoint_manager import load as load_ckpt
+from common.checkpoint_manager import latest as latest_ckpt
+from common.checkpoint_manager import load as load_ckpt
 from sudoku_dataset import SIDE, format_grid, load_or_generate_dataset
 
 
@@ -53,11 +61,10 @@ def parse_args():
 
 
 def load_cfg(config_path: str | None):
-    model_dir = Path(__file__).resolve().parent
-    project_root = model_dir.parent
     cfg = OmegaConf.merge(
-        OmegaConf.load(project_root / "Global_Config.yml"),
-        OmegaConf.load(config_path or (model_dir / "Config.yml")),
+        OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
+        OmegaConf.load(PROJECT_ROOT / "model" / "Config.yml"),
+        OmegaConf.load(config_path or (Path(__file__).resolve().parent / "Config.yml")),
     )
     return cfg
 
@@ -71,6 +78,7 @@ def build_model(cfg: OmegaConf) -> TRM:
         tiny_layers=int(m.tiny_layers),
         variant=str(m.variant),
         num_heads=int(m.num_heads),
+        rope_dim=int(m.rope_dim),
         d_ff=int(m.feed_forward_size),
         mixer_hidden=int(m.mixer_hidden),
         dropout_rate=float(m.dropout_rate),

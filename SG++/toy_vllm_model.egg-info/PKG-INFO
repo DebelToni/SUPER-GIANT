@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: toy_vllm_model
+Version: 0.0.1
+Requires-Dist: vllm>=0.13.0
+Requires-Dist: torch
+Requires-Dist: transformers
+Requires-Dist: safetensors

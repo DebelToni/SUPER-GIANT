@@ -1,14 +1,21 @@
 import asyncio
+import os
 import time
 import httpx
 
 # ---- CONFIG ----
-BASE_URL = "http://127.0.0.1:8000/v1/completions"
-MODEL = "google/gemma-3-1b-it"
-CONCURRENCY = 4
+# BASE_URL = "http://127.0.0.1:8000/v1/completions"
+DEFAULT_BASE_URL = "https://rh3d0k2emx2ntt-8000.proxy.runpod.net/v1/completions"
+BASE_ROOT = os.getenv("BASE")
+BASE_URL = os.getenv("VLLM_BASE_URL") or (
+    f"{BASE_ROOT}/v1/completions" if BASE_ROOT else DEFAULT_BASE_URL
+)
+MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+CONCURRENCY =  8
 N_TOKENS = 512          # <-- set your N here
-REQUESTS_PER_USER = 1   # bump this to average over more runs
-PROMPT = "Write a concise technical paragraph about GPU memory bandwidth.\n"
+REQUESTS_PER_USER = 4   # bump this to average over more runs
+PROMPT = "Write a technical explenation about GPU memory bandwidth.\n"
+API_KEY = os.getenv("VLLM_API_KEY")
 # ---------------
 
 async def one_request(client: httpx.AsyncClient) -> int:
@@ -19,7 +26,8 @@ async def one_request(client: httpx.AsyncClient) -> int:
         "temperature": 0.0,
         "stream": False,
     }
-    r = await client.post(BASE_URL, json=payload, timeout=None)
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else None
+    r = await client.post(BASE_URL, json=payload, headers=headers, timeout=None)
     r.raise_for_status()
     j = r.json()
     # OpenAI-style usage field
@@ -59,4 +67,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

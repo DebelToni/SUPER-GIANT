@@ -19,3 +19,4 @@ teacher_out/
 a.md
 agents.md
 .codex
+*.safetensors

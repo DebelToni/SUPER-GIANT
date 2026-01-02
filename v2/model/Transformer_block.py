@@ -121,11 +121,6 @@ class NativeJaxSelfAttention(nn.Module):
         k = k_chunk.reshape(b, l, self.num_kv,  head_dim)
         v = v_chunk.reshape(b, l, self.num_kv,  head_dim)
 
-        group = max(1, self.num_heads // self.num_kv)
-        kv_indices = None
-        if self.num_kv != self.num_heads:
-            kv_indices = jnp.arange(self.num_heads) // group
-
         if use_kv_cache:
             sin = jax.lax.dynamic_slice(
                 self._rope_sin,
@@ -174,9 +169,6 @@ class NativeJaxSelfAttention(nn.Module):
 
             k_full = jnp.swapaxes(cached_k.value, 1, 2)  # (b, context, num_kv, hd)
             v_full = jnp.swapaxes(cached_v.value, 1, 2)
-            if kv_indices is not None:
-                k_full = jnp.take(k_full, kv_indices, axis=2)
-                v_full = jnp.take(v_full, kv_indices, axis=2)
             key_len = k_full.shape[1]
             cur_max = cur_index + (l - 1)
             valid = jnp.arange(key_len) <= cur_max
@@ -191,9 +183,9 @@ class NativeJaxSelfAttention(nn.Module):
             if False:
                 q = q / jnp.sqrt(head_dim)
 
-            k_full = k if kv_indices is None else jnp.take(k, kv_indices, axis=2)
-            v_full = v if kv_indices is None else jnp.take(v, kv_indices, axis=2)
-
+            # Use GQA/MQA by passing K/V with num_kv heads directly.
+            k_full = k
+            v_full = v
             y = jax.nn.dot_product_attention(q, k_full, v_full, is_causal=True, implementation=impl)
             y = y.reshape(b, l, self.qkv_features)
 

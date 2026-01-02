@@ -17,7 +17,7 @@ from flax.linen import RMSNorm
 class ModelConfig:
     # Model sizes
     vocab_size: int = 32000
-    context_length: int = 22048
+    context_length: int = 512
     embedding_size: int = 1280
     num_heads: int = 20
     num_kv_heads: int = 10
@@ -487,7 +487,7 @@ def assert_tree_on_backend(tree, name: str, platform: str):
     plats = []
     for x in jax.tree_util.tree_leaves(tree):
         if isinstance(x, jax.Array):
-            plats.append(x.device().platform)
+            plats.append(x.device.platform)
     if plats and any(p != platform for p in plats):
         raise RuntimeError(f"{name} not all on {platform}: {set(plats)}")
 

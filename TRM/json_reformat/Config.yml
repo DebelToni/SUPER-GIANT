@@ -11,7 +11,7 @@ model:
   dropout_rate: 0.0
   activation: silu
   use_remat: true
-  add_positional_embedding: true
+  add_positional_embedding: false
 
   recursion:
     L_cycles: 4
@@ -31,6 +31,8 @@ optimizer:
     - bias
     - scale
     - embedding
+    - y_init
+    - z_init
 
 training:
   seed: 0
@@ -47,3 +49,13 @@ json_reformat:
   val_path: "dataset_artifacts/json_reformat/val.jsonl"
   vocab_path: "dataset_artifacts/json_reformat/vocab.json"
   max_chars: 200
+
+dataset_generation:
+  train_size: 5000
+  val_size: 500
+  batch: 50
+  max_chars: 200
+  temperature: 0.9
+  sleep: 0.2
+  max_retries: 5
+  overwrite: false

@@ -17,10 +17,12 @@ model:
 
   # Shared
   feed_forward_size: 512
+  ffn_expansion: 4
+  ffn_multiple_of: 256
   dropout_rate: 0.0
   activation: silu
   use_remat: true
-  add_positional_embedding: true
+  add_positional_embedding: false
 
   # Optional augmentation / puzzle embedding
   augmentation:
@@ -35,12 +37,14 @@ model:
     max_supervision_steps: 16 # N_sup (outer refinement)
     enable_early_stop: true
     halt_threshold_logit: 0.0
+    halt_exploration_prob: 0.1
+    no_act_continue: true
 
   # Initial states
   init:
-    learned_y: true
-    learned_z: true
-    init_std: 0.02
+    learned_y: false
+    learned_z: false
+    init_std: 1.0
 
   # Dtypes
   param_dtype: float32

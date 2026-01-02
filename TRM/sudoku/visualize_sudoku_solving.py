@@ -89,6 +89,8 @@ def build_model(cfg: OmegaConf) -> TRM:
         max_supervision_steps=int(m.recursion.max_supervision_steps),
         enable_early_stop=bool(m.recursion.enable_early_stop),
         halt_threshold_logit=float(m.recursion.halt_threshold_logit),
+        halt_exploration_prob=float(getattr(m.recursion, "halt_exploration_prob", 0.0)),
+        no_act_continue=bool(getattr(m.recursion, "no_act_continue", True)),
         aug_enabled=bool(m.augmentation.enabled),
         aug_num_embeddings=int(m.augmentation.num_embeddings),
         aug_default_id=int(m.augmentation.default_id),
@@ -156,7 +158,7 @@ def render_overlay(
 def make_jitted_refine_step(model: TRM):
     @jax.jit
     def refine(params, x, y, z):
-        y, z, logits, q_logit, pred = model.apply(
+        y, z, logits, q_logit, _q_continue, pred = model.apply(
             {"params": params},
             x,
             y,
@@ -185,7 +187,7 @@ def make_jitted_infer_fixed(model: TRM, steps: int):
 
         def body(carry, _):
             y, z = carry
-            y, z, _logits, q_logit, pred = model.apply(
+            y, z, _logits, q_logit, _q_continue, pred = model.apply(
                 {"params": params},
                 x,
                 y,
@@ -342,6 +344,8 @@ def main():
         print(render_overlay(puzzle, pred_np, solution, prev_pred=prev_pred, use_color=not args.no_color))
 
         prev_pred = pred_np
+        if solved:
+            break
         if args.sleep > 0:
             time.sleep(float(args.sleep))
 

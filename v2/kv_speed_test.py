@@ -13,6 +13,7 @@ from flax.linen import RMSNorm
 
 # ------------------------------- Config ------------------------------------ #
 
+
 @dataclass(frozen=True)
 class ModelConfig:
     # Model sizes
@@ -30,7 +31,14 @@ class ModelConfig:
     param_dtype: str = "bfloat16"
     compute_dtype: str = "bfloat16"
 
+
 MODEL_CFG = ModelConfig()
+
+# DeepSeek-style MLA defaults (reasonable compression starting point)
+# KV cache per token shrinks from 2*head_dim to (latent+rope) + latent
+MLA_LATENT_DIM_DEFAULT = 32
+MLA_ROPE_DIM_DEFAULT = 16
+
 
 def _to_dtype(name: str) -> jnp.dtype:
     try:
@@ -38,13 +46,16 @@ def _to_dtype(name: str) -> jnp.dtype:
     except AttributeError:
         return jnp.dtype(name)
 
+
 PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
 COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
 
-from jax import config as jax_config
+from jax import config as jax_config  # noqa: E402
+
 jax_config.update("jax_default_matmul_precision", MODEL_CFG.compute_dtype)
 
 IS_GPU = (jax.default_backend() == "gpu")
+
 
 def choose_attention_impl(force_xla: bool = False) -> str:
     # Default: cudnn on GPU, xla elsewhere.
@@ -55,15 +66,18 @@ def choose_attention_impl(force_xla: bool = False) -> str:
 
 # ----------------------------- RoPE helpers -------------------------------- #
 
+
 def _rotate_every_two(x: jnp.ndarray) -> jnp.ndarray:
     x1, x2 = jnp.split(x, 2, axis=-1)
     return jnp.concatenate((-x2, x1), axis=-1)
+
 
 def apply_partial_rope(x: jnp.ndarray, sin: jnp.ndarray, cos: jnp.ndarray, rot_dim: int) -> jnp.ndarray:
     """Apply RoPE to the first rot_dim scalars of x (..., H, D)."""
     x_rot, x_pass = jnp.split(x, [rot_dim], axis=-1)
     x_rot = (x_rot * cos) + (_rotate_every_two(x_rot) * sin)
     return jnp.concatenate([x_rot, x_pass], axis=-1)
+
 
 def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype):
     inv_freq = 1.0 / (10000 ** (jnp.arange(0, rotary_dim, 2) / rotary_dim))
@@ -77,12 +91,14 @@ def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype):
 
 # ---------------------------- Attention ------------------------------------ #
 
+
 class NativeJaxSelfAttention(nn.Module):
     """
     Multi-head self-attention using jax.nn.dot_product_attention.
 
     Uses native GQA: Query heads = N, Key/Value heads = K (K can differ from N) WITHOUT duplicating KV.
     """
+
     num_heads: int
     qkv_features: int
     num_kv: int
@@ -120,9 +136,7 @@ class NativeJaxSelfAttention(nn.Module):
         )
         self.dropout = nn.Dropout(rate=self.dropout_rate)
 
-        self._rope_sin, self._rope_cos = _build_rope_cache(
-            MODEL_CFG.context_length, self.rotary_dim, self.dtype
-        )
+        self._rope_sin, self._rope_cos = _build_rope_cache(MODEL_CFG.context_length, self.rotary_dim, self.dtype)
 
     @nn.compact
     def __call__(
@@ -133,7 +147,7 @@ class NativeJaxSelfAttention(nn.Module):
         use_kv_cache: bool,
         cur_index: Optional[jnp.ndarray],
         kv_seq_len: jnp.ndarray,  # (B,)
-        q_seq_len: jnp.ndarray,   # (B,)
+        q_seq_len: jnp.ndarray,  # (B,)
         is_causal: bool,
     ) -> jnp.ndarray:
         b, l, _ = x.shape
@@ -146,7 +160,7 @@ class NativeJaxSelfAttention(nn.Module):
         q_chunk, k_chunk, v_chunk = jnp.split(qkv, [q_size, q_size + kv_size], axis=-1)
 
         q = q_chunk.reshape(b, l, self.num_heads, hd)  # (B, T, N, H)
-        k = k_chunk.reshape(b, l, self.num_kv, hd)     # (B, T, K, H)
+        k = k_chunk.reshape(b, l, self.num_kv, hd)  # (B, T, K, H)
         v = v_chunk.reshape(b, l, self.num_kv, hd)
 
         # RoPE slice: positions [cur_index : cur_index + l] when caching, else [0:l]
@@ -165,12 +179,16 @@ class NativeJaxSelfAttention(nn.Module):
         if use_kv_cache:
             # Cache layout matches dot_product_attention directly: (B, S, K, H)
             cached_k = self.variable(
-                "cache", "k", jnp.zeros,
+                "cache",
+                "k",
+                jnp.zeros,
                 (b, MODEL_CFG.context_length, self.num_kv, hd),
                 self.dtype,
             )
             cached_v = self.variable(
-                "cache", "v", jnp.zeros,
+                "cache",
+                "v",
+                jnp.zeros,
                 (b, MODEL_CFG.context_length, self.num_kv, hd),
                 self.dtype,
             )
@@ -182,7 +200,9 @@ class NativeJaxSelfAttention(nn.Module):
             if l > 1:
                 # Prefill: attend over the prompt chunk itself (fast long-seq kernel), causal within prompt.
                 y = jax.nn.dot_product_attention(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     is_causal=is_causal,
                     query_seq_lengths=q_seq_len,
                     key_value_seq_lengths=kv_seq_len,
@@ -191,7 +211,9 @@ class NativeJaxSelfAttention(nn.Module):
             else:
                 # Decode: attend over cached prefix; lengths tell kernel to ignore tail.
                 y = jax.nn.dot_product_attention(
-                    q, cached_k.value, cached_v.value,
+                    q,
+                    cached_k.value,
+                    cached_v.value,
                     is_causal=is_causal,
                     query_seq_lengths=q_seq_len,
                     key_value_seq_lengths=kv_seq_len,
@@ -200,7 +222,9 @@ class NativeJaxSelfAttention(nn.Module):
         else:
             # No-cache mode.
             y = jax.nn.dot_product_attention(
-                q, k, v,
+                q,
+                k,
+                v,
                 is_causal=is_causal,
                 query_seq_lengths=q_seq_len,
                 key_value_seq_lengths=kv_seq_len,
@@ -213,13 +237,203 @@ class NativeJaxSelfAttention(nn.Module):
         return y
 
 
+class DeepSeekMLASelfAttention(nn.Module):
+    """
+    DeepSeek-style MLA-ish attention (benchmark-oriented):
+
+    - Build q/k for attention scores as concat([latent, rope]) where rope slice gets RoPE.
+    - Values are stored in latent dim (compressed).
+    - Output per head: latent -> head_dim using a learned per-head up-projection.
+    - KV cache stores:
+        K_cat: (latent_dim + rope_dim)
+        V_lat: (latent_dim)
+      => smaller than baseline KV cache (2*head_dim).
+
+    This is intended for speed/cache footprint comparison, not exact DeepSeek parity.
+    """
+
+    num_heads: int
+    qkv_features: int
+    num_kv: int
+    latent_dim: int = MLA_LATENT_DIM_DEFAULT
+    rope_dim: int = MLA_ROPE_DIM_DEFAULT
+    dropout_rate: float = 0.0
+    dtype: jnp.dtype = COMPUTE_DTYPE
+    attn_impl: str = "cudnn"  # "cudnn" or "xla"
+
+    def setup(self):
+        if self.qkv_features % self.num_heads != 0:
+            raise ValueError("qkv_features must be divisible by num_heads")
+        if self.num_heads % self.num_kv != 0:
+            raise ValueError("num_heads must be divisible by num_kv")
+        if self.rope_dim % 2 != 0:
+            raise ValueError("rope_dim must be even")
+        if self.latent_dim <= 0:
+            raise ValueError("latent_dim must be > 0")
+        if self.rope_dim < 0:
+            raise ValueError("rope_dim must be >= 0")
+
+        self.head_dim = self.qkv_features // self.num_heads
+        self.kq_dim = self.latent_dim + self.rope_dim
+
+        # q -> (N * kq_dim), kv -> (K * (kq_dim + kq_dim))
+        self.q_proj = nn.Dense(
+            self.num_heads * self.kq_dim,
+            use_bias=False,
+            name="q_proj",
+            dtype=self.dtype,
+            param_dtype=PARAM_DTYPE,
+        )
+        self.kv_proj = nn.Dense(
+            self.num_kv * (2 * self.kq_dim),
+            use_bias=False,
+            name="kv_proj",
+            dtype=self.dtype,
+            param_dtype=PARAM_DTYPE,
+        )
+
+        # Per-query-head up-projection (N, kq_dim, head_dim)
+        self.out_up = self.param(
+            "out_up",
+            nn.initializers.normal(stddev=0.02),
+            (self.num_heads, self.kq_dim, self.head_dim),
+            PARAM_DTYPE,
+        )
+
+        self.o_proj = nn.Dense(
+            self.qkv_features,
+            use_bias=False,
+            name="o_proj",
+            dtype=self.dtype,
+            param_dtype=PARAM_DTYPE,
+        )
+        self.dropout = nn.Dropout(rate=self.dropout_rate)
+
+        # RoPE cache only for rope_dim slice
+        if self.rope_dim > 0:
+            self._rope_sin, self._rope_cos = _build_rope_cache(MODEL_CFG.context_length, self.rope_dim, self.dtype)
+        else:
+            self._rope_sin, self._rope_cos = None, None
+
+    @nn.compact
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        *,
+        deterministic: bool,
+        use_kv_cache: bool,
+        cur_index: Optional[jnp.ndarray],
+        kv_seq_len: jnp.ndarray,  # (B,)
+        q_seq_len: jnp.ndarray,  # (B,)
+        is_causal: bool,
+    ) -> jnp.ndarray:
+        b, l, _ = x.shape
+
+        # Project Q: (B, T, N, kq_dim)
+        q = self.q_proj(x).reshape(b, l, self.num_heads, self.kq_dim)
+        if self.rope_dim > 0:
+            q_lat, q_rope = jnp.split(q, [self.latent_dim], axis=-1)
+        else:
+            q_lat, q_rope = q, None
+
+        # Project KV: (B, T, K, 2*kq_dim) -> split into k_cat + v_cat
+        kv = self.kv_proj(x).reshape(b, l, self.num_kv, 2 * self.kq_dim)
+        k_cat, v_cat = jnp.split(kv, [self.kq_dim], axis=-1)
+
+        if self.rope_dim > 0:
+            k_lat, k_rope = jnp.split(k_cat, [self.latent_dim], axis=-1)
+
+            # RoPE positions [cur_index : cur_index + l] when caching, else [0:l]
+            if use_kv_cache:
+                if cur_index is None:
+                    raise ValueError("cur_index is required when use_kv_cache=True")
+                sin = jax.lax.dynamic_slice(self._rope_sin, (0, cur_index, 0, 0), (1, l, 1, self.rope_dim))
+                cos = jax.lax.dynamic_slice(self._rope_cos, (0, cur_index, 0, 0), (1, l, 1, self.rope_dim))
+            else:
+                sin = self._rope_sin[:, :l, :, :]
+                cos = self._rope_cos[:, :l, :, :]
+
+            q_rope = apply_partial_rope(q_rope, sin, cos, self.rope_dim)
+            k_rope = apply_partial_rope(k_rope, sin, cos, self.rope_dim)
+
+            q_cat = jnp.concatenate([q_lat, q_rope], axis=-1)
+            k_cat = jnp.concatenate([k_lat, k_rope], axis=-1)
+        else:
+            q_cat = q_lat
+            # when rope_dim==0, k_cat already is latent-only
+            k_cat = k_cat
+
+        if use_kv_cache:
+            cached_k = self.variable(
+                "cache",
+                "k",
+                jnp.zeros,
+                (b, MODEL_CFG.context_length, self.num_kv, self.kq_dim),
+                self.dtype,
+            )
+            cached_v = self.variable(
+                "cache",
+                "v",
+                jnp.zeros,
+                (b, MODEL_CFG.context_length, self.num_kv, self.kq_dim),
+                self.dtype,
+            )
+
+            cached_k.value = jax.lax.dynamic_update_slice(cached_k.value, k_cat, (0, cur_index, 0, 0))
+            cached_v.value = jax.lax.dynamic_update_slice(cached_v.value, v_cat, (0, cur_index, 0, 0))
+
+            if l > 1:
+                y_cat = jax.nn.dot_product_attention(
+                    q_cat,
+                    k_cat,
+                    v_cat,
+                    is_causal=is_causal,
+                    query_seq_lengths=q_seq_len,
+                    key_value_seq_lengths=kv_seq_len,
+                    implementation=self.attn_impl,
+                )
+            else:
+                y_cat = jax.nn.dot_product_attention(
+                    q_cat,
+                    cached_k.value,
+                    cached_v.value,
+                    is_causal=is_causal,
+                    query_seq_lengths=q_seq_len,
+                    key_value_seq_lengths=kv_seq_len,
+                    implementation=self.attn_impl,
+                )
+        else:
+            y_cat = jax.nn.dot_product_attention(
+                q_cat,
+                k_cat,
+                v_cat,
+                is_causal=is_causal,
+                query_seq_lengths=q_seq_len,
+                key_value_seq_lengths=kv_seq_len,
+                implementation=self.attn_impl,
+            )
+
+        # Up-project per query head: (B,T,N,kq_dim) x (N,kq_dim,head_dim) -> (B,T,N,head_dim)
+        w_up = self.out_up.astype(self.dtype)
+        y = jnp.einsum("btnd,ndh->btnh", y_cat, w_up)
+
+        y = y.reshape(b, l, self.qkv_features)
+        y = self.o_proj(y)
+        y = self.dropout(y, deterministic=deterministic)
+        return y
+
+
 # ---------------------------- Transformer block ---------------------------- #
+
 
 class TinyTransformerBlock(nn.Module):
     d_model: int
     n_heads: int
     n_kv_heads: int
     d_ff: int
+    attn_kind: str = "gqa"  # "gqa" or "mla"
+    mla_latent_dim: int = MLA_LATENT_DIM_DEFAULT
+    mla_rope_dim: int = MLA_ROPE_DIM_DEFAULT
     dropout_rate: float = 0.0
     dtype: jnp.dtype = COMPUTE_DTYPE
     attn_impl: str = "cudnn"
@@ -239,14 +453,31 @@ class TinyTransformerBlock(nn.Module):
         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
             residual = h
             h_norm = RMSNorm(name="rms1", dtype=module.dtype, epsilon=1e-5)(h)
-            h_attn = NativeJaxSelfAttention(
-                num_heads=module.n_heads,
-                num_kv=module.n_kv_heads,
-                qkv_features=module.d_model,
-                dropout_rate=module.dropout_rate,
-                dtype=module.dtype,
-                attn_impl=module.attn_impl,
-            )(
+
+            if module.attn_kind == "mla":
+                attn = DeepSeekMLASelfAttention(
+                    num_heads=module.n_heads,
+                    num_kv=module.n_kv_heads,
+                    qkv_features=module.d_model,
+                    latent_dim=module.mla_latent_dim,
+                    rope_dim=module.mla_rope_dim,
+                    dropout_rate=module.dropout_rate,
+                    dtype=module.dtype,
+                    attn_impl=module.attn_impl,
+                    name="attn_mla",
+                )
+            else:
+                attn = NativeJaxSelfAttention(
+                    num_heads=module.n_heads,
+                    num_kv=module.n_kv_heads,
+                    qkv_features=module.d_model,
+                    dropout_rate=module.dropout_rate,
+                    dtype=module.dtype,
+                    attn_impl=module.attn_impl,
+                    name="attn_gqa",
+                )
+
+            h_attn = attn(
                 h_norm,
                 deterministic=deterministic,
                 use_kv_cache=use_kv_cache,
@@ -288,6 +519,7 @@ class TinyTransformerBlock(nn.Module):
 
 # ------------------------------- Model ------------------------------------- #
 
+
 class GiantGPT(nn.Module):
     vocab_size: int
     context_length: int
@@ -296,6 +528,9 @@ class GiantGPT(nn.Module):
     n_kv_heads: int
     d_ff: int
     n_layers: int
+    attn_kind: str = "gqa"  # "gqa" or "mla"
+    mla_latent_dim: int = MLA_LATENT_DIM_DEFAULT
+    mla_rope_dim: int = MLA_ROPE_DIM_DEFAULT
     dropout_rate: float = 0.0
     attn_impl: str = "cudnn"
 
@@ -328,6 +563,9 @@ class GiantGPT(nn.Module):
                 n_heads=self.n_heads,
                 n_kv_heads=self.n_kv_heads,
                 d_ff=self.d_ff,
+                attn_kind=self.attn_kind,
+                mla_latent_dim=self.mla_latent_dim,
+                mla_rope_dim=self.mla_rope_dim,
                 dropout_rate=self.dropout_rate,
                 dtype=COMPUTE_DTYPE,
                 attn_impl=self.attn_impl,
@@ -351,6 +589,7 @@ class GiantGPT(nn.Module):
 
 Array = jnp.ndarray
 PyTree = Dict[str, Any]
+
 
 def init_inference_state(
     model: GiantGPT,
@@ -377,14 +616,15 @@ def init_inference_state(
         raise ValueError("Model did not create a 'cache' collection during init.")
     return params, nonparam
 
+
 def _apply_with_cache(
     model: GiantGPT,
     params: PyTree,
     nonparam: PyTree,
-    tokens: Array,      # (B, L)
-    cur_idx: Array,     # scalar int32
+    tokens: Array,  # (B, L)
+    cur_idx: Array,  # scalar int32
     kv_seq_len: Array,  # (B,) int32
-    q_seq_len: Array,   # (B,) int32
+    q_seq_len: Array,  # (B,) int32
     is_causal: bool,
 ) -> Tuple[Array, PyTree]:
     variables = {"params": params, **nonparam}
@@ -401,6 +641,7 @@ def _apply_with_cache(
     )
     nonparam_out = {**nonparam, "cache": new_vars["cache"]}
     return logits, nonparam_out
+
 
 def make_prefill_and_decode_fns(model: GiantGPT):
     # IMPORTANT: no donate_argnums here -> avoids "buffer deleted/donated" issues during bring-up.
@@ -433,7 +674,7 @@ def make_prefill_and_decode_fns(model: GiantGPT):
         params: PyTree,
         nonparam: PyTree,
         last_tok_2d: Array,  # (B, 1)
-        t_last: Array,       # scalar int32 (position of last_tok_2d)
+        t_last: Array,  # scalar int32 (position of last_tok_2d)
         *,
         steps: int,
     ):
@@ -446,9 +687,7 @@ def make_prefill_and_decode_fns(model: GiantGPT):
             kv_len = jnp.full((b,), t + 1, dtype=jnp.int32)
             q_len = jnp.ones((b,), dtype=jnp.int32)
 
-            logits, nonparam = _apply_with_cache(
-                model, params, nonparam, tok_prev_2d, t, kv_len, q_len, is_causal=False
-            )
+            logits, nonparam = _apply_with_cache(model, params, nonparam, tok_prev_2d, t, kv_len, q_len, is_causal=False)
             step_logits = logits[:, -1, :]
             next_tok = jnp.argmax(step_logits, axis=-1).astype(jnp.int32)
 
@@ -464,6 +703,7 @@ def make_prefill_and_decode_fns(model: GiantGPT):
 
     return prefill, decode
 
+
 def block_until_ready(tree):
     for leaf in jax.tree_util.tree_leaves(tree):
         if isinstance(leaf, jax.Array):
@@ -471,6 +711,7 @@ def block_until_ready(tree):
 
 
 # ------------------------------- Benchmark --------------------------------- #
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Speed test a JAX transformer with KV cache (bf16, cudnn on GPU).")
@@ -481,7 +722,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--runs", type=int, default=1)
     p.add_argument("--force_xla", action="store_true", help="Force implementation='xla' even on GPU.")
+
+    # MLA comparison is optional via flag (keeps old behavior by default)
+    p.add_argument(
+        "--mla",
+        action="store_true",
+        help="Run a second benchmark pass using DeepSeek-style MLA and print head-to-head results.",
+    )
+    p.add_argument("--mla_latent_dim", type=int, default=MLA_LATENT_DIM_DEFAULT)
+    p.add_argument("--mla_rope_dim", type=int, default=MLA_ROPE_DIM_DEFAULT)
+
     return p.parse_args()
+
 
 def assert_tree_on_backend(tree, name: str, platform: str):
     plats = []
@@ -490,6 +742,7 @@ def assert_tree_on_backend(tree, name: str, platform: str):
             plats.append(x.device.platform)
     if plats and any(p != platform for p in plats):
         raise RuntimeError(f"{name} not all on {platform}: {set(plats)}")
+
 
 def main():
     args = parse_args()
@@ -510,34 +763,15 @@ def main():
     print("JAX default backend:", jax.default_backend())
     print("JAX devices:", jax.devices())
 
-    attn_impl = choose_attention_impl(force_xla=args.force_xla)
-    print("Attention implementation request:", attn_impl)
-
-    model = GiantGPT(
-        vocab_size=MODEL_CFG.vocab_size,
-        context_length=MODEL_CFG.context_length,
-        d_model=MODEL_CFG.embedding_size,
-        n_heads=MODEL_CFG.num_heads,
-        n_kv_heads=MODEL_CFG.num_kv_heads,
-        d_ff=MODEL_CFG.feed_forward_size,
-        n_layers=MODEL_CFG.num_layers,
-        dropout_rate=MODEL_CFG.dropout_rate,
-        attn_impl=attn_impl,
-    )
+    attn_impl_req = choose_attention_impl(force_xla=args.force_xla)
+    print("Attention implementation request:", attn_impl_req)
 
     rng = jax.random.PRNGKey(args.seed)
-    key_params, key_dropout, key_data = jax.random.split(rng, 3)
-
-    params, nonparam = init_inference_state(
-        model,
-        key_params,
-        key_dropout,
-        batch_size=args.batch_size,
-        pad_token_id=0,
-    )
+    # keep prompt fixed; use separate param keys for baseline and MLA
+    key_prompt, key_params_base, key_params_mla, key_dropout = jax.random.split(rng, 4)
 
     prompt = jax.random.randint(
-        key_data,
+        key_prompt,
         (args.batch_size, args.prompt_len),
         minval=0,
         maxval=MODEL_CFG.vocab_size,
@@ -547,73 +781,145 @@ def main():
     # Optional force placement to GPU if available (removes ambiguity about host work)
     if IS_GPU:
         gpu0 = jax.devices("gpu")[0]
-        params = jax.device_put(params, gpu0)
-        nonparam = jax.device_put(nonparam, gpu0)
         prompt = jax.device_put(prompt, gpu0)
-        assert_tree_on_backend(params, "params", "gpu")
-        assert_tree_on_backend(nonparam, "nonparam", "gpu")
         assert_tree_on_backend(prompt, "prompt", "gpu")
 
-    prefill_fn, decode_fn = make_prefill_and_decode_fns(model)
+    def run_bench(
+        *,
+        label: str,
+        attn_kind: str,
+        key_params: jax.Array,
+        mla_latent_dim: int,
+        mla_rope_dim: int,
+        attn_impl_requested: str,
+    ):
+        model = GiantGPT(
+            vocab_size=MODEL_CFG.vocab_size,
+            context_length=MODEL_CFG.context_length,
+            d_model=MODEL_CFG.embedding_size,
+            n_heads=MODEL_CFG.num_heads,
+            n_kv_heads=MODEL_CFG.num_kv_heads,
+            d_ff=MODEL_CFG.feed_forward_size,
+            n_layers=MODEL_CFG.num_layers,
+            dropout_rate=MODEL_CFG.dropout_rate,
+            attn_impl=attn_impl_requested,
+            attn_kind=attn_kind,
+            mla_latent_dim=mla_latent_dim,
+            mla_rope_dim=mla_rope_dim,
+        )
 
-    def compile_all(m: GiantGPT):
-        pf, df = make_prefill_and_decode_fns(m)
-        compiled_pf = pf.lower(params, nonparam, prompt).compile()
-        compiled_df = df.lower(
-            params,
-            nonparam,
-            jnp.zeros((args.batch_size, 1), dtype=jnp.int32),
-            jnp.array(0, jnp.int32),
-            steps=args.steps,
-        ).compile()
-        return compiled_pf, compiled_df
+        params, nonparam = init_inference_state(
+            model,
+            key_params,
+            key_dropout,
+            batch_size=args.batch_size,
+            pad_token_id=0,
+        )
 
-    # Compile; if GPU+cudnn fails, fall back to xla on GPU.
-    try:
-        compiled_prefill, compiled_decode = compile_all(model)
-    except Exception as e:
-        msg = str(e).lower()
-        if IS_GPU and attn_impl == "cudnn" and "cudnn" in msg:
-            print("\n[warn] cudnn attention compile failed; falling back to implementation='xla' on GPU.")
-            model_xla = GiantGPT(
-                vocab_size=MODEL_CFG.vocab_size,
-                context_length=MODEL_CFG.context_length,
-                d_model=MODEL_CFG.embedding_size,
-                n_heads=MODEL_CFG.num_heads,
-                n_kv_heads=MODEL_CFG.num_kv_heads,
-                d_ff=MODEL_CFG.feed_forward_size,
-                n_layers=MODEL_CFG.num_layers,
-                dropout_rate=MODEL_CFG.dropout_rate,
-                attn_impl="xla",
-            )
-            compiled_prefill, compiled_decode = compile_all(model_xla)
+        if IS_GPU:
+            gpu0 = jax.devices("gpu")[0]
+            params = jax.device_put(params, gpu0)
+            nonparam = jax.device_put(nonparam, gpu0)
+            assert_tree_on_backend(params, "params", "gpu")
+            assert_tree_on_backend(nonparam, "nonparam", "gpu")
+
+        def compile_all(m: GiantGPT):
+            pf, df = make_prefill_and_decode_fns(m)
+            compiled_pf = pf.lower(params, nonparam, prompt).compile()
+            compiled_df = df.lower(
+                params,
+                nonparam,
+                jnp.zeros((args.batch_size, 1), dtype=jnp.int32),
+                jnp.array(0, jnp.int32),
+                steps=args.steps,
+            ).compile()
+            return compiled_pf, compiled_df
+
+        # Compile; if GPU+cudnn fails, fall back to xla on GPU.
+        attn_impl_used = attn_impl_requested
+        try:
+            compiled_prefill, compiled_decode = compile_all(model)
+        except Exception as e:
+            msg = str(e).lower()
+            if IS_GPU and attn_impl_requested == "cudnn" and "cudnn" in msg:
+                print(f"\n[warn] {label}: cudnn attention compile failed; falling back to implementation='xla' on GPU.")
+                attn_impl_used = "xla"
+                model_xla = GiantGPT(
+                    vocab_size=MODEL_CFG.vocab_size,
+                    context_length=MODEL_CFG.context_length,
+                    d_model=MODEL_CFG.embedding_size,
+                    n_heads=MODEL_CFG.num_heads,
+                    n_kv_heads=MODEL_CFG.num_kv_heads,
+                    d_ff=MODEL_CFG.feed_forward_size,
+                    n_layers=MODEL_CFG.num_layers,
+                    dropout_rate=MODEL_CFG.dropout_rate,
+                    attn_impl="xla",
+                    attn_kind=attn_kind,
+                    mla_latent_dim=mla_latent_dim,
+                    mla_rope_dim=mla_rope_dim,
+                )
+                compiled_prefill, compiled_decode = compile_all(model_xla)
+            else:
+                raise
+
+        # Warmup
+        for _ in range(args.warmup):
+            nonparam_filled, t_last, last_tok = compiled_prefill(params, nonparam, prompt)
+            out, _nonparam_after = compiled_decode(params, nonparam_filled, last_tok, t_last)
+            block_until_ready(out)
+
+        # Timed runs
+        prefill_times = []
+        decode_times = []
+        for _ in range(args.runs):
+            prefill_start = time.perf_counter()
+            nonparam_filled, t_last, last_tok = compiled_prefill(params, nonparam, prompt)
+            block_until_ready(nonparam_filled)
+            prefill_times.append(time.perf_counter() - prefill_start)
+
+            decode_start = time.perf_counter()
+            out, _ = compiled_decode(params, nonparam_filled, last_tok, t_last)
+            out.block_until_ready()
+            decode_times.append(time.perf_counter() - decode_start)
+
+        prefill_time = sum(prefill_times) / len(prefill_times)
+        decode_time = sum(decode_times) / len(decode_times)
+        tokens_per_s = (args.steps * args.batch_size) / decode_time if decode_time > 0 else float("inf")
+
+        # KV cache footprint per token (bf16 scalars)
+        head_dim = MODEL_CFG.embedding_size // MODEL_CFG.num_heads
+        if attn_kind == "mla":
+            kq_dim = mla_latent_dim + mla_rope_dim
+            kv_scalars_per_tok = MODEL_CFG.num_kv_heads * (2 * kq_dim)
         else:
-            raise
+            kv_scalars_per_tok = MODEL_CFG.num_kv_heads * (head_dim + head_dim)
 
-    # Warmup
-    for _ in range(args.warmup):
-        nonparam_filled, t_last, last_tok = compiled_prefill(params, nonparam, prompt)
-        out, _nonparam_after = compiled_decode(params, nonparam_filled, last_tok, t_last)
-        block_until_ready(out)
+        print(f"\n==================== {label} ====================")
+        print("[bench]")
+        print(f"attn_kind: {attn_kind}")
+        if attn_kind == "mla":
+            print(f"mla_latent_dim: {mla_latent_dim}")
+            print(f"mla_rope_dim: {mla_rope_dim}")
+        print(f"attn_impl_used: {attn_impl_used}")
+        print(f"batch_size: {args.batch_size}")
+        print(f"prompt_len: {args.prompt_len}")
+        print(f"decode_steps: {args.steps}")
+        print(f"prefill_time_s: {prefill_time:.6f}")
+        print(f"decode_time_s: {decode_time:.6f}")
+        print(f"tokens_per_second_decode: {tokens_per_s:.6f}")
+        print(f"kv_cache_scalars_per_token_per_batch: {kv_scalars_per_tok} (dtype={MODEL_CFG.compute_dtype})")
 
-    # Timed runs
-    prefill_times = []
-    decode_times = []
-    for _ in range(args.runs):
-        prefill_start = time.perf_counter()
-        nonparam_filled, t_last, last_tok = compiled_prefill(params, nonparam, prompt)
-        block_until_ready(nonparam_filled)
-        prefill_times.append(time.perf_counter() - prefill_start)
+        return {
+            "label": label,
+            "attn_kind": attn_kind,
+            "attn_impl_used": attn_impl_used,
+            "prefill_time_s": prefill_time,
+            "decode_time_s": decode_time,
+            "tokens_per_second_decode": tokens_per_s,
+            "kv_cache_scalars_per_tok": kv_scalars_per_tok,
+        }
 
-        decode_start = time.perf_counter()
-        out, _ = compiled_decode(params, nonparam_filled, last_tok, t_last)
-        out.block_until_ready()
-        decode_times.append(time.perf_counter() - decode_start)
-
-    prefill_time = sum(prefill_times) / len(prefill_times)
-    decode_time = sum(decode_times) / len(decode_times)
-    tokens_per_s = (args.steps * args.batch_size) / decode_time if decode_time > 0 else float("inf")
-
+    # Print global config once (matches old script vibe)
     print("\n[config]")
     print(f"vocab_size: {MODEL_CFG.vocab_size}")
     print(f"context_length: {MODEL_CFG.context_length}")
@@ -625,17 +931,41 @@ def main():
     print(f"rope_dim: {MODEL_CFG.rope_dim}")
     print(f"param_dtype: {MODEL_CFG.param_dtype}")
     print(f"compute_dtype: {MODEL_CFG.compute_dtype}")
-    print(f"attn_impl: {attn_impl}")
+    print(f"attn_impl_requested: {attn_impl_req}")
+    if args.mla:
+        print(f"mla_latent_dim: {args.mla_latent_dim}")
+        print(f"mla_rope_dim: {args.mla_rope_dim}")
 
-    print("\n[bench]")
-    print(f"batch_size: {args.batch_size}")
-    print(f"prompt_len: {args.prompt_len}")
-    print(f"decode_steps: {args.steps}")
-    print(f"prefill_time_s: {prefill_time:.6f}")
-    print(f"decode_time_s: {decode_time:.6f}")
-    print(f"tokens_per_second_decode: {tokens_per_s:.6f}")
+    # Always run baseline (keeps old behavior)
+    base = run_bench(
+        label="Baseline GQA (NativeJaxSelfAttention)",
+        attn_kind="gqa",
+        key_params=key_params_base,
+        mla_latent_dim=args.mla_latent_dim,
+        mla_rope_dim=args.mla_rope_dim,
+        attn_impl_requested=attn_impl_req,
+    )
+
+    # Optional MLA pass + head-to-head summary
+    if args.mla:
+        mla = run_bench(
+            label="DeepSeek-style MLA (latent KV + small RoPE slice)",
+            attn_kind="mla",
+            key_params=key_params_mla,
+            mla_latent_dim=args.mla_latent_dim,
+            mla_rope_dim=args.mla_rope_dim,
+            attn_impl_requested=attn_impl_req,
+        )
+
+        speedup_decode = mla["tokens_per_second_decode"] / base["tokens_per_second_decode"]
+        speedup_prefill = base["prefill_time_s"] / mla["prefill_time_s"]
+        cache_ratio = base["kv_cache_scalars_per_tok"] / mla["kv_cache_scalars_per_tok"]
+
+        print("\n==================== HEAD-TO-HEAD ====================")
+        print(f"decode tokens/s speedup (MLA / Baseline): {speedup_decode:.4f}x")
+        print(f"prefill time ratio (Baseline / MLA): {speedup_prefill:.4f}x")
+        print(f"KV cache compression (Baseline / MLA): {cache_ratio:.4f}x")
 
 
 if __name__ == "__main__":
     main()
-

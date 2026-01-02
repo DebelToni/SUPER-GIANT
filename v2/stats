@@ -1,9 +1,0 @@
-5090 box
-batch 28 - out of memory
-batch 26 - 27 iterations / second on stage 1 = 702 
-batch 24 - 30 iterations / second on stage 1 = 720 a second
-batch 12 - 47 iterations / second on stage 1 = 564
-batch 8  - 60 iterations / second on stage 1 = 480
-
-H100 PCIe:
-batch 32 - 26 it/s = 832

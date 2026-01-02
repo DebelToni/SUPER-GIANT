@@ -73,13 +73,24 @@ COPY --chown=root:root <<'BASH' /usr/local/bin/entrypoint.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
+APP_ROOT=/workspace/app
+DATA_DIR="${APP_ROOT}/giant-data"
+REPO_DIR="${APP_ROOT}/SUPER-GIANT"
+REPO_URL="https://github.com/DebelToni/SUPER-GIANT"
+
+mkdir -p "$DATA_DIR"
+if [[ ! -d "$REPO_DIR" ]]; then
+  git clone "$REPO_URL" "$REPO_DIR"
+fi
+
 mkdir -p "$TS_STATE_DIR" /var/run/tailscale
 
 # Start daemon
-/usr/sbin/tailscaled \
+nohup /usr/sbin/tailscaled \
+  --tun=userspace-networking \
   --state="${TS_STATE_DIR}/tailscaled.state" \
   --socket=/var/run/tailscale/tailscaled.sock \
-  &
+  >/tmp/tailscaled.log 2>&1 &
 
 # Wait for socket
 for _ in {1..100}; do

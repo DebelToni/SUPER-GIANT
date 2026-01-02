@@ -50,6 +50,7 @@ RUN printf '%s\n' \
       'PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
       >> /etc/environment
 RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activate-venv.sh
+RUN printf '%s\n' 'set -o vi' > /etc/profile.d/vi-mode.sh
 
 # s5cmd from builder (static binary)
 COPY --from=s5cmd-builder /go/bin/s5cmd /usr/local/bin/s5cmd

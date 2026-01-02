@@ -84,7 +84,7 @@ def make_jitted_inference(model: TRM):
         def body_fn(carry):
             step, y, z, halted, logits, q_logit, pred = carry
 
-            y_n, z_n, logits_n, q_n, pred_n = model.apply(
+            y_n, z_n, logits_n, q_n, _q_continue, pred_n = model.apply(
                 {"params": params},
                 x,
                 y,

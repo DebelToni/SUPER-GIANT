@@ -62,6 +62,8 @@ def build_model(cfg: OmegaConf) -> TRM:
         max_supervision_steps=int(m.recursion.max_supervision_steps),
         enable_early_stop=bool(m.recursion.enable_early_stop),
         halt_threshold_logit=float(m.recursion.halt_threshold_logit),
+        halt_exploration_prob=float(getattr(m.recursion, "halt_exploration_prob", 0.0)),
+        no_act_continue=bool(getattr(m.recursion, "no_act_continue", True)),
         aug_enabled=bool(m.augmentation.enabled),
         aug_num_embeddings=int(m.augmentation.num_embeddings),
         aug_default_id=int(m.augmentation.default_id),
@@ -104,6 +106,8 @@ def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientT
 def parse_args() -> argparse.Namespace:
     cli = argparse.ArgumentParser("TRM Sudoku training")
     cli.add_argument("--config", default=None, help="Override config path (defaults to sudoku/Config.yml).")
+    cli.add_argument("--easy", action="store_true", help="Use sudoku/Config_easy.yml for a quick sanity run.")
+    cli.add_argument("--medium", action="store_true", help="Use sudoku/Config_medium.yml for a medium run.")
     cli.add_argument("--data_root", default=None, help="Override cfg.paths.data_root (dataset/cache/checkpoints).")
     cli.add_argument("--checkpoint_dir", default="checkpoints/trm_sudoku")
     cli.add_argument("--checkpoint_every", type=int, default=None)
@@ -156,7 +160,13 @@ def _eval_dataset(
 
 def main() -> None:
     args = parse_args()
-    cfg = load_configs(args.config)
+    config_path = args.config
+    if config_path is None:
+        if args.medium:
+            config_path = str(Path(__file__).resolve().parent / "Config_medium.yml")
+        elif args.easy:
+            config_path = str(Path(__file__).resolve().parent / "Config_easy.yml")
+    cfg = load_configs(config_path)
 
     if args.data_root is not None:
         base_root = Path(str(args.data_root)).resolve()

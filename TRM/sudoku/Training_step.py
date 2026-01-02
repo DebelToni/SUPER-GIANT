@@ -16,12 +16,13 @@ def _tree_add(a, b):
     return jax.tree_util.tree_map(lambda x, y: x + y, a, b)
 
 
-def _tree_scale(tree, scale: jnp.ndarray):
-    return jax.tree_util.tree_map(lambda x: x * scale, tree)
-
-
 def _tree_div(tree, denom: jnp.ndarray):
     return jax.tree_util.tree_map(lambda x: x / denom, tree)
+
+
+def _masked_mean(values: jnp.ndarray, mask: jnp.ndarray) -> jnp.ndarray:
+    denom = jnp.maximum(mask.sum(), 1.0)
+    return (values * mask).sum() / denom
 
 
 @partial(jax.jit, static_argnames=("model", "optimizer", "supervision_steps", "microbatch_size"))
@@ -57,14 +58,9 @@ def train_step(
     solution_all = solution_all.reshape(n_micro, microbatch_size, -1)
     aug_ids_all = aug_ids_all.reshape(n_micro, microbatch_size)
 
-    inv_steps = jnp.array(1.0 / float(supervision_steps), dtype=jnp.float32)
-
     def micro_grad_and_metrics(puzzle, solution, aug_ids, key_micro):
-        keys = jax.random.split(key_micro, supervision_steps + 1)
-        key_x = keys[0]
-        step_keys = keys[1:]
-
-        def step0_loss_fn(p):
+        def loss_fn(p):
+            key_x, key_steps = jax.random.split(key_micro)
             x = model.apply(
                 {"params": p},
                 puzzle,
@@ -74,51 +70,34 @@ def train_step(
                 method=model.encode,
             )
             y, z = model.apply({"params": p}, puzzle, method=model.initial_state)
-            y, z, logits, q_logit, pred = model.apply(
-                {"params": p},
-                x,
-                y,
-                z,
-                deterministic=False,
-                rngs={"dropout": step_keys[0]},
-                method=model.step_from_x,
-            )
 
-            ce = optax.softmax_cross_entropy_with_integer_labels(logits, solution).mean()
-            match = jnp.all(pred == solution, axis=-1).astype(jnp.float32)
-            halt = optax.sigmoid_binary_cross_entropy(q_logit, match).mean()
-            token_acc = (pred == solution).mean().astype(jnp.float32)
-            step_loss = (ce + halt).astype(jnp.float32)
+            bsz = puzzle.shape[0]
+            halted = jnp.zeros((bsz,), dtype=jnp.bool_)
+            steps = jnp.zeros((bsz,), dtype=jnp.int32)
+            total_loss = jnp.array(0.0, dtype=jnp.float32)
+            total_ce = jnp.array(0.0, dtype=jnp.float32)
+            total_halt = jnp.array(0.0, dtype=jnp.float32)
+            last_match = jnp.zeros((bsz,), dtype=jnp.float32)
+            last_token_acc = jnp.zeros((bsz,), dtype=jnp.float32)
+            step_count = jnp.array(0, dtype=jnp.int32)
 
-            aux = (y, z, step_loss, ce, halt, match, token_acc)
-            return step_loss, aux
+            def body_fn(carry, _):
+                (
+                    step_count,
+                    rng,
+                    y,
+                    z,
+                    halted,
+                    steps,
+                    total_loss,
+                    total_ce,
+                    total_halt,
+                    last_match,
+                    last_token_acc,
+                ) = carry
 
-        (loss0, (y, z, step_loss0, ce0, halt0, match0, token_acc0)), grads0 = jax.value_and_grad(
-            step0_loss_fn, has_aux=True
-        )(params)
-
-        total_loss = step_loss0
-        total_ce = ce0.astype(jnp.float32)
-        total_halt = halt0.astype(jnp.float32)
-        last_match = match0
-        last_token_acc = token_acc0.astype(jnp.float32)
-
-        y = jax.lax.stop_gradient(y)
-        z = jax.lax.stop_gradient(z)
-
-        def body(carry, key_step):
-            y, z, grads, total_loss, total_ce, total_halt = carry
-
-            def step_loss_fn(p):
-                x = model.apply(
-                    {"params": p},
-                    puzzle,
-                    deterministic=False,
-                    aug_ids=aug_ids,
-                    rngs={"dropout": key_x},
-                    method=model.encode,
-                )
-                y_n, z_n, logits, q_logit, pred = model.apply(
+                rng, key_step, key_explore = jax.random.split(rng, 3)
+                y_n, z_n, logits, q_halt, q_continue, pred = model.apply(
                     {"params": p},
                     x,
                     y,
@@ -127,46 +106,102 @@ def train_step(
                     rngs={"dropout": key_step},
                     method=model.step_from_x,
                 )
-                ce = optax.softmax_cross_entropy_with_integer_labels(logits, solution).mean()
-                match = jnp.all(pred == solution, axis=-1).astype(jnp.float32)
-                halt = optax.sigmoid_binary_cross_entropy(q_logit, match).mean()
-                token_acc = (pred == solution).mean().astype(jnp.float32)
-                step_loss = (ce + halt).astype(jnp.float32)
-                aux = (y_n, z_n, ce, halt, match, token_acc)
-                return step_loss, aux
 
-            (step_loss, (y_n, z_n, ce, halt, match, token_acc)), grads_i = jax.value_and_grad(
-                step_loss_fn, has_aux=True
-            )(params)
+                ce_tokens = optax.softmax_cross_entropy_with_integer_labels(logits, solution)
+                ce = ce_tokens.mean(axis=-1)
+                match = jnp.all(pred == solution, axis=-1)
+                halt_loss = optax.sigmoid_binary_cross_entropy(q_halt, match.astype(jnp.float32))
 
-            grads = _tree_add(grads, grads_i)
-            total_loss = total_loss + step_loss
-            total_ce = total_ce + ce.astype(jnp.float32)
-            total_halt = total_halt + halt.astype(jnp.float32)
+                active = jnp.logical_not(halted)
+                mask = active.astype(jnp.float32)
+                ce_mean = _masked_mean(ce, mask)
+                halt_mean = _masked_mean(halt_loss, mask)
+                step_loss = ce_mean + 0.5 * halt_mean
 
-            y_n = jax.lax.stop_gradient(y_n)
-            z_n = jax.lax.stop_gradient(z_n)
-            y = y_n
-            z = z_n
-            return (y, z, grads, total_loss, total_ce, total_halt), (match, token_acc)
+                total_loss = total_loss + step_loss
+                total_ce = total_ce + ce_mean
+                total_halt = total_halt + halt_mean
+                last_match = match.astype(jnp.float32)
+                last_token_acc = (pred == solution).mean(axis=-1).astype(jnp.float32)
 
-        if supervision_steps > 1:
-            (y, z, grads_sum, total_loss, total_ce, total_halt), (matches, token_accs) = jax.lax.scan(
-                body,
-                (y, z, grads0, total_loss, total_ce, total_halt),
-                step_keys[1:],
+                steps_next = steps + active.astype(jnp.int32)
+                halted_step = steps_next >= supervision_steps
+                if model.enable_early_stop and supervision_steps > 1:
+                    if model.no_act_continue:
+                        halted_step = jnp.logical_or(halted_step, q_halt > model.halt_threshold_logit)
+                    else:
+                        halted_step = jnp.logical_or(halted_step, q_halt > q_continue)
+                    if model.halt_exploration_prob > 0.0:
+                        key_explore, key_rand = jax.random.split(key_explore)
+                        rand = jax.random.uniform(key_explore, (bsz,))
+                        min_halt = jnp.where(
+                            rand < model.halt_exploration_prob,
+                            jax.random.randint(key_rand, (bsz,), 2, supervision_steps + 1),
+                            0,
+                        )
+                        halted_step = jnp.logical_and(halted_step, steps_next >= min_halt)
+
+                halted = jnp.logical_or(halted, halted_step)
+                y = jnp.where(active[:, None, None], y_n, y)
+                z = jnp.where(active[:, None, None], z_n, z)
+                y = jax.lax.stop_gradient(y)
+                z = jax.lax.stop_gradient(z)
+
+                any_active = jnp.any(active)
+                step_count = step_count + any_active.astype(jnp.int32)
+
+                new_carry = (
+                    step_count,
+                    rng,
+                    y,
+                    z,
+                    halted,
+                    steps_next,
+                    total_loss,
+                    total_ce,
+                    total_halt,
+                    last_match,
+                    last_token_acc,
+                )
+                return new_carry, None
+
+            init_carry = (
+                step_count,
+                key_steps,
+                y,
+                z,
+                halted,
+                steps,
+                total_loss,
+                total_ce,
+                total_halt,
+                last_match,
+                last_token_acc,
             )
-            last_match = matches[-1]
-            last_token_acc = token_accs[-1].astype(jnp.float32)
-        else:
-            grads_sum = grads0
+            (
+                step_count,
+                _rng,
+                _y,
+                _z,
+                _halted,
+                _steps,
+                total_loss,
+                total_ce,
+                total_halt,
+                last_match,
+                last_token_acc,
+            ), _ = jax.lax.scan(body_fn, init_carry, xs=None, length=supervision_steps)
 
-        grads_mean = _tree_scale(grads_sum, inv_steps)
-        loss_mean = total_loss * inv_steps
-        ce_mean = total_ce * inv_steps
-        halt_mean = total_halt * inv_steps
-        solved_acc = last_match.mean()
-        return grads_mean, (loss_mean, ce_mean, halt_mean, solved_acc, last_token_acc)
+            denom = jnp.maximum(step_count.astype(jnp.float32), 1.0)
+            loss_mean = total_loss / denom
+            ce_mean = total_ce / denom
+            halt_mean = total_halt / denom
+            solved_acc = last_match.mean()
+            token_acc = last_token_acc.mean()
+            return loss_mean, (loss_mean, ce_mean, halt_mean, solved_acc, token_acc)
+
+        (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+        return grads, metrics
 
     grads_acc = _tree_zeros_like(params)
     loss_acc = jnp.array(0.0, dtype=jnp.float32)
@@ -226,7 +261,7 @@ def eval_step(params, batch, *, model, supervision_steps: int) -> Tuple[jax.Arra
     logits = jnp.zeros((batch["solution"].shape[0], batch["solution"].shape[1], model.vocab_size), dtype=jnp.float32)
 
     for _ in range(supervision_steps):
-        y, z, logits, _q_logit, pred = model.apply(
+        y, z, logits, _q_halt, _q_continue, pred = model.apply(
             {"params": params},
             x,
             y,

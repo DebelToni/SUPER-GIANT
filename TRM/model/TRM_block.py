@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable
+import math
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +32,7 @@ PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
 COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
 
 from jax import config as jax_config
+from jax.nn import dot_product_attention
 
 jax_config.update("jax_default_matmul_precision", str(MODEL_CFG.compute_dtype))
 
@@ -69,6 +71,18 @@ def _get_activation(name: str) -> Callable[[jnp.ndarray], jnp.ndarray]:
     raise ValueError(f"Unknown activation: {name}")
 
 
+def _find_multiple(a: int, b: int) -> int:
+    return (-(a // -b)) * b
+
+
+def _trunc_lecun_init():
+    def init(key, shape, dtype=jnp.float32):
+        std = 1.0 / math.sqrt(shape[0])
+        return jax.random.truncated_normal(key, -2.0, 2.0, shape, dtype) * std
+
+    return init
+
+
 class NativeJaxSelfAttention(nn.Module):
     num_heads: int
     qkv_features: int
@@ -92,6 +106,7 @@ class NativeJaxSelfAttention(nn.Module):
             name="qkv_proj",
             dtype=self.dtype,
             param_dtype=PARAM_DTYPE,
+            kernel_init=_trunc_lecun_init(),
         )
         self.o_proj = nn.Dense(
             self.qkv_features,
@@ -99,6 +114,7 @@ class NativeJaxSelfAttention(nn.Module):
             name="o_proj",
             dtype=self.dtype,
             param_dtype=PARAM_DTYPE,
+            kernel_init=_trunc_lecun_init(),
         )
         self.dropout = nn.Dropout(rate=self.dropout_rate)
 
@@ -107,8 +123,6 @@ class NativeJaxSelfAttention(nn.Module):
     @nn.compact
     def __call__(self, x, *, deterministic: bool):
         b, l, _ = x.shape
-        impl = "cudnn" if (IS_GPU and l >= 128 and l % 2 == 0) else "xla"
-
         qkv = self.qkv_proj(x)
         q, k, v = jnp.split(qkv, 3, axis=-1)
         q = q.reshape(b, l, self.num_heads, self.head_dim)
@@ -121,7 +135,16 @@ class NativeJaxSelfAttention(nn.Module):
             q = apply_partial_rope(q, sin, cos, self.rotary_dim)
             k = apply_partial_rope(k, sin, cos, self.rotary_dim)
 
-        y = jax.nn.dot_product_attention(q, k, v, is_causal=False, implementation=impl)
+        impl = "xla"
+        if IS_GPU:
+            impl = "cudnn"
+        y = dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=False,
+            implementation=impl,
+        )
         y = y.reshape(b, l, self.qkv_features)
         y = self.o_proj(y)
         y = self.dropout(y, deterministic=deterministic)
@@ -151,6 +174,7 @@ class TokenMixMLP(nn.Module):
             dtype=self.dtype,
             param_dtype=PARAM_DTYPE,
             use_bias=False,
+            kernel_init=_trunc_lecun_init(),
         )(h)
         h = act(h)
         h = nn.Dropout(rate=self.dropout_rate)(h, deterministic=deterministic)
@@ -160,6 +184,7 @@ class TokenMixMLP(nn.Module):
             dtype=self.dtype,
             param_dtype=PARAM_DTYPE,
             use_bias=False,
+            kernel_init=_trunc_lecun_init(),
         )(h)
         h = nn.Dropout(rate=self.dropout_rate)(h, deterministic=deterministic)
         return jnp.swapaxes(h, 1, 2)
@@ -175,14 +200,14 @@ class TinyTRMLayer(nn.Module):
     mixer_hidden: int = int(MODEL_CFG.mixer_hidden)
     dropout_rate: float = 0.0
     activation: str = str(MODEL_CFG.activation)
+    ffn_expansion: float | None = getattr(MODEL_CFG, "ffn_expansion", None)
+    ffn_multiple_of: int = int(getattr(MODEL_CFG, "ffn_multiple_of", 256))
     dtype: jnp.dtype = COMPUTE_DTYPE
 
     @nn.compact
     def __call__(self, x, *, deterministic: bool):
         def _layer(module: "TinyTRMLayer", h: jnp.ndarray) -> jnp.ndarray:
             residual = h
-            h_norm = RMSNorm(name="rms1", dtype=module.dtype, epsilon=1e-5)(h)
-
             variant = str(module.variant).lower()
             if variant == "attn":
                 h_mix = NativeJaxSelfAttention(
@@ -192,7 +217,7 @@ class TinyTRMLayer(nn.Module):
                     dropout_rate=module.dropout_rate,
                     dtype=module.dtype,
                     rotary_dim=module.rotary_dim,
-                )(h_norm, deterministic=deterministic)
+                )(h, deterministic=deterministic)
             elif variant == "mlp":
                 h_mix = TokenMixMLP(
                     context_length=module.context_length,
@@ -200,24 +225,29 @@ class TinyTRMLayer(nn.Module):
                     dropout_rate=module.dropout_rate,
                     activation=module.activation,
                     dtype=module.dtype,
-                )(h_norm, deterministic=deterministic)
+                )(h, deterministic=deterministic)
             else:
                 raise ValueError(f"Unknown TRM variant: {module.variant}")
 
-            h = residual + h_mix
+            h = RMSNorm(name="rms1", dtype=module.dtype, epsilon=1e-5)(residual + h_mix)
 
             residual = h
-            h_norm = RMSNorm(name="rms2", dtype=module.dtype, epsilon=1e-5)(h)
-
             act = _get_activation(module.activation)
-            proj_dim = module.d_ff * 2
+            inter = int(module.d_ff)
+            if module.ffn_expansion is not None:
+                inter = _find_multiple(
+                    round(float(module.ffn_expansion) * module.d_model * 2 / 3),
+                    int(module.ffn_multiple_of),
+                )
+            proj_dim = inter * 2
             h_proj = nn.Dense(
                 proj_dim,
                 name="fc1",
                 dtype=module.dtype,
                 param_dtype=PARAM_DTYPE,
                 use_bias=False,
-            )(h_norm)
+                kernel_init=_trunc_lecun_init(),
+            )(h)
             u, v = jnp.split(h_proj, 2, axis=-1)
             h_ffn = act(u) * v
             h_ffn = nn.Dense(
@@ -226,9 +256,10 @@ class TinyTRMLayer(nn.Module):
                 dtype=module.dtype,
                 param_dtype=PARAM_DTYPE,
                 use_bias=False,
+                kernel_init=_trunc_lecun_init(),
             )(h_ffn)
             h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)
-            return residual + h_ffn
+            return RMSNorm(name="rms2", dtype=module.dtype, epsilon=1e-5)(residual + h_ffn)
 
         use_remat = bool(getattr(MODEL_CFG, "use_remat", False))
         layer_fn = nn.remat(_layer) if use_remat else _layer

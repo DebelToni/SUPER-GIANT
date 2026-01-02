@@ -52,6 +52,8 @@ def build_model(cfg: OmegaConf, *, vocab_size: int) -> TRM:
         max_supervision_steps=int(m.recursion.max_supervision_steps),
         enable_early_stop=bool(m.recursion.enable_early_stop),
         halt_threshold_logit=float(m.recursion.halt_threshold_logit),
+        halt_exploration_prob=float(getattr(m.recursion, "halt_exploration_prob", 0.0)),
+        no_act_continue=bool(getattr(m.recursion, "no_act_continue", True)),
         aug_enabled=bool(m.augmentation.enabled),
         aug_num_embeddings=int(m.augmentation.num_embeddings),
         aug_default_id=int(m.augmentation.default_id),

@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
+import subprocess
 
 import jax
 import jax.numpy as jnp
@@ -59,6 +60,8 @@ def build_model(cfg: OmegaConf, *, vocab_size: int) -> TRM:
         max_supervision_steps=int(m.recursion.max_supervision_steps),
         enable_early_stop=bool(m.recursion.enable_early_stop),
         halt_threshold_logit=float(m.recursion.halt_threshold_logit),
+        halt_exploration_prob=float(getattr(m.recursion, "halt_exploration_prob", 0.0)),
+        no_act_continue=bool(getattr(m.recursion, "no_act_continue", True)),
         aug_enabled=bool(m.augmentation.enabled),
         aug_num_embeddings=int(m.augmentation.num_embeddings),
         aug_default_id=int(m.augmentation.default_id),
@@ -112,6 +115,15 @@ def parse_args() -> argparse.Namespace:
     cli.add_argument("--train_path", type=str, default=None)
     cli.add_argument("--val_path", type=str, default=None)
     cli.add_argument("--vocab_path", type=str, default=None)
+    cli.add_argument("--regen_dataset", action="store_true", help="Regenerate dataset via DeepSeek.")
+    cli.add_argument("--train_size", type=int, default=None)
+    cli.add_argument("--val_size", type=int, default=None)
+    cli.add_argument("--gen_batch", type=int, default=None)
+    cli.add_argument("--gen_max_chars", type=int, default=None)
+    cli.add_argument("--gen_temperature", type=float, default=None)
+    cli.add_argument("--gen_sleep", type=float, default=None)
+    cli.add_argument("--gen_max_retries", type=int, default=None)
+    cli.add_argument("--gen_overwrite", action="store_true")
     return cli.parse_args()
 
 
@@ -175,6 +187,44 @@ def main() -> None:
         val_path = (base_root / val_path).resolve()
     if not vocab_path.is_absolute():
         vocab_path = (base_root / vocab_path).resolve()
+
+    if args.regen_dataset:
+        gen_cfg = cfg.get("dataset_generation", {})
+        train_size = int(args.train_size or gen_cfg.get("train_size", 5000))
+        val_size = int(args.val_size or gen_cfg.get("val_size", 500))
+        gen_batch = int(args.gen_batch or gen_cfg.get("batch", 50))
+        max_chars = int(args.gen_max_chars or gen_cfg.get("max_chars", json_cfg.max_chars))
+        temperature = float(args.gen_temperature or gen_cfg.get("temperature", 0.9))
+        sleep = float(args.gen_sleep or gen_cfg.get("sleep", 0.2))
+        max_retries = int(args.gen_max_retries or gen_cfg.get("max_retries", 5))
+        overwrite = bool(args.gen_overwrite or gen_cfg.get("overwrite", False))
+
+        out_dir = train_path.parent
+        gen_script = Path(__file__).resolve().parent / "generate_dataset.py"
+        cmd = [
+            sys.executable,
+            str(gen_script),
+            "--out_dir",
+            str(out_dir),
+            "--train_size",
+            str(train_size),
+            "--val_size",
+            str(val_size),
+            "--batch",
+            str(gen_batch),
+            "--max_chars",
+            str(max_chars),
+            "--temperature",
+            str(temperature),
+            "--sleep",
+            str(sleep),
+            "--max_retries",
+            str(max_retries),
+        ]
+        if overwrite:
+            cmd.append("--overwrite")
+        print(f"[dataset] regenerating via DeepSeek: {train_size=} {val_size=} out_dir={out_dir}")
+        subprocess.run(cmd, check=True)
 
     max_len = int(cfg.model.context_length)
     ds = load_dataset(train_path=train_path, val_path=val_path, vocab_path=vocab_path, max_len=max_len)

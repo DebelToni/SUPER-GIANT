@@ -1,0 +1,37 @@
+model:
+  # Gemma-2 / BgGPT 2.6B-aligned dims
+  embedding_size: 2304
+  num_heads: 8
+  num_kv_heads: 4
+  num_layers: 26
+  feed_forward_size: 9216
+
+  # Attention-specific dimensions
+  attn_qkv_dim: 2048     # num_heads * head_dim
+  head_dim: 256          # informational; derived from attn_qkv_dim / num_heads
+
+  # RoPE / positions
+  rope_dim: 256
+  rope_theta: 10000.0
+  context_length: 8192
+
+  # Gemma-style scaling and soft-capping
+  query_pre_attn_scalar: 256.0
+  attn_logit_softcapping: 50.0
+  final_logit_softcapping: 30.0
+
+  # Misc
+  dropout_rate: 0.0
+  activation: gelu_pytorch_tanh
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: float32
+
+inference:
+  stop_on_eos: true
+
+tokenizer:
+  name: "INSAIT-Institute/BgGPT-Gemma-2-2.6B-IT-v1.0"
+  cache_dir: "tokenizer_cache"
+  use_custom: false
+  custom_path: null

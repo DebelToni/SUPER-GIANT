@@ -1,0 +1,31 @@
+model:
+  decoder:
+    num_layers: 30
+  encoder:
+    max_length: 512
+    num_slots: 128
+    recursive_updates:
+      enabled: true
+      stride: 64
+      short_L_cycles: 1
+      short_H_cycles: 1
+      keep_y: false
+  cross_attention:
+    dropout_rate: 0.1
+    layers: "0,1,2,3,4,5"
+
+pretrained:
+  load: true
+
+training:
+  batch_size: 2
+  max_steps: 2000
+  log_every: 20
+  eval_every: 200
+  checkpoint_every: 500
+  analytics: true
+  eval_no_cross: true
+  train_decoder_after: 500
+
+data:
+  dataset_out: "trm_encoder_llm/datasets/ultrachat_sft_20k_e512.npz"

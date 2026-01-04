@@ -132,7 +132,19 @@ class TRMEncoderCore(nn.Module):
         self.z_init = self.param("z_init", init_fn, (1, 1, self.d_model), PARAM_DTYPE).astype(COMPUTE_DTYPE)
         self.out_norm = RMSNorm(name="encoder_norm", dtype=COMPUTE_DTYPE, epsilon=1e-5)
 
-    def __call__(self, x: jnp.ndarray, *, deterministic: bool):
+    def _broadcast_state(self, state: jnp.ndarray, batch_size: int, length: int) -> jnp.ndarray:
+        return jnp.broadcast_to(state, (batch_size, length, self.d_model))
+
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        *,
+        deterministic: bool,
+        state: Optional[dict[str, jnp.ndarray]] = None,
+        l_cycles: Optional[int] = None,
+        h_cycles: Optional[int] = None,
+        keep_y: bool = False,
+    ):
         b, l, _ = x.shape
         if l != self.context_length:
             raise ValueError(
@@ -141,8 +153,22 @@ class TRMEncoderCore(nn.Module):
 
         y0 = self.y_init if self.learned_y else jax.lax.stop_gradient(self.y_init)
         z0 = self.z_init if self.learned_z else jax.lax.stop_gradient(self.z_init)
-        y = jnp.broadcast_to(y0, (b, l, self.d_model))
-        z = jnp.broadcast_to(z0, (b, l, self.d_model))
+        y_init = self._broadcast_state(y0, b, l)
+        z_init = self._broadcast_state(z0, b, l)
+
+        if state is None:
+            y = y_init
+            z = z_init
+        else:
+            z = state.get("z", z_init)
+            if z.shape != (b, l, self.d_model):
+                raise ValueError(f"state z shape {z.shape} does not match ({b}, {l}, {self.d_model})")
+            if keep_y:
+                y = state.get("y", y_init)
+                if y.shape != (b, l, self.d_model):
+                    raise ValueError(f"state y shape {y.shape} does not match ({b}, {l}, {self.d_model})")
+            else:
+                y = y_init
 
         if self.use_remat:
             def _f(h):
@@ -152,15 +178,18 @@ class TRMEncoderCore(nn.Module):
         else:
             f_theta = lambda h: self.f_theta(h, deterministic=deterministic)
 
-        for t in range(self.H_cycles):
-            for _ in range(self.L_cycles):
+        h_cycles = self.H_cycles if h_cycles is None else int(h_cycles)
+        l_cycles = self.L_cycles if l_cycles is None else int(l_cycles)
+
+        for t in range(h_cycles):
+            for _ in range(l_cycles):
                 z = f_theta(x + y + z)
             y = f_theta(y + z)
-            if (not deterministic) and (t < self.H_cycles - 1):
+            if (not deterministic) and (t < h_cycles - 1):
                 y = jax.lax.stop_gradient(y)
                 z = jax.lax.stop_gradient(z)
 
-        return self.out_norm(y)
+        return self.out_norm(y), {"y": y, "z": z}
 
 
 class NativeJaxSelfAttention(nn.Module):
@@ -454,6 +483,11 @@ class TRMEncoderDecoder(nn.Module):
     num_slots: int
     compression_temperature: float
     encoder_dropout: float
+    encoder_update_enabled: bool
+    encoder_update_stride: int
+    encoder_update_short_L_cycles: Optional[int]
+    encoder_update_short_H_cycles: Optional[int]
+    encoder_update_keep_y: bool
 
     expander_enabled: bool
     expander_heads: int
@@ -512,14 +546,14 @@ class TRMEncoderDecoder(nn.Module):
         enc_x = enc_embed(encoder_tokens)
         enc_x = nn.Dropout(rate=self.encoder_dropout)(enc_x, deterministic=deterministic)
 
-        slots = SoftMoECompressor(
+        compressor = SoftMoECompressor(
             num_slots=self.num_slots,
             d_model=self.d_model,
             temperature=self.compression_temperature,
             dropout_rate=self.encoder_dropout,
             dtype=COMPUTE_DTYPE,
             name="soft_moe",
-        )(enc_x, mask=encoder_mask, deterministic=deterministic)
+        )
 
         trm = TRMEncoderCore(
             d_model=self.d_model,
@@ -540,7 +574,38 @@ class TRMEncoderDecoder(nn.Module):
             init_std=self.trm_init_std,
             name="trm_encoder",
         )
-        memory_slots = trm(slots, deterministic=deterministic)
+        use_recursive = bool(self.encoder_update_enabled) and int(self.encoder_update_stride) > 0
+        if use_recursive:
+            stride = max(1, int(self.encoder_update_stride))
+            short_l = self.encoder_update_short_L_cycles
+            short_h = self.encoder_update_short_H_cycles
+            short_l = int(short_l) if short_l is not None and int(short_l) > 0 else self.trm_L_cycles
+            short_h = int(short_h) if short_h is not None and int(short_h) > 0 else self.trm_H_cycles
+
+            state = None
+            memory_slots = None
+            for chunk_idx, start in enumerate(range(0, enc_len, stride)):
+                end = min(start + stride, enc_len)
+                chunk_x = enc_x[:, start:end, :]
+                chunk_mask = encoder_mask[:, start:end] if encoder_mask is not None else None
+                chunk_slots = compressor(chunk_x, mask=chunk_mask, deterministic=deterministic)
+                if chunk_idx == 0:
+                    l_cycles = self.trm_L_cycles
+                    h_cycles = self.trm_H_cycles
+                else:
+                    l_cycles = short_l
+                    h_cycles = short_h
+                memory_slots, state = trm(
+                    chunk_slots,
+                    deterministic=deterministic,
+                    state=state,
+                    l_cycles=l_cycles,
+                    h_cycles=h_cycles,
+                    keep_y=self.encoder_update_keep_y,
+                )
+        else:
+            slots = compressor(enc_x, mask=encoder_mask, deterministic=deterministic)
+            memory_slots, _ = trm(slots, deterministic=deterministic)
 
         if self.expander_enabled:
             memory = SlotExpander(

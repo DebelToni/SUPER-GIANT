@@ -1,0 +1,106 @@
+model:
+  decoder:
+    embedding_size: 576
+    num_heads: 9
+    num_kv_heads: 3
+    num_layers: 8
+    feed_forward_size: 1536
+    rope_dim: 64
+    context_length: 256
+    dropout_rate: 0.0
+    param_dtype: float32
+    compute_dtype: float32
+
+  encoder:
+    max_length: 1024
+    num_slots: 256
+    dropout_rate: 0.0
+
+    trm:
+      tiny_layers: 2
+      variant: mlp
+      num_heads: 4
+      rope_dim: 32
+      feed_forward_size: 512
+      mixer_hidden: 256
+      activation: silu
+      use_remat: false
+
+      recursion:
+        L_cycles: 4
+        H_cycles: 2
+        max_supervision_steps: 8
+        enable_early_stop: false
+        halt_threshold_logit: 0.0
+        halt_exploration_prob: 0.0
+        no_act_continue: true
+
+      init:
+        learned_y: true
+        learned_z: true
+        init_std: 1.0
+
+  compression:
+    temperature: 1.0
+
+  expander:
+    enabled: true
+    num_heads: 9
+    dropout_rate: 0.0
+    gate_init: -4.0
+
+  cross_attention:
+    enabled: true
+    num_heads: 9
+    dropout_rate: 0.0
+    gate_init: -4.0
+    layers: all
+
+  share_embeddings: false
+
+training:
+  batch_size: 2
+  max_steps: 200
+  log_every: 10
+  eval_every: 50
+  checkpoint_every: 100
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  gradient_clip_norm: 1.0
+  warmup_steps: 20
+  seed: 0
+  analytics: false
+  eval_no_cross: false
+  train_decoder_after: null
+  train_decoder: false
+  train_encoder: true
+  train_cross_attention: true
+  train_embeddings: false
+
+pretrained:
+  load: true
+  checkpoint_path: "smol/smollm-135m.npz"
+
+paths:
+  dataset_dir: "trm_encoder_llm/datasets"
+  checkpoint_dir: "trm_encoder_llm/checkpoints"
+  logs_dir: "trm_encoder_llm/logs"
+  hf_cache_dir: "trm_encoder_llm/hf_cache"
+  tokenizer_cache_dir: "trm_encoder_llm/tokenizer"
+
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"
+  cache_dir: "trm_encoder_llm/tokenizer"
+  use_fast: true
+
+data:
+  dataset_name: "HuggingFaceH4/ultrachat_200k"
+  dataset_config: null
+  train_split: "train_sft"
+  val_split: "test_sft"
+  max_train_samples: 2000
+  max_val_samples: 200
+  encoder_max_len: 1024
+  decoder_max_len: 256
+  dataset_out: "trm_encoder_llm/datasets/ultrachat_sft.npz"
+  seed: 0

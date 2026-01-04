@@ -1,0 +1,10 @@
+pretrained:
+  load: true
+
+training:
+  batch_size: 2
+  max_steps: 200
+  log_every: 10
+  eval_every: 50
+  checkpoint_every: 100
+  analytics: true

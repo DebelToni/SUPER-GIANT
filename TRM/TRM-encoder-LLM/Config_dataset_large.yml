@@ -1,0 +1,6 @@
+data:
+  max_train_samples: 20000
+  max_val_samples: 2000
+  encoder_max_len: 512
+  decoder_max_len: 256
+  dataset_out: "trm_encoder_llm/datasets/ultrachat_sft_20k_e512.npz"

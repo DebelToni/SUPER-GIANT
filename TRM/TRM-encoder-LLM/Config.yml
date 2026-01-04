@@ -15,6 +15,12 @@ model:
     max_length: 1024
     num_slots: 256
     dropout_rate: 0.0
+    recursive_updates:
+      enabled: false
+      stride: 0
+      short_L_cycles: null
+      short_H_cycles: null
+      keep_y: false
 
     trm:
       tiny_layers: 2

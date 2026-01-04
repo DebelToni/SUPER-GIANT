@@ -111,10 +111,16 @@ def build_model(
     comp = cfg.model.compression
     exp = cfg.model.expander
     cross = cfg.model.cross_attention
+    rec = enc.get("recursive_updates", {})
 
     cross_layers = parse_cross_layers(cross.get("layers"))
     cross_enabled = bool(cross.enabled) and not disable_cross
     exp_enabled = bool(exp.enabled) and not disable_expander
+    rec_enabled = bool(rec.get("enabled", False))
+    rec_stride = rec.get("stride", 0)
+    rec_short_l = rec.get("short_L_cycles")
+    rec_short_h = rec.get("short_H_cycles")
+    rec_keep_y = bool(rec.get("keep_y", False))
 
     return TRMEncoderDecoder(
         vocab_size=vocab_size,
@@ -143,6 +149,11 @@ def build_model(
         num_slots=int(enc.num_slots),
         compression_temperature=float(comp.temperature),
         encoder_dropout=float(enc.dropout_rate),
+        encoder_update_enabled=rec_enabled,
+        encoder_update_stride=int(rec_stride) if rec_stride is not None else 0,
+        encoder_update_short_L_cycles=int(rec_short_l) if rec_short_l is not None else None,
+        encoder_update_short_H_cycles=int(rec_short_h) if rec_short_h is not None else None,
+        encoder_update_keep_y=rec_keep_y,
         expander_enabled=exp_enabled,
         expander_heads=int(exp.num_heads),
         expander_dropout=float(exp.dropout_rate),

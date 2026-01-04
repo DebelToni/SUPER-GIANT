@@ -16,7 +16,7 @@ trained_models/
 .DS_Store
 *checkpoints/
 teacher_out/
-a.md
+TASK.md
 agents.md
 .codex
 *.safetensors

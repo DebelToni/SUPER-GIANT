@@ -1,0 +1,23 @@
+model:
+  decoder:
+    num_layers: 30
+  encoder:
+    max_length: 512
+    num_slots: 128
+  cross_attention:
+    gate_init: -2.0
+  expander:
+    gate_init: -2.0
+
+pretrained:
+  load: true
+
+training:
+  batch_size: 2
+  max_steps: 2000
+  log_every: 20
+  eval_every: 200
+  checkpoint_every: 500
+  analytics: true
+  eval_no_cross: true
+  train_decoder_after: 500

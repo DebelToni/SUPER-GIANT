@@ -79,10 +79,29 @@ DATA_DIR="${APP_ROOT}/giant-data"
 REPO_DIR="${APP_ROOT}/SUPER-GIANT"
 REPO_URL="https://github.com/DebelToni/SUPER-GIANT"
 
+# mkdir -p "$DATA_DIR"
+# if [[ ! -d "$REPO_DIR" ]]; then
+#   git clone "$REPO_URL" "$REPO_DIR"
+# fi
+
 mkdir -p "$DATA_DIR"
-if [[ ! -d "$REPO_DIR" ]]; then
+
+if [[ ! -d "$REPO_DIR/.git" ]]; then
+  # Fresh clone (also handles "dir missing" or "dir exists but not a git repo")
+  rm -rf "$REPO_DIR" 2>/dev/null || true
   git clone "$REPO_URL" "$REPO_DIR"
+else
+  # Repo exists: update it
+  git -C "$REPO_DIR" fetch --all --prune
+
+  # If you want to keep local changes, use pull --rebase:
+  git -C "$REPO_DIR" pull --rebase --autostash
+
+  # If you prefer "always exactly match remote" (discard local changes), use instead:
+  # git -C "$REPO_DIR" reset --hard origin/HEAD
+  # git -C "$REPO_DIR" clean -fd
 fi
+
 
 mkdir -p "$TS_STATE_DIR" /var/run/tailscale
 

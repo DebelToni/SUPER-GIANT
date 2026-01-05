@@ -8,7 +8,7 @@ RUN apk add --no-cache git
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go install -ldflags="-s -w" github.com/peak/s5cmd/v2@${S5VER}
 
 # ---- main image --------------------------------------------------------------
-FROM nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Base packages + Python 3.13 from deadsnakes (NO openssh-server)

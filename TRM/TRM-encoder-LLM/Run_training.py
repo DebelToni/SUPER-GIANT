@@ -92,9 +92,9 @@ def parse_cross_layers(spec) -> Optional[Sequence[int]]:
         if spec.lower() == "all" or spec == "":
             return None
         parts = [p for p in spec.replace(",", " ").split() if p]
-        return [int(p) for p in parts]
+        return tuple(int(p) for p in parts)
     if isinstance(spec, Iterable):
-        return [int(p) for p in spec]
+        return tuple(int(p) for p in spec)
     return None
 
 

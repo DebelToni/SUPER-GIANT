@@ -15,6 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common gnupg \
         build-essential git wget curl ca-certificates vim tmux pkg-config \
+		ripgrep \
         libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
         libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev \
         iproute2 procps \

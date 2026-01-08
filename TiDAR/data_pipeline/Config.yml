@@ -1,0 +1,26 @@
+outputs:
+  processed_root: "dataset_artifacts"
+  rows_per_shard: 4096
+  manifest_filename: "manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 4212
+  write_batch_size: 256
+
+stages:
+  - name: tinystories_posttrain
+    description: "TinyStories post-training sample"
+    output_dir: "tinystories_posttrain"
+    sequence_length: 256
+    target_tokens: 200000
+    min_tokens: 32
+    pack_sequences: true
+    add_eos: true
+    max_documents: 5000
+    sources:
+      - type: huggingface
+        dataset_name: "roneneldan/TinyStories"
+        split: "train"
+        streaming: false
+        text_field: "text"

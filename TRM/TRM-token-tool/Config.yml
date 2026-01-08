@@ -1,0 +1,99 @@
+paths:
+  processed_data_root: "trm_token_tool/dataset_artifacts"
+  dataloader_state_root: "trm_token_tool/dataloader_state"
+  logs_root: "trm_token_tool/logs"
+  raw_data_root: "trm_token_tool/raw_data"
+  tokenizer_root: "trm_token_tool/tokenizers"
+  checkpoint_root: "trm_token_tool/checkpoints"
+
+model:
+  compute_dtype: bfloat16
+
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"
+  cache_dir: "tokenizer_cache"
+  use_custom: true
+  custom_path: "trm_token_tool/tokenizers/smol_trm_sudoku"
+  pad_token_override: null
+  add_special_tokens:
+    - "<TRM-sudoku>"
+    - "</TRM-sudoku>"
+
+data:
+  dataset_name: "trm_sudoku_calls_v1"
+  train_samples: 5000
+  val_samples: 500
+  min_clues: 24
+  seed: 0
+  shard_rows: 2048
+  prompt_template_count: 32
+  prompt_template_path: "trm_token_tool/raw_data/prompt_templates.json"
+  samples_path: "trm_token_tool/raw_data/sample_rows.jsonl"
+  system_prompt: "You are a helpful assistant. When the user asks to solve a Sudoku, respond only with <TRM-sudoku> 81 digits (0 for blanks) </TRM-sudoku>."
+  chat_system_prompt: "You are a helpful assistant."
+  system_prefix: "System:"
+  user_prefix: "User:"
+  assistant_prefix: "Assistant:"
+  puzzle_placeholder: "<<PUZZLE>>"
+  max_template_words: 80
+  openai_model: "deepseek-chat"
+  openai_base_url: "https://api.deepseek.com/v1"
+  openai_temperature: 0.7
+  openai_max_tokens: 512
+  hf_cache_dir: "hf_cache"
+  mix:
+    enabled: true
+    dataset_name: "trm_sudoku_mix_v4"
+    train_samples: 10000
+    val_samples: 1000
+    fractions:
+      sudoku: 0.5
+      chat: 0.2
+      text: 0.3
+    general_stages:
+      - "simple_wiki"
+      - "definitions_short"
+      - "sentences_short"
+    chat_stages:
+      - "simple_wiki"
+      - "definitions_short"
+    chat_templates:
+      - "Explain this topic: {topic}"
+      - "Give a short overview of {topic}."
+      - "Summarize: {topic}"
+      - "Tell me about {topic}."
+    max_source_rows: 4000
+    max_topic_words: 12
+
+training:
+  batch_size: 1
+  seed: 0
+  log_every: 100
+  checkpoint_every: 1000
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 2
+  scan_chunk: 4
+  prefetch: 0
+  init_checkpoint: "trm_token_tool/checkpoints/smollm-135m.npz"
+  l2_base_coeff: 1.0e-5
+  l2_base_checkpoint: null
+
+optimizer:
+  base_learning_rate: 5.0e-5
+  min_learning_rate: 1.0e-5
+  warmup_steps: 50
+  weight_decay: 0.02
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
+
+stages:
+  - name: sudoku_trm_calls
+    dataset: "trm_sudoku_mix_v4/train"
+    seq_len: 512
+    epochs: 1
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 1.0

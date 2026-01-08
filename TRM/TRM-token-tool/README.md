@@ -17,6 +17,11 @@ capabilities do not collapse.
 - Final training loss: ~0.2607 at step 10,000.
 
 ## Quick Start
+0) Install the repo package once (needed for v2/TRM imports):
+```
+python -m pip install -e ../..
+```
+
 1) Build the custom tokenizer (adds TRM tokens):
 ```
 python tokenizer_utils.py

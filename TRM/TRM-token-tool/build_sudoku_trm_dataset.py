@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 from typing import Iterable, List
 
@@ -22,10 +21,8 @@ from tokenizer_utils import build_custom_tokenizer, load_tokenizer
 
 PROJECT_DIR = Path(__file__).resolve().parent
 TRM_ROOT = PROJECT_DIR.parent
-if str(TRM_ROOT) not in sys.path:
-    sys.path.append(str(TRM_ROOT))
 
-from sudoku.sudoku_dataset import generate_dataset  # noqa: E402
+from TRM.sudoku.sudoku_dataset import generate_dataset
 
 
 def parse_args() -> argparse.Namespace:

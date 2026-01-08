@@ -7,7 +7,7 @@ from flax import linen as nn
 from flax.linen import RMSNorm
 from omegaconf import OmegaConf
 
-from Transformer_block import TinyTransformerBlock
+from v2.smol.Transformer_block import TinyTransformerBlock
 
 MODEL_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = MODEL_DIR.parent

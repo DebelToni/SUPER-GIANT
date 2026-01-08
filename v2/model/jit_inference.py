@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 
 # IMPORTANT: this imports your model from /mnt/data/GiantGPT.py
-from GiantGPT import GiantGPT
+from v2.model.GiantGPT import GiantGPT
 
 Array = jnp.ndarray
 PyTree = Dict[str, Any]

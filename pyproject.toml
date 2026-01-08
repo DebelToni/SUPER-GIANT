@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "super-giant"
+version = "0.2.0"
+requires-python = ">=3.10"
+# use requirements.txt
+# dependencies = [
+#   "jax[cuda12]",
+#   "flax",
+#   "optax",
+#   "orbax",
+#   "transformers",
+#   "datasets",
+#   "huggingface-hub",
+#   "kagglehub",
+#   "omegaconf",
+#   "tqdm",
+#   "numpy",
+#   "pyarrow",
+#   "openai",
+# ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["v2*", "TRM*"]

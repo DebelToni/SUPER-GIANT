@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import os
 import signal
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,27 +22,20 @@ from config_utils import load_config
 from tokenizer_utils import build_custom_tokenizer, load_tokenizer
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-V2_ROOT = PROJECT_DIR.parent.parent / "v2"
-SMOL_DIR = V2_ROOT / "smol"
-MODEL_DIR = V2_ROOT / "model"
-sys.path.insert(0, str(SMOL_DIR))
-sys.path.insert(1, str(MODEL_DIR))
-
-from GiantGPT import GiantGPT  # noqa: E402
-from arrow_data_loader import (  # noqa: E402
+from v2.smol.GiantGPT import GiantGPT
+from v2.model.arrow_data_loader import (
     ShardedArrowDataset,
     StageDataLoader,
     load_dataloader_state,
     save_dataloader_state,
 )
-from async_mini_checkpoint import AsyncMiniCheckpointManager  # noqa: E402
-from checkpoint_io import load_npz  # noqa: E402
-from checkpoint_manager import latest as latest_ckpt  # noqa: E402
-from checkpoint_manager import load as load_ckpt  # noqa: E402
-from checkpoint_manager import save as save_ckpt  # noqa: E402
-from checkpoint_manager import save_opt_state, load_opt_state  # noqa: E402
-from optimizer_utils import create_weight_decay_mask  # noqa: E402
+from v2.model.async_mini_checkpoint import AsyncMiniCheckpointManager
+from v2.smol.checkpoint_io import load_npz
+from v2.smol.checkpoint_manager import latest as latest_ckpt
+from v2.smol.checkpoint_manager import load as load_ckpt
+from v2.smol.checkpoint_manager import save as save_ckpt
+from v2.smol.checkpoint_manager import save_opt_state, load_opt_state
+from v2.model.optimizer_utils import create_weight_decay_mask
 
 
 _stop_requested = False
@@ -101,8 +93,8 @@ def _apply_compute_dtype_override(cfg: OmegaConf) -> None:
         return
     dtype = _to_dtype(str(desired))
     try:
-        import GiantGPT as smol_gpt_module
-        import Transformer_block as smol_block_module
+        import v2.smol.GiantGPT as smol_gpt_module
+        import v2.smol.Transformer_block as smol_block_module
     except Exception as exc:
         print(f"[dtype] Failed to import smol modules for override: {exc}")
         return

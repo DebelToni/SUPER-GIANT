@@ -1,0 +1,27 @@
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"
+  cache_dir: "tokenizer_cache"
+  use_custom: false
+  custom_path: "custom_tokenizer"
+  pad_token_override: null
+  mask_token_override: null
+
+paths:
+  data_root: "/workspace/app/giant-data/TiDAR"
+  processed_data_root: "dataset_artifacts"
+  dataloader_state_root: "checkpoints/dataloader_state"
+  logs_root: "logs"
+  checkpoints_root: "checkpoints"
+  hf_cache_root: "hf_cache"
+
+training_defaults:
+  progressive_sequence_lengths: [256]
+  lr_milestones: [1.0]
+  warmup_steps: 200
+  grad_accumulation: 1
+  global_seed: 0
+
+io:
+  shard_size_tokens: 2048
+  validation_fraction: 0.01
+  min_sequence_tokens: 128

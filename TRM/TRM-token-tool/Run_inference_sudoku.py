@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -15,16 +14,9 @@ from config_utils import load_config
 from tokenizer_utils import build_custom_tokenizer, load_tokenizer
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-V2_ROOT = PROJECT_DIR.parent.parent / "v2"
-SMOL_DIR = V2_ROOT / "smol"
-MODEL_DIR = V2_ROOT / "model"
-sys.path.insert(0, str(SMOL_DIR))
-sys.path.insert(1, str(MODEL_DIR))
-
-from GiantGPT import GiantGPT  # noqa: E402
-from checkpoint_io import load_npz  # noqa: E402
-from jit_inference import init_inference_state, make_prefill_and_decode_fns  # noqa: E402
+from v2.smol.GiantGPT import GiantGPT
+from v2.smol.checkpoint_io import load_npz
+from v2.smol.jit_inference import init_inference_state, make_prefill_and_decode_fns
 
 
 TRM_OPEN = "<TRM-sudoku>"
@@ -57,8 +49,8 @@ def _apply_compute_dtype_override(cfg) -> None:
         return
     dtype = _to_dtype(str(desired))
     try:
-        import GiantGPT as smol_gpt_module
-        import Transformer_block as smol_block_module
+        import v2.smol.GiantGPT as smol_gpt_module
+        import v2.smol.Transformer_block as smol_block_module
     except Exception as exc:
         print(f"[dtype] Failed to import smol modules for override: {exc}")
         return
@@ -79,10 +71,7 @@ def _format_puzzle(puzzle: np.ndarray) -> str:
 
 
 def _generate_puzzle(seed: int) -> Tuple[np.ndarray, np.ndarray]:
-    PROJECT_ROOT = PROJECT_DIR.parent
-    if str(PROJECT_ROOT) not in sys.path:
-        sys.path.append(str(PROJECT_ROOT))
-    from sudoku.sudoku_dataset import make_puzzle, random_solved_grid  # noqa: E402
+    from TRM.sudoku.sudoku_dataset import make_puzzle, random_solved_grid
 
     rng = np.random.default_rng(seed)
     solution = random_solved_grid(rng)

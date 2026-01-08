@@ -20,3 +20,4 @@ TASK.md
 agents.md
 .codex
 *.safetensors
+*.egg-info/

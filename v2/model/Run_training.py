@@ -14,20 +14,20 @@ import optax
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
-from async_mini_checkpoint import AsyncMiniCheckpointManager
-from GiantGPT import GiantGPT
-from Training_step import train_step
-from arrow_data_loader import (
+from v2.model.async_mini_checkpoint import AsyncMiniCheckpointManager
+from v2.model.GiantGPT import GiantGPT
+from v2.model.Training_step import train_step
+from v2.model.arrow_data_loader import (
     ShardedArrowDataset,
     StageDataLoader,
     load_dataloader_state,
     save_dataloader_state,
 )
-from checkpoint_manager import latest as latest_ckpt
-from checkpoint_manager import load as load_ckpt
-from checkpoint_manager import save as save_ckpt
-from checkpoint_manager import save_opt_state, load_opt_state
-from optimizer_utils import create_weight_decay_mask
+from v2.model.checkpoint_manager import latest as latest_ckpt
+from v2.model.checkpoint_manager import load as load_ckpt
+from v2.model.checkpoint_manager import save as save_ckpt
+from v2.model.checkpoint_manager import save_opt_state, load_opt_state
+from v2.model.optimizer_utils import create_weight_decay_mask
 from flax import core as flax_core
 from flax import serialization
 

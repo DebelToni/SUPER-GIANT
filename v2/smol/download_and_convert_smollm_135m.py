@@ -32,7 +32,7 @@ from flax.core import freeze, unfreeze
 from flax import traverse_util
 from omegaconf import OmegaConf
 
-from GiantGPT import GiantGPT, MODEL_CFG  # uses your updated Config.yml
+from v2.smol.GiantGPT import GiantGPT, MODEL_CFG  # uses your updated Config.yml
 
 
 def _to_dtype(name: str) -> jnp.dtype:

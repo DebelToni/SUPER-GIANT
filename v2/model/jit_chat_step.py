@@ -23,7 +23,10 @@ def build_jitted_step(model, params):
     Otherwise, return a safe JIT fallback.
     """
     try:
-        mod = importlib.import_module("jit_inference")
+        module_name = "jit_inference"
+        if __package__:
+            module_name = f"{__package__}.jit_inference"
+        mod = importlib.import_module(module_name)
         if hasattr(mod, "build_step"):
             return mod.build_step(model, params)
         # or your older helpers:
@@ -33,4 +36,3 @@ def build_jitted_step(model, params):
         pass
     # Fallback
     return _fallback_step(model, params)
-

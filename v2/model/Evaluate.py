@@ -13,10 +13,10 @@ import optax
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
-from GiantGPT import GiantGPT
-from arrow_data_loader import ShardedArrowDataset, StageDataLoader
-from checkpoint_manager import latest as latest_ckpt
-from checkpoint_manager import load as load_ckpt
+from v2.model.GiantGPT import GiantGPT
+from v2.model.arrow_data_loader import ShardedArrowDataset, StageDataLoader
+from v2.model.checkpoint_manager import latest as latest_ckpt
+from v2.model.checkpoint_manager import load as load_ckpt
 
 
 def load_configs() -> OmegaConf:

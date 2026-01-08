@@ -2,7 +2,7 @@
 import os, re, glob
 from typing import Optional
 
-from checkpoint_io import save_npz, load_npz
+from v2.smol.checkpoint_io import save_npz, load_npz
 from flax import serialization
 
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 
 
@@ -82,16 +84,18 @@ def build_tidar_prefill_bias(
     return bias[None, None, :, :]
 
 
+@partial(jax.jit, static_argnames=('context_len', 'draft_len', 'dtype'))
 def build_tidar_prefill_bias_cached(
     *,
     context_len: int,
     draft_len: int,
     bias_value: float = -1.0e10,
+    dtype: jnp.dtype = jnp.float32,
 ) -> jnp.ndarray:
     """Bias for cached prefill: queries are masks, keys are prefix + masks."""
     total = context_len + draft_len
     _ = bias_value
-    return jnp.zeros((1, 1, draft_len, total), dtype=jnp.float32)
+    return jnp.zeros((1, 1, draft_len, total), dtype=dtype)
 
 
 def build_tidar_decode_bias(
@@ -150,11 +154,13 @@ def build_tidar_decode_bias(
     return bias[None, None, :, :]
 
 
+@partial(jax.jit, static_argnames=('context_len', 'draft_len', 'dtype'))
 def build_tidar_decode_bias_cached(
     *,
     context_len: int,
     draft_len: int,
     bias_value: float = -1.0e10,
+    dtype: jnp.dtype = jnp.float32,
 ) -> jnp.ndarray:
     """Bias for cached decode: queries are verify+candidate, keys include prefix."""
     step_len = draft_len + (draft_len * draft_len)
@@ -193,5 +199,5 @@ def build_tidar_decode_bias_cached(
         | allow_cand_to_cand
     )
 
-    bias = jnp.where(allow, 0.0, bias_value)
+    bias = jnp.where(allow, jnp.zeros((), dtype=dtype), jnp.full((), bias_value, dtype=dtype))
     return bias[None, None, :, :]

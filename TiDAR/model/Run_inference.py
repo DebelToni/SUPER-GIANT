@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from model.GiantGPT import GiantGPT
+from model.kv_cache_buckets import select_tidar_kv_bucket
 from model.checkpoint_manager import latest as latest_ckpt
 from model.checkpoint_manager import load as load_ckpt
 from model.tidar_inference import (
@@ -167,7 +168,20 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
 
     cache_vars = init_kv_cache(model, batch_size=1, pad_token_id=tokenizer.pad_token_id or 0)
-    prefill_kv_len = min(context_len, prompt_len)
+    
+    # Use bucketed KV cache allocation
+    if num_new_tokens is not None:
+        kv_cache_len, effective_window = select_tidar_kv_bucket(
+            prompt_len, num_new_tokens, draft_len, context_len
+        )
+        if not args.quiet:
+            print(f"[cache] selected bucket={kv_cache_len}, effective_window={effective_window}")
+    else:
+        # Fallback for unbounded generation
+        decode_window = max_steps
+        kv_cache_len = min(context_len, prompt_len + decode_window)
+    
+    prefill_kv_len = min(kv_cache_len, prompt_len)
     cache_vars, prefix_len = prefill_prompt_cache(
         model,
         params,
@@ -175,8 +189,6 @@ def main() -> None:
         prompt_ids,
         kv_cache_len=prefill_kv_len,
     )
-    decode_window = num_new_tokens if num_new_tokens is not None else max_steps
-    kv_cache_len = min(context_len, prefix_len + int(decode_window))
 
     prefix = prompt_ids
     generated = 0

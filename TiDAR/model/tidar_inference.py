@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Optional, Tuple
 
 import numpy as np
@@ -8,7 +9,44 @@ import jax.numpy as jnp
 
 from model.GiantGPT import GiantGPT
 from model.tidar_masks import build_tidar_prefill_bias_cached, build_tidar_decode_bias_cached
-from model.tidar_utils import jax_sample, jax_rejection_sample
+from model.tidar_utils import jax_sample, jax_rejection_sample_vectorized as jax_rejection_sample
+
+
+@partial(jax.jit, static_argnames=('draft_len', 'mask_id'))
+def _build_decode_inputs_jit(
+    verify_ids: jnp.ndarray,
+    prefix_len: jax.Array,
+    mask_id: int,
+    draft_len: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Build decode step inputs in JIT-compiled fashion."""
+    batch_size = verify_ids.shape[0]
+    
+    # Predraft masks
+    predraft = jnp.full((batch_size, draft_len * draft_len), mask_id, dtype=jnp.int32)
+    step_tokens = jnp.concatenate([verify_ids, predraft], axis=1)
+    
+    # Position IDs using JIT helper
+    position_ids_1d = _build_position_ids_jit(prefix_len, draft_len)
+    position_ids = jnp.broadcast_to(position_ids_1d[None, :], (batch_size, position_ids_1d.shape[0]))
+    
+    return step_tokens, position_ids
+
+
+@partial(jax.jit, static_argnames=('draft_len',))
+def _build_position_ids_jit(prefix_len: jax.Array, draft_len: int) -> jnp.ndarray:
+    """Build position_ids for decode step without Python loops."""
+    # Verify positions: prefix_len + [0, 1, ..., K-1]
+    pos_verify = prefix_len + jnp.arange(draft_len, dtype=jnp.int32)
+    
+    # Predraft positions: for candidate r, positions are prefix_len + r + [0..K-1]
+    r_offsets = jnp.arange(1, draft_len + 1, dtype=jnp.int32)  # [1, 2, ..., K]
+    local_offsets = jnp.arange(draft_len, dtype=jnp.int32)     # [0, 1, ..., K-1]
+    # Outer product + broadcast
+    pos_predraft = prefix_len + r_offsets[:, None] + local_offsets[None, :]
+    pos_predraft = pos_predraft.ravel()  # [K*K]
+    
+    return jnp.concatenate([pos_verify, pos_predraft])
 
 
 def _as_batch(tokens: jnp.ndarray) -> jnp.ndarray:
@@ -150,19 +188,10 @@ def _build_decode_step_inputs_cached(
     predraft = jnp.full((batch_size, draft_len * draft_len), mask_id, dtype=jnp.int32)
     step_tokens = jnp.concatenate([verify_ids, predraft], axis=1)
 
-    pos_verify = jnp.arange(prefix_len, prefix_len + draft_len, dtype=jnp.int32)
-    pos_predraft = []
-    for r in range(1, draft_len + 1):
-        pos_predraft.extend(np.arange(prefix_len + r, prefix_len + r + draft_len, dtype=np.int32))
-    pos_predraft = jnp.asarray(pos_predraft, dtype=jnp.int32)
-
-    position_ids = jnp.concatenate(
-        [
-            jnp.broadcast_to(pos_verify[None, :], (batch_size, draft_len)),
-            jnp.broadcast_to(pos_predraft[None, :], (batch_size, draft_len * draft_len)),
-        ],
-        axis=1,
-    )
+    # Use JIT-compiled position builder
+    prefix_len_jax = jnp.asarray(prefix_len, dtype=jnp.int32)
+    position_ids_1d = _build_position_ids_jit(prefix_len_jax, draft_len)
+    position_ids = jnp.broadcast_to(position_ids_1d[None, :], (batch_size, position_ids_1d.shape[0]))
 
     if kv_cache_len is None:
         kv_cache_len = context_len

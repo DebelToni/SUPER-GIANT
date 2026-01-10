@@ -239,3 +239,70 @@ def jax_rejection_sample(
     (done, r, committed), _ = jax.lax.scan(step, (False, jnp.array(0, jnp.int32), committed), jnp.arange(k))
     r = jnp.maximum(r, 1)
     return r, committed
+
+
+def jax_rejection_sample_vectorized(
+    verify_ids: jnp.ndarray,
+    verify_logits: jnp.ndarray,
+    *,
+    key: jax.Array,
+    draft_logits: Optional[jnp.ndarray] = None,
+    temperature: float = 1.0,
+    top_k: int = 0,
+) -> Tuple[jax.Array, jnp.ndarray]:
+    """Vectorized rejection sampling - computes all accept/reject decisions in parallel."""
+    k = verify_ids.shape[0]
+    scaled_verify = verify_logits / jnp.maximum(temperature, 1e-6)
+    scaled_verify = jax_topk_mask(scaled_verify, top_k)
+    probs = jax.nn.softmax(scaled_verify, axis=-1)
+    
+    if draft_logits is None:
+        draft_probs = probs
+    else:
+        scaled_draft = draft_logits / jnp.maximum(temperature, 1e-6)
+        scaled_draft = jax_topk_mask(scaled_draft, top_k)
+        draft_probs = jax.nn.softmax(scaled_draft, axis=-1)
+
+    # Gather probabilities for proposed tokens (vectorized)
+    token_indices = jnp.arange(k)
+    p_proposed = probs[token_indices, verify_ids]
+    q_proposed = draft_probs[token_indices, verify_ids]
+    
+    # Acceptance probabilities (vectorized)
+    accept_probs = jnp.minimum(1.0, p_proposed / jnp.maximum(q_proposed, 1e-9))
+    
+    # Random samples for acceptance
+    key_accept, key_resample = jax.random.split(key)
+    uniform_samples = jax.random.uniform(key_accept, (k,))
+    
+    # Accept decisions (vectorized)
+    accepts = uniform_samples < accept_probs
+    
+    # Find first rejection
+    reject_mask = ~accepts
+    first_reject_idx = jnp.argmax(reject_mask)
+    all_accepted = ~jnp.any(reject_mask)
+    
+    # r is either k (all accepted) or first_reject_idx + 1
+    r = jnp.where(all_accepted, k, first_reject_idx + 1)
+    
+    # Build committed tokens: accepted up to rejection, then resample at rejection point
+    committed = jnp.copy(verify_ids)
+    
+    # If we rejected, resample at the rejection point
+    def resample_rejected(idx):
+        resample_key = jax.random.fold_in(key_resample, idx)
+        new_token = jax.random.categorical(resample_key, scaled_verify[idx], axis=-1)
+        return new_token.astype(jnp.int32)
+    
+    # Conditionally update the rejected token
+    committed = jax.lax.cond(
+        all_accepted,
+        lambda: committed,
+        lambda: committed.at[first_reject_idx].set(resample_rejected(first_reject_idx))
+    )
+    
+    # Ensure r is at least 1
+    r = jnp.maximum(r, 1)
+    
+    return r, committed

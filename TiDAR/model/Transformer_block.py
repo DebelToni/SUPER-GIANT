@@ -123,7 +123,8 @@ class NativeJaxSelfAttention(nn.Module):
         kv_cache_len: Optional[int] = None,
     ):
         b, l, _ = x.shape
-        use_cudnn = IS_GPU and l >= 128 and l % 2 == 0
+        # cuDNN works for any even length >= 2
+        use_cudnn = IS_GPU and l % 2 == 0 and l >= 2
         impl = "cudnn" if use_cudnn else "xla"
 
         head_dim = self.head_dim

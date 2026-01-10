@@ -10,7 +10,7 @@ model:
   activation: silu
   use_remat: false
   param_dtype: float32
-  compute_dtype: float32
+  compute_dtype: bfloat16
 
 tidar:
   draft_length: 8

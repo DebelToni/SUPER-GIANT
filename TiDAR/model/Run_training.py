@@ -8,7 +8,7 @@ import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +16,8 @@ import numpy as np
 import optax
 from flax import core as flax_core
 from flax import serialization
+from flax import traverse_util
+from flax.core import freeze
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
@@ -35,7 +37,6 @@ from model.checkpoint_manager import latest as latest_ckpt
 from model.checkpoint_manager import load as load_ckpt
 from model.checkpoint_manager import save as save_ckpt
 from model.checkpoint_manager import save_opt_state, load_opt_state
-from model.optimizer_utils import create_weight_decay_mask
 from model.tokenizer_utils import (
     ensure_tidar_mask_token,
     resize_embedding_params,
@@ -131,6 +132,17 @@ def _to_dtype(name: str) -> jnp.dtype:
         return getattr(jnp, name)
     except AttributeError:
         return jnp.dtype(name)
+
+
+def create_weight_decay_mask(params, exclusions: Iterable[str]):
+    """Return a mask tree where True applies weight decay."""
+    exclusion_set = {str(name).lower() for name in exclusions}
+    flat_params = traverse_util.flatten_dict(params)
+    flat_mask = {}
+    for path in flat_params:
+        last = path[-1].lower()
+        flat_mask[path] = last not in exclusion_set
+    return freeze(traverse_util.unflatten_dict(flat_mask))
 
 
 def load_tokenizer(cfg: OmegaConf):

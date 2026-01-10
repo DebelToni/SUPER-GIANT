@@ -119,6 +119,8 @@ class NativeJaxSelfAttention(nn.Module):
         cur_index: Optional[int] = None,
         write_to_cache: bool = True,
         prefix_len: Optional[int] = None,
+        cache_write_len: Optional[int] = None,
+        kv_cache_len: Optional[int] = None,
     ):
         b, l, _ = x.shape
         use_cudnn = IS_GPU and l >= 128 and l % 2 == 0
@@ -176,19 +178,20 @@ class NativeJaxSelfAttention(nn.Module):
                 self.dtype,
             )
 
+            k_to_cache = jnp.swapaxes(k, 1, 2)
+            v_to_cache = jnp.swapaxes(v, 1, 2)
+
             if write_to_cache:
                 assert cur_index is not None, "Need cur_index when use_kv_cache=True"
-                k_to_cache = jnp.swapaxes(k, 1, 2)
-                v_to_cache = jnp.swapaxes(v, 1, 2)
-                if l == 1:
-                    cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k_to_cache[:, :, 0, :])
-                    cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v_to_cache[:, :, 0, :])
-                else:
-                    cached_k.value = cached_k.value.at[:, :, cur_index : cur_index + l, :].set(k_to_cache)
-                    cached_v.value = cached_v.value.at[:, :, cur_index : cur_index + l, :].set(v_to_cache)
+                start = (0, 0, jnp.asarray(cur_index, dtype=jnp.int32), 0)
+                cached_k.value = jax.lax.dynamic_update_slice(cached_k.value, k_to_cache, start)
+                cached_v.value = jax.lax.dynamic_update_slice(cached_v.value, v_to_cache, start)
 
                 k_full = jnp.swapaxes(cached_k.value, 1, 2)
                 v_full = jnp.swapaxes(cached_v.value, 1, 2)
+                if kv_cache_len is not None:
+                    k_full = k_full[:, :kv_cache_len, :, :]
+                    v_full = v_full[:, :kv_cache_len, :, :]
                 if kv_indices is not None:
                     k_full = jnp.take(k_full, kv_indices, axis=2)
                     v_full = jnp.take(v_full, kv_indices, axis=2)
@@ -207,8 +210,21 @@ class NativeJaxSelfAttention(nn.Module):
             else:
                 assert prefix_len is not None, "prefix_len is required when write_to_cache=False"
                 assert attn_bias is not None, "attn_bias is required when write_to_cache=False"
-                k_prefix = cached_k.value[:, :, :prefix_len, :]
-                v_prefix = cached_v.value[:, :, :prefix_len, :]
+
+                if cache_write_len is not None and cache_write_len > 0:
+                    write_index = jnp.asarray(prefix_len, dtype=jnp.int32)
+                    k_update = k_to_cache[:, :, :cache_write_len, :]
+                    v_update = v_to_cache[:, :, :cache_write_len, :]
+                    start = (0, 0, write_index, 0)
+                    cached_k.value = jax.lax.dynamic_update_slice(cached_k.value, k_update, start)
+                    cached_v.value = jax.lax.dynamic_update_slice(cached_v.value, v_update, start)
+
+                k_prefix = cached_k.value
+                v_prefix = cached_v.value
+                if kv_cache_len is not None:
+                    k_prefix = k_prefix[:, :, :kv_cache_len, :]
+                    v_prefix = v_prefix[:, :, :kv_cache_len, :]
+                prefix_capacity = k_prefix.shape[2]
                 k_prefix = jnp.swapaxes(k_prefix, 1, 2)
                 v_prefix = jnp.swapaxes(v_prefix, 1, 2)
                 if kv_indices is not None:
@@ -219,11 +235,18 @@ class NativeJaxSelfAttention(nn.Module):
                 v_step = v if kv_indices is None else jnp.take(v, kv_indices, axis=2)
                 k_full = jnp.concatenate([k_prefix, k_step], axis=1)
                 v_full = jnp.concatenate([v_prefix, v_step], axis=1)
+                prefix_len_safe = jnp.minimum(jnp.asarray(prefix_len, dtype=jnp.int32), prefix_capacity)
+                prefix_valid = jnp.arange(prefix_capacity) < prefix_len_safe
+                prefix_bias = jnp.where(prefix_valid, 0.0, -1e10).astype(self.dtype)
+                prefix_bias = prefix_bias[None, None, None, :]
+                step_bias = jnp.zeros((1, 1, 1, l), dtype=self.dtype)
+                key_valid_bias = jnp.concatenate([prefix_bias, step_bias], axis=-1)
+                full_bias = attn_bias.astype(self.dtype) + key_valid_bias
                 y = jax.nn.dot_product_attention(
                     q,
                     k_full,
                     v_full,
-                    bias=attn_bias.astype(self.dtype),
+                    bias=full_bias,
                     is_causal=False,
                     implementation=impl,
                 )
@@ -265,6 +288,8 @@ class TinyTransformerBlock(nn.Module):
         cur_index: Optional[int] = None,
         write_to_cache: bool = True,
         prefix_len: Optional[int] = None,
+        cache_write_len: Optional[int] = None,
+        kv_cache_len: Optional[int] = None,
     ):
         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
             residual = h
@@ -284,6 +309,8 @@ class TinyTransformerBlock(nn.Module):
                 cur_index=cur_index,
                 write_to_cache=write_to_cache,
                 prefix_len=prefix_len,
+                cache_write_len=cache_write_len,
+                kv_cache_len=kv_cache_len,
             )
             h = residual + h_attn
 

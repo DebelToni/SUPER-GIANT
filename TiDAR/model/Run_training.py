@@ -36,6 +36,11 @@ from model.checkpoint_manager import load as load_ckpt
 from model.checkpoint_manager import save as save_ckpt
 from model.checkpoint_manager import save_opt_state, load_opt_state
 from model.optimizer_utils import create_weight_decay_mask
+from model.tokenizer_utils import (
+    ensure_tidar_mask_token,
+    resize_embedding_params,
+    init_mask_embedding_row,
+)
 from model.tidar_utils import build_train_batch
 
 
@@ -148,21 +153,14 @@ def load_tokenizer(cfg: OmegaConf):
     return tokenizer
 
 
-def resolve_mask_id(tokenizer, cfg: OmegaConf) -> int:
-    mask_token = getattr(cfg.tokenizer, "mask_token_override", None)
-    if mask_token:
-        mask_id = tokenizer.convert_tokens_to_ids(mask_token)
-        if mask_id is None or mask_id == tokenizer.unk_token_id:
-            print(f"[mask] override '{mask_token}' not found; falling back to pad token")
-            mask_token = None
-    if mask_token is None:
-        if tokenizer.mask_token_id is not None:
-            return int(tokenizer.mask_token_id)
-        if tokenizer.pad_token_id is not None:
-            return int(tokenizer.pad_token_id)
-        if tokenizer.eos_token_id is not None:
-            return int(tokenizer.eos_token_id)
-    return 0
+def ensure_mask_id(tokenizer, cfg: OmegaConf) -> int:
+    base_token = getattr(cfg.tokenizer, "mask_token_override", None) or "[MASK]"
+    mask_token, mask_id, added = ensure_tidar_mask_token(tokenizer, base_token=base_token)
+    if added <= 0:
+        print(f"[mask] using existing token '{mask_token}' (id={mask_id})")
+    else:
+        print(f"[mask] added token '{mask_token}' (id={mask_id})")
+    return mask_id
 
 
 def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
@@ -303,7 +301,7 @@ def main() -> None:
     batch_size = int(cfg.training.batch_size)
     seed = int(cfg.training.seed)
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-    mask_token_id = resolve_mask_id(tokenizer, cfg)
+    mask_token_id = ensure_mask_id(tokenizer, cfg)
     draft_len = int(cfg.tidar.draft_length)
     bias_value = float(cfg.tidar.attn_bias_value)
 
@@ -342,6 +340,13 @@ def main() -> None:
             ckpt_path = (base_root / ckpt_path).resolve()
         print(f"[init] loading init checkpoint from {ckpt_path}")
         params = flax_core.freeze(load_ckpt(str(ckpt_path))[0])
+        rng, resize_key = jax.random.split(rng)
+        params, added = resize_embedding_params(params, len(tokenizer), key=resize_key)
+        if added:
+            print(f"[init] expanded embeddings by {added} rows for TiDAR mask token")
+    else:
+        rng, mask_key = jax.random.split(rng)
+        params = init_mask_embedding_row(params, mask_token_id, key=mask_key)
 
     optimizer = build_optimizer(cfg, total_steps, params)
     opt_state = optimizer.init(params)
@@ -371,8 +376,13 @@ def main() -> None:
             print("[resume] no checkpoint found; starting fresh")
         else:
             params, global_step = load_ckpt(ckpt_path)
+            rng, resize_key = jax.random.split(rng)
+            params, added = resize_embedding_params(params, len(tokenizer), key=resize_key)
             opt_bytes = load_opt_state(global_step, checkpoint_dir)
-            if opt_bytes is not None:
+            if added:
+                print(f"[resume] expanded embeddings by {added} rows; resetting optimizer state")
+                opt_state = optimizer.init(params)
+            elif opt_bytes is not None:
                 opt_state = serialization.from_bytes(opt_state, opt_bytes)
             state_path = dataloader_state_path(cfg, global_step)
             saved_state = load_dataloader_state(state_path)

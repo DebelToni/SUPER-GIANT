@@ -51,6 +51,9 @@ class GiantGPT(nn.Module):
         cur_index: Optional[int] = None,
         write_to_cache: bool = True,
         prefix_len: Optional[int] = None,
+        cache_write_len: Optional[int] = None,
+        kv_cache_len: Optional[int] = None,
+        return_hidden: bool = False,
     ):
         embed = nn.Embed(
             num_embeddings=self.vocab_size,
@@ -83,9 +86,14 @@ class GiantGPT(nn.Module):
                     cur_index=cur_index,
                     write_to_cache=write_to_cache,
                     prefix_len=prefix_len,
+                    cache_write_len=cache_write_len,
+                    kv_cache_len=kv_cache_len,
                 )
 
         x = RMSNorm(name="final_norm", dtype=COMPUTE_DTYPE, epsilon=1e-5)(x)
+
+        if return_hidden:
+            return x
 
         logits = jnp.einsum("bld,vd->blv", x.astype(jnp.float32), embed.embedding)
         return logits

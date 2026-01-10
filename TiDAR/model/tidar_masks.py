@@ -16,6 +16,7 @@ def build_tidar_train_bias(
     token_types: jnp.ndarray,
     *,
     block_len: int,
+    key_padding_mask: Optional[jnp.ndarray] = None,
     bias_value: float = -1.0e10,
 ) -> jnp.ndarray:
     """Build TiDAR training attention bias (clean+diffusion)."""
@@ -41,6 +42,12 @@ def build_tidar_train_bias(
     allow_diff_to_clean = is_diff_q & is_clean_k & (pos_k < block_start)
 
     allow = allow_clean_to_clean | allow_diff_to_diff | allow_diff_to_clean
+
+    if key_padding_mask is not None:
+        key_padding_mask = key_padding_mask.astype(bool)
+        if key_padding_mask.ndim == 1:
+            key_padding_mask = jnp.broadcast_to(key_padding_mask[None, :], (batch_size, key_padding_mask.shape[0]))
+        allow = allow & key_padding_mask[:, None, :]
     bias = jnp.where(allow, 0.0, bias_value)
     bias = bias[:, None, :, :]
     return bias
@@ -77,15 +84,14 @@ def build_tidar_prefill_bias(
 
 def build_tidar_prefill_bias_cached(
     *,
-    prefix_len: int,
+    context_len: int,
     draft_len: int,
     bias_value: float = -1.0e10,
 ) -> jnp.ndarray:
     """Bias for cached prefill: queries are masks, keys are prefix + masks."""
-    total = prefix_len + draft_len
-    allow = jnp.ones((draft_len, total), dtype=jnp.bool_)
-    bias = jnp.where(allow, 0.0, bias_value)
-    return bias[None, None, :, :]
+    total = context_len + draft_len
+    _ = bias_value
+    return jnp.zeros((1, 1, draft_len, total), dtype=jnp.float32)
 
 
 def build_tidar_decode_bias(
@@ -146,23 +152,23 @@ def build_tidar_decode_bias(
 
 def build_tidar_decode_bias_cached(
     *,
-    prefix_len: int,
+    context_len: int,
     draft_len: int,
     bias_value: float = -1.0e10,
 ) -> jnp.ndarray:
     """Bias for cached decode: queries are verify+candidate, keys include prefix."""
     step_len = draft_len + (draft_len * draft_len)
-    key_len = prefix_len + step_len
+    key_len = context_len + step_len
 
     q_idx = jnp.arange(step_len)[:, None]
     k_idx = jnp.arange(key_len)[None, :]
 
     is_verify_q = q_idx < draft_len
     is_cand_q = q_idx >= draft_len
-    is_prefix_k = k_idx < prefix_len
-    is_step_k = k_idx >= prefix_len
+    is_prefix_k = k_idx < context_len
+    is_step_k = k_idx >= context_len
 
-    step_k_idx = k_idx - prefix_len
+    step_k_idx = k_idx - context_len
     is_verify_k = is_step_k & (step_k_idx < draft_len)
     is_cand_k = is_step_k & (step_k_idx >= draft_len)
 

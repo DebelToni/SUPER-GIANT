@@ -19,5 +19,7 @@ teacher_out/
 TASK.md
 agents.md
 .codex
+.opencode
 *.safetensors
 *.egg-info/
+A-Logs.md

@@ -29,7 +29,7 @@ from v2.model.arrow_data_loader import (
     load_dataloader_state,
     save_dataloader_state,
 )
-from v2.model.async_mini_checkpoint import AsyncMiniCheckpointManager
+from v2.model.checkpoint_manager import AsyncMiniCheckpointManager
 from v2.smol.checkpoint_io import load_npz
 from v2.smol.checkpoint_manager import latest as latest_ckpt
 from v2.smol.checkpoint_manager import load as load_ckpt

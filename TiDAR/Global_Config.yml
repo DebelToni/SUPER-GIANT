@@ -7,7 +7,7 @@ tokenizer:
   mask_token_override: null
 
 paths:
-  data_root: "/workspace/app/giant-data/TiDAR"
+  data_root: "/proj/giant-data/TiDAR"
   processed_data_root: "dataset_artifacts"
   dataloader_state_root: "checkpoints/dataloader_state"
   logs_root: "logs"

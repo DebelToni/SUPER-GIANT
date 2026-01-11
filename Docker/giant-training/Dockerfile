@@ -75,7 +75,7 @@ COPY --chown=root:root <<'BASH' /usr/local/bin/entrypoint.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_ROOT=/workspace/app
+APP_ROOT=/proj
 DATA_DIR="${APP_ROOT}/giant-data"
 REPO_DIR="${APP_ROOT}/SUPER-GIANT"
 REPO_URL="https://github.com/DebelToni/SUPER-GIANT"
@@ -159,8 +159,8 @@ BASH
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-WORKDIR /workspace/app
-RUN mkdir -p /workspace/app
+WORKDIR /proj
+RUN mkdir -p /proj
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []

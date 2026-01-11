@@ -8,7 +8,7 @@ RUN apk add --no-cache git
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go install -ldflags="-s -w" github.com/peak/s5cmd/v2@${S5VER}
 
 # ---- main image --------------------------------------------------------------
-# CUDA 12.9 + cuDNN + Python 3.11 + JAX + SSH + Tailscale + rclone + s5cmd
+# CUDA 12.9 + cuDNN + Python 3.13 + JAX + SSH + Tailscale + rclone + s5cmd
 FROM --platform=linux/amd64 nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -16,18 +16,23 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Guard: bail out if not amd64 (we build/push only x86_64)
 RUN dpkg --print-architecture | grep -qx amd64 || (echo "This image targets amd64/x86_64 only." && exit 1)
 
-# Base packages + SSH daemon + fuse3 (for rclone mount)
+# Base packages + Python 3.13 from deadsnakes + SSH daemon + fuse3
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common gnupg \
         build-essential git wget curl ca-certificates vim tmux pkg-config \
-        python3.11 python3.11-venv python3-pip                       \
-        libssl-dev zlib1g-dev libbz2-dev libreadline-dev             \
-        libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev        \
-        openssh-server iproute2 procps fuse3 unzip gnupg lsb-release \
+        ripgrep \
+        libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
+        libsqlite3-dev libffi-dev liblzma-dev tk-dev uuid-dev \
+        openssh-server iproute2 procps fuse3 unzip lsb-release \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.13 python3.13-venv python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Python virtual env
+# Python virtual env (Python 3.13)
 ENV VENV_DIR=/opt/venv
-RUN python3.11 -m venv "$VENV_DIR"
+RUN python3.13 -m venv "$VENV_DIR" && \
+    "$VENV_DIR/bin/python" -m pip install --upgrade pip
 ENV PATH="$VENV_DIR/bin:$PATH" VIRTUAL_ENV="$VENV_DIR"
 
 # Deep-learning stack
@@ -56,12 +61,13 @@ RUN mkdir -p /var/run/sshd && \
       'ChallengeResponseAuthentication no' \
       'UsePAM yes' >> /etc/ssh/sshd_config
 
-# Make venv default (your original)
+# Ensure venv is always active (interactive and non-interactive)
 RUN printf '%s\n' \
       'VIRTUAL_ENV=/opt/venv' \
       'PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
       >> /etc/environment
 RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activate-venv.sh
+RUN printf '%s\n' 'set -o vi' > /etc/profile.d/vi-mode.sh
 
 # ── Tools we need for networking & S3 I/O ─────────────────────────────────────
 # 1) Tailscale
@@ -95,8 +101,8 @@ ENV TS_AUTHKEY="" \
     RCLONE_VFS_CACHE_MODE="full" \
     RCLONE_VFS_WRITE_BACK="2s" \
     RCLONE_CONCURRENCY="64" \
-    HF_HOME="/root/giant-data/hf" \
-    TRANSFORMERS_CACHE="/root/giant-data/hf/transformers" \
+    HF_HOME="/proj/giant-data/hf" \
+    TRANSFORMERS_CACHE="/proj/giant-data/hf/transformers" \
     RCLONE_CONFIG="/root/.config/rclone/rclone.conf"
 
 # ── Hardened entrypoint: tailscale up → rclone remote → mount/bisync → sshd ──
@@ -117,15 +123,27 @@ export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_S3_FORCE_PATH_STYLE="true"
 export S3_ENDPOINT_URL="${S3_ENDPOINT:-}"
 
-MOUNTPOINT="${MOUNTPOINT:-/root/giant-data}"
+MOUNTPOINT="${MOUNTPOINT:-/proj/giant-data}"
+APP_ROOT=/proj
+DATA_DIR="${MOUNTPOINT}"
+REPO_DIR="${APP_ROOT}/SUPER-GIANT"
+REPO_URL="https://github.com/DebelToni/SUPER-GIANT"
 CACHE_DIR="${RCLONE_CACHE_DIR:-/tmp/rclone-cache}"
 CONCURRENCY="${RCLONE_CONCURRENCY:-64}"
 WRITE_BACK="${RCLONE_VFS_WRITE_BACK:-2s}"
 CONF="${RCLONE_CONFIG:-/root/.config/rclone/rclone.conf}"
 
-mkdir -p "$MOUNTPOINT" "$CACHE_DIR" /var/run/sshd "$(dirname "$CONF")"
+mkdir -p "$DATA_DIR" "$CACHE_DIR" /var/run/sshd "$(dirname "$CONF")"
 : > "$CONF"
 chmod 600 "$CONF"
+
+if [[ ! -d "$REPO_DIR/.git" ]]; then
+  rm -rf "$REPO_DIR" 2>/dev/null || true
+  git clone "$REPO_URL" "$REPO_DIR"
+else
+  git -C "$REPO_DIR" fetch --all --prune
+  git -C "$REPO_DIR" pull --rebase --autostash
+fi
 
 # 1) Tailscale: prefer kernel TUN if available; else userspace + SOCKS5
 if [[ -n "${TS_AUTHKEY:-}" ]]; then
@@ -209,7 +227,7 @@ if [[ "${MOUNT_BUCKET:-0}" = "0" || ! -e /dev/fuse ]]; then
 cat > /usr/local/bin/mlhome-bisync-loop.sh <<'LOOP'
 #!/usr/bin/env bash
 set -euo pipefail
-SRC="${MOUNTPOINT:-/root/giant-data}"
+SRC="${MOUNTPOINT:-/proj/giant-data}"
 DST="mlstore:${S3_BUCKET:-giant-data}"
 CONF="${RCLONE_CONFIG:-/root/.config/rclone/rclone.conf}"
 while true; do
@@ -240,8 +258,8 @@ BASH
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 22
-WORKDIR /workspace/app
-RUN mkdir -p /workspace/app
+WORKDIR /proj
+RUN mkdir -p /proj
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []

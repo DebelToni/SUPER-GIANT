@@ -101,6 +101,33 @@ def _try_impl(impl: str) -> str:
     return impl
 
 
+def _ensure_jax_core_primitive() -> None:
+    if hasattr(jax.core, "Primitive"):
+        return
+    try:
+        from jax._src.core import Primitive
+    except Exception:
+        return
+    setattr(jax.core, "Primitive", Primitive)
+
+
+def _load_jfa_jax_only():
+    import importlib
+    import importlib.util
+    import sys
+    import types
+
+    spec = importlib.util.find_spec("jax_flash_attn2")
+    if spec is None or spec.submodule_search_locations is None:
+        raise ModuleNotFoundError("jax_flash_attn2 not installed")
+    pkg = sys.modules.get("jax_flash_attn2")
+    if pkg is None or not getattr(pkg, "__path__", None):
+        pkg = types.ModuleType("jax_flash_attn2")
+        pkg.__path__ = list(spec.submodule_search_locations)
+        sys.modules["jax_flash_attn2"] = pkg
+    return importlib.import_module("jax_flash_attn2.flash_attention_jax")
+
+
 # -----------------------
 # Mask/Bias builders for TiDAR step (fixed shapes)
 # -----------------------
@@ -256,12 +283,14 @@ class AttnBackend:
         self.cfg = cfg
         self.impl = _try_impl(cfg.impl)
         self._jfa = None
+        self._jfa_kind = None
         self._jfa_ready = False
         self._init_jfa_if_needed()
 
     def _init_jfa_if_needed(self):
         if not self.cfg.backend.startswith("jfa_"):
             return
+        _ensure_jax_core_primitive()
         try:
             import jax_flash_attn2 as jfa  # type: ignore
             platform = {
@@ -272,11 +301,36 @@ class AttnBackend:
             self._jfa = jfa.FlashAttention(
                 jfa.AttentionConfig(platform=platform, backend=jfa.Backend.GPU)
             )
+            self._jfa_kind = "flash_attention"
             self._jfa_ready = True
+            return
         except Exception as e:
-            print(f"[warn] jax-flash-attn2 unavailable or failed to init ({e}). Falling back to JAX attention.")
-            self._jfa_ready = False
-            self._jfa = None
+            try:
+                jfa_jax = _load_jfa_jax_only()
+
+                def _jfa_call(query, key, value, bias, causal):
+                    return jfa_jax.jax_flash_attention(
+                        query_state=query,
+                        key_state=key,
+                        value_state=value,
+                        mask=None,
+                        bias=bias,
+                    )
+
+                self._jfa = _jfa_call
+                self._jfa_kind = "jax_fn"
+                self._jfa_ready = True
+                print(
+                    f"[warn] jax-flash-attn2 backend unavailable ({e}). Using JAX backend."
+                )
+                return
+            except Exception:
+                print(
+                    f"[warn] jax-flash-attn2 unavailable or failed to init ({e}). Falling back to JAX attention."
+                )
+                self._jfa_ready = False
+                self._jfa = None
+                self._jfa_kind = None
 
     def attn(
         self,
@@ -297,30 +351,29 @@ class AttnBackend:
                 implementation=self.impl,
             )
 
-        # jax-flash-attn2 expects (B, H, L, D) for k/v.
-        # Their README shows query shape can be (B, num_heads*groups, L, D) for GQA;
-        # for standard MHA we just pass (B, H, Lq, D). :contentReference[oaicite:4]{index=4}
-        q_bhld = jnp.swapaxes(q, 1, 2)  # (B, H, Lq, D)
-        k_bhld = jnp.swapaxes(k, 1, 2)  # (B, H, Lk, D)
-        v_bhld = jnp.swapaxes(v, 1, 2)
+        if self._jfa_kind == "jax_fn":
+            try:
+                return self._jfa(q, k, v, bias, causal)
+            except Exception:
+                return jax.nn.dot_product_attention(
+                    q, k, v,
+                    bias=bias,
+                    is_causal=causal,
+                    implementation=self.impl,
+                )
 
         try:
-            # jfa supports attention_mask or bias depending on backend.
-            # We'll try bias first, fall back to attention_mask if needed, else fall back to JAX.
-            out = self._jfa(query=q_bhld, key=k_bhld, value=v_bhld, bias=bias, causal=causal)
-            # out: (B, H, Lq, D) -> (B, Lq, H, D)
-            return jnp.swapaxes(out, 1, 2)
+            out = self._jfa(query=q, key=k, value=v, bias=bias, causal=causal)
+            return out
         except Exception:
             try:
                 if bias is not None:
-                    attn_mask = (bias == 0.0).astype(jnp.int32)  # 1 attend, 0 mask
+                    attn_mask = (bias == 0.0).astype(jnp.int32)
                 else:
                     attn_mask = None
-                out = self._jfa(query=q_bhld, key=k_bhld, value=v_bhld,
-                                attention_mask=attn_mask, causal=causal)
-                return jnp.swapaxes(out, 1, 2)
+                out = self._jfa(query=q, key=k, value=v, attention_mask=attn_mask, causal=causal)
+                return out
             except Exception:
-                # Known that some combinations (esp Pallas) can be picky about shapes/bias. :contentReference[oaicite:5]{index=5}
                 return jax.nn.dot_product_attention(
                     q, k, v,
                     bias=bias,

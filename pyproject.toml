@@ -25,4 +25,4 @@ requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["v2*", "TRM*"]
+include = ["v2*", "TRM*", "TiDAR*"]

@@ -20,6 +20,7 @@ cfg = OmegaConf.merge(
     OmegaConf.load(MODEL_DIR / "Config.yml"),
 )
 MODEL_CFG = cfg.model
+TIDAR_CFG = getattr(cfg, "tidar", None)
 
 
 def _to_dtype(name: str) -> jnp.dtype:
@@ -95,8 +96,12 @@ class NativeJaxSelfAttention(nn.Module):
         )
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
+        draft_len = 0
+        if TIDAR_CFG is not None and hasattr(TIDAR_CFG, "draft_length"):
+            draft_len = int(TIDAR_CFG.draft_length)
+        rope_len = int(MODEL_CFG.context_length) + (2 * draft_len)
         self._rope_sin, self._rope_cos = _build_rope_cache(
-            MODEL_CFG.context_length, self.rotary_dim, self.dtype
+            rope_len, self.rotary_dim, self.dtype
         )
 
     def _rope_from_position_ids(self, position_ids: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:

@@ -1,4 +1,3 @@
-
 from typing import Optional
 from pathlib import Path
 
@@ -28,7 +27,7 @@ def _to_dtype(name: str) -> jnp.dtype:
 PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
 COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
 
-class GiantGPT(nn.Module):
+class TiDAR(nn.Module):
     vocab_size:     int
     context_length: int
     d_model:        int

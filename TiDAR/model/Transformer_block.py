@@ -62,7 +62,7 @@ def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype):
     return sin, cos
 
 class NativeJaxSelfAttention(nn.Module):
-    """Multi‑head self‑attention using jax.nn.dot_product_attention (cuDNN)."""
+    """Multi-head self-attention using jax.nn.dot_product_attention."""
 
     num_heads: int
     qkv_features: int
@@ -72,15 +72,11 @@ class NativeJaxSelfAttention(nn.Module):
     rotary_dim: int = MODEL_CFG.rope_dim
 
     def setup(self):
-        assert (
-            self.qkv_features % self.num_heads == 0
-        ), "qkv_features must be divisible by num_heads"
+        assert self.qkv_features % self.num_heads == 0, "qkv_features must be divisible by num_heads"
         self.head_dim = self.qkv_features // self.num_heads
-        assert (
-            self.num_heads % self.num_kv == 0
-        ), "num_heads must be divisible by num_kv_heads for grouped attention"
-        assert(self.rotary_dim <= self.head_dim), "less than or equal to head_dim"
-        assert(self.rotary_dim % 2 == 0), "rotary_dim must be even"
+        assert self.num_heads % self.num_kv == 0, "num_heads must be divisible by num_kv_heads"
+        assert self.rotary_dim <= self.head_dim, "rotary_dim must be <= head_dim"
+        assert self.rotary_dim % 2 == 0, "rotary_dim must be even"
 
         total_out = self.qkv_features + 2 * self.num_kv * self.head_dim
         self.qkv_proj = nn.Dense(
@@ -99,38 +95,67 @@ class NativeJaxSelfAttention(nn.Module):
         )
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
-        # Precompute rotary embeddings once and slice per call.
         self._rope_sin, self._rope_cos = _build_rope_cache(
             MODEL_CFG.context_length, self.rotary_dim, self.dtype
         )
 
+    def _rope_from_position_ids(self, position_ids: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        pos = position_ids.astype(jnp.int32)
+        sin_base = self._rope_sin[0, :, 0, :]
+        cos_base = self._rope_cos[0, :, 0, :]
+        sin = jnp.take(sin_base, pos, axis=0)
+        cos = jnp.take(cos_base, pos, axis=0)
+        sin = sin[:, :, None, :]
+        cos = cos[:, :, None, :]
+        return sin, cos
+
     @nn.compact
-    def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(
+        self,
+        x,
+        *,
+        deterministic: bool,
+        attn_bias: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        use_kv_cache: bool = False,
+        cur_index: Optional[int] = None,
+        write_to_cache: bool = True,
+        prefix_len: Optional[int] = None,
+        cache_write_len: Optional[int] = None,
+        kv_cache_len: Optional[int] = None,
+    ):
         b, l, _ = x.shape
-        # Flash attention (cuDNN) supports bias only when sequence length is even; fall back otherwise.
-        impl = "cudnn" if (IS_GPU and l >= 128 and l % 2 == 0) else "xla"
+        use_cudnn = IS_GPU and l % 2 == 0 and l >= 2
+        impl = "cudnn" if use_cudnn else "xla"
 
         head_dim = self.head_dim
-        q_size   = self.num_heads * head_dim
-        kv_size  = self.num_kv * head_dim
+        q_size = self.num_heads * head_dim
+        kv_size = self.num_kv * head_dim
 
         qkv = self.qkv_proj(x)
-
         q_chunk, k_chunk, v_chunk = jnp.split(qkv, [q_size, q_size + kv_size], axis=-1)
         q = q_chunk.reshape(b, l, self.num_heads, head_dim)
-        k = k_chunk.reshape(b, l, self.num_kv,  head_dim)
-        v = v_chunk.reshape(b, l, self.num_kv,  head_dim)
+        k = k_chunk.reshape(b, l, self.num_kv, head_dim)
+        v = v_chunk.reshape(b, l, self.num_kv, head_dim)
 
-        if use_kv_cache:
+        group = max(1, self.num_heads // self.num_kv)
+        kv_indices = None
+        if self.num_kv != self.num_heads:
+            kv_indices = jnp.arange(self.num_heads) // group
+
+        if position_ids is not None:
+            sin, cos = self._rope_from_position_ids(position_ids)
+        elif use_kv_cache:
+            assert cur_index is not None, "Need cur_index when use_kv_cache=True"
             sin = jax.lax.dynamic_slice(
                 self._rope_sin,
                 (0, cur_index, 0, 0),
-                (1, 1, 1, self.rotary_dim),
+                (1, l, 1, self.rotary_dim),
             )
             cos = jax.lax.dynamic_slice(
                 self._rope_cos,
                 (0, cur_index, 0, 0),
-                (1, 1, 1, self.rotary_dim),
+                (1, l, 1, self.rotary_dim),
             )
         else:
             sin = self._rope_sin[:, :l, :, :]
@@ -139,9 +164,7 @@ class NativeJaxSelfAttention(nn.Module):
         q = apply_partial_rope(q, sin, cos, self.rotary_dim)
         k = apply_partial_rope(k, sin, cos, self.rotary_dim)
 
-
         if use_kv_cache:
-            assert cur_index is not None, "Need cur_index when use_kv_cache=True"
             cached_k = self.variable(
                 "cache",
                 "k",
@@ -157,36 +180,91 @@ class NativeJaxSelfAttention(nn.Module):
                 self.dtype,
             )
 
-
-            k_to_cache = jnp.swapaxes(k, 1, 2)  # (b, num_kv, l, hd)
+            k_to_cache = jnp.swapaxes(k, 1, 2)
             v_to_cache = jnp.swapaxes(v, 1, 2)
-            if l == 1:
-                cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k_to_cache[:, :, 0, :])
-                cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v_to_cache[:, :, 0, :])
+
+            if write_to_cache:
+                # Standard KV-cache path: append tokens at cur_index with causal bias.
+                assert cur_index is not None, "Need cur_index when use_kv_cache=True"
+                start = (0, 0, jnp.asarray(cur_index, dtype=jnp.int32), 0)
+                cached_k.value = jax.lax.dynamic_update_slice(cached_k.value, k_to_cache, start)
+                cached_v.value = jax.lax.dynamic_update_slice(cached_v.value, v_to_cache, start)
+
+                k_full = jnp.swapaxes(cached_k.value, 1, 2)
+                v_full = jnp.swapaxes(cached_v.value, 1, 2)
+                if kv_cache_len is not None:
+                    k_full = k_full[:, :kv_cache_len, :, :]
+                    v_full = v_full[:, :kv_cache_len, :, :]
+                if kv_indices is not None:
+                    k_full = jnp.take(k_full, kv_indices, axis=2)
+                    v_full = jnp.take(v_full, kv_indices, axis=2)
+                key_len = k_full.shape[1]
+                q_abs = cur_index + jnp.arange(l)
+                k_abs = jnp.arange(key_len)
+                valid = k_abs[None, :] <= q_abs[:, None]
+                base_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
+                base_bias = base_bias[None, None, :, :]
+                if attn_bias is not None:
+                    base_bias = base_bias + attn_bias.astype(self.dtype)
+                y = jax.nn.dot_product_attention(
+                    q, k_full, v_full, bias=base_bias, is_causal=False, implementation=impl
+                )
+                y = y.reshape(b, l, self.qkv_features)
             else:
-                cached_k.value = cached_k.value.at[:, :, cur_index : cur_index + l, :].set(k_to_cache)
-                cached_v.value = cached_v.value.at[:, :, cur_index : cur_index + l, :].set(v_to_cache)
+                # TiDAR decode path: keep prefix cache fixed and apply structured attn_bias.
+                assert prefix_len is not None, "prefix_len is required when write_to_cache=False"
+                assert attn_bias is not None, "attn_bias is required when write_to_cache=False"
 
-            k_full = jnp.swapaxes(cached_k.value, 1, 2)  # (b, context, num_kv, hd)
-            v_full = jnp.swapaxes(cached_v.value, 1, 2)
-            key_len = k_full.shape[1]
-            cur_max = cur_index + (l - 1)
-            valid = jnp.arange(key_len) <= cur_max
-            attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
-            attn_bias = attn_bias[None, None, None, :]
-            y = jax.nn.dot_product_attention(
-                q, k_full, v_full, bias=attn_bias, is_causal=False, implementation=impl
-            )
-            y = y.reshape(b, l, self.qkv_features)
+                # Optionally commit a subset of step tokens into the cache.
+                if cache_write_len is not None and cache_write_len > 0:
+                    write_index = jnp.asarray(prefix_len, dtype=jnp.int32)
+                    k_update = k_to_cache[:, :, :cache_write_len, :]
+                    v_update = v_to_cache[:, :, :cache_write_len, :]
+                    start = (0, 0, write_index, 0)
+                    cached_k.value = jax.lax.dynamic_update_slice(cached_k.value, k_update, start)
+                    cached_v.value = jax.lax.dynamic_update_slice(cached_v.value, v_update, start)
 
+                k_prefix = cached_k.value
+                v_prefix = cached_v.value
+                if kv_cache_len is not None:
+                    k_prefix = k_prefix[:, :, :kv_cache_len, :]
+                    v_prefix = v_prefix[:, :, :kv_cache_len, :]
+                prefix_capacity = k_prefix.shape[2]
+                k_prefix = jnp.swapaxes(k_prefix, 1, 2)
+                v_prefix = jnp.swapaxes(v_prefix, 1, 2)
+                if kv_indices is not None:
+                    k_prefix = jnp.take(k_prefix, kv_indices, axis=2)
+                    v_prefix = jnp.take(v_prefix, kv_indices, axis=2)
+
+                k_step = k if kv_indices is None else jnp.take(k, kv_indices, axis=2)
+                v_step = v if kv_indices is None else jnp.take(v, kv_indices, axis=2)
+                k_full = jnp.concatenate([k_prefix, k_step], axis=1)
+                v_full = jnp.concatenate([v_prefix, v_step], axis=1)
+                prefix_len_safe = jnp.minimum(jnp.asarray(prefix_len, dtype=jnp.int32), prefix_capacity)
+                prefix_valid = jnp.arange(prefix_capacity) < prefix_len_safe
+                prefix_bias = jnp.where(prefix_valid, 0.0, -1e10).astype(self.dtype)
+                prefix_bias = prefix_bias[None, None, None, :]
+                step_bias = jnp.zeros((1, 1, 1, l), dtype=self.dtype)
+                key_valid_bias = jnp.concatenate([prefix_bias, step_bias], axis=-1)
+                full_bias = attn_bias.astype(self.dtype) + key_valid_bias
+                y = jax.nn.dot_product_attention(
+                    q,
+                    k_full,
+                    v_full,
+                    bias=full_bias,
+                    is_causal=False,
+                    implementation=impl,
+                )
+                y = y.reshape(b, l, self.qkv_features)
         else:
-            if False:
-                q = q / jnp.sqrt(head_dim)
-
-            # Use GQA/MQA by passing K/V with num_kv heads directly.
-            k_full = k
-            v_full = v
-            y = jax.nn.dot_product_attention(q, k_full, v_full, is_causal=True, implementation=impl)
+            k_full = k if kv_indices is None else jnp.take(k, kv_indices, axis=2)
+            v_full = v if kv_indices is None else jnp.take(v, kv_indices, axis=2)
+            if attn_bias is None:
+                y = jax.nn.dot_product_attention(q, k_full, v_full, is_causal=True, implementation=impl)
+            else:
+                y = jax.nn.dot_product_attention(
+                    q, k_full, v_full, bias=attn_bias.astype(self.dtype), is_causal=False, implementation=impl
+                )
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)
@@ -195,7 +273,7 @@ class NativeJaxSelfAttention(nn.Module):
 
 
 class TinyTransformerBlock(nn.Module):
-    """Decoder‑style transformer block (GPT) with checkpointing."""
+    """Decoder-style transformer block (GPT)."""
 
     d_model: int
     n_heads: int
@@ -204,7 +282,20 @@ class TinyTransformerBlock(nn.Module):
     dtype: jnp.dtype = COMPUTE_DTYPE
 
     @nn.compact
-    def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(
+        self,
+        x,
+        *,
+        deterministic: bool,
+        attn_bias: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        use_kv_cache: bool = False,
+        cur_index: Optional[int] = None,
+        write_to_cache: bool = True,
+        prefix_len: Optional[int] = None,
+        cache_write_len: Optional[int] = None,
+        kv_cache_len: Optional[int] = None,
+    ):
         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
             residual = h
             h_norm = RMSNorm(name="rms1", dtype=self.dtype, epsilon=1e-5)(h)
@@ -214,13 +305,23 @@ class TinyTransformerBlock(nn.Module):
                 qkv_features=module.d_model,
                 dropout_rate=module.dropout_rate,
                 dtype=module.dtype,
-            )(h_norm, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
+            )(
+                h_norm,
+                deterministic=deterministic,
+                attn_bias=attn_bias,
+                position_ids=position_ids,
+                use_kv_cache=use_kv_cache,
+                cur_index=cur_index,
+                write_to_cache=write_to_cache,
+                prefix_len=prefix_len,
+                cache_write_len=cache_write_len,
+                kv_cache_len=kv_cache_len,
+            )
             h = residual + h_attn
 
             residual = h
             h_norm = RMSNorm(name="rms2", dtype=self.dtype, epsilon=1e-5)(h)
 
-            # Standard SwiGLU: project to 2 * d_ff, split, SiLU gate
             gate_dim = module.d_ff
             proj_dim = gate_dim * 2
 

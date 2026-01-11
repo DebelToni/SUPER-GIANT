@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import core as flax_core
 from jax import config as jax_config
+from omegaconf import OmegaConf
 
 from config_utils import load_config
 from tokenizer_utils import build_custom_tokenizer, load_tokenizer
@@ -21,6 +24,37 @@ from GIANT.v2.smol.jit_inference import init_inference_state, make_prefill_and_d
 
 TRM_OPEN = "<TRM-sudoku>"
 TRM_CLOSE = "</TRM-sudoku>"
+TRM_ROOT = Path(__file__).resolve().parent.parent
+TRM_DEFAULT_CHECKPOINT_DIR = "checkpoints/trm_sudoku"
+
+
+@dataclass
+class TrmSudokuSolver:
+    model: Any
+    params: Any
+    infer_fn: Any
+    checkpoint_path: Path
+    step: int
+
+    def solve(self, puzzle: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+        puzzle = np.asarray(puzzle, dtype=np.int32).reshape(-1)
+
+        if puzzle.size != 81:
+            raise ValueError("Puzzle must be 81 entries for TRM solver.")
+        tokens = jnp.asarray(puzzle[None, :], dtype=jnp.int32)
+        aug_ids = jnp.zeros((1,), dtype=jnp.int32)
+        _logits, q_logit, pred, _state, steps, halted = self.infer_fn(
+            self.params, tokens, aug_ids
+        )
+        pred_np = np.array(pred[0], dtype=np.int32)
+        meta = {
+            "q_logit": float(np.array(q_logit[0])),
+            "steps": int(np.array(steps)),
+            "halted": bool(np.array(halted[0])),
+        }
+        return pred_np, meta
+
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,7 +65,25 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--user_prompt_file", default=None, help="Path to a text file with user prompt.")
     ap.add_argument("--max_new_tokens", type=int, default=256)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--use_trm_solver", action="store_true", help="Solve with TRM sudoku model instead of Python solver.")
+    ap.add_argument("--trm_checkpoint", default=None, help="Path to TRM sudoku checkpoint (.npz).")
+    ap.add_argument(
+        "--trm_checkpoint_dir",
+        default=TRM_DEFAULT_CHECKPOINT_DIR,
+        help="TRM checkpoint dir (relative to TRM data root).",
+    )
+    ap.add_argument(
+        "--trm_config",
+        default=None,
+        help="Path to TRM sudoku config (default: TRM/sudoku/Config.yml).",
+    )
+    ap.add_argument(
+        "--trm_data_root",
+        default=None,
+        help="Override TRM data root for checkpoints/cache.",
+    )
     return ap.parse_args()
+
 
 
 def _to_dtype(name: str) -> jnp.dtype:
@@ -39,6 +91,7 @@ def _to_dtype(name: str) -> jnp.dtype:
         return getattr(jnp, name)
     except AttributeError:
         return jnp.dtype(name)
+
 
 
 def _apply_compute_dtype_override(cfg) -> None:
@@ -66,8 +119,10 @@ def _apply_compute_dtype_override(cfg) -> None:
     print(f"[dtype] Overriding SmolLM compute dtype to {desired}")
 
 
+
 def _format_puzzle(puzzle: np.ndarray) -> str:
     return " ".join(str(int(x)) for x in puzzle.reshape(-1))
+
 
 
 def _generate_puzzle(seed: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -79,6 +134,7 @@ def _generate_puzzle(seed: int) -> Tuple[np.ndarray, np.ndarray]:
     return puzzle, solution
 
 
+
 def _build_prompt(cfg, puzzle_str: str, user_override: Optional[str] = None) -> str:
     system_line = f"{cfg.data.system_prefix} {cfg.data.system_prompt}"
     if user_override:
@@ -88,6 +144,7 @@ def _build_prompt(cfg, puzzle_str: str, user_override: Optional[str] = None) -> 
         user_line = f"{cfg.data.user_prefix} Solve this Sudoku: {puzzle_str}"
     assistant_line = f"{cfg.data.assistant_prefix}"
     return "\n".join([system_line, user_line, assistant_line])
+
 
 
 def _extract_trm_digits(
@@ -128,6 +185,7 @@ def _extract_trm_digits(
     return np.array(digits[:81], dtype=np.int32), inner, open_found, close_found
 
 
+
 def solve_sudoku(puzzle: np.ndarray) -> Optional[np.ndarray]:
     puzzle = np.array(puzzle, dtype=np.int32, copy=True).reshape(-1)
     if puzzle.size != 81:
@@ -159,7 +217,9 @@ def solve_sudoku(puzzle: np.ndarray) -> Optional[np.ndarray]:
         col_mask[c] |= bit
         box_mask[b] |= bit
 
+
     def rec() -> bool:
+
         if not empties:
             return True
 
@@ -211,13 +271,122 @@ def solve_sudoku(puzzle: np.ndarray) -> Optional[np.ndarray]:
     return puzzle if rec() else None
 
 
+ 
+
+def _load_trm_sudoku_cfg(config_path: Optional[str], data_root: Optional[str]) -> Tuple[OmegaConf, Path]:
+    cfg = OmegaConf.merge(
+        OmegaConf.load(TRM_ROOT / "Global_Config.yml"),
+        OmegaConf.load(TRM_ROOT / "model" / "Config.yml"),
+        OmegaConf.load(config_path or (TRM_ROOT / "sudoku" / "Config.yml")),
+    )
+    if data_root is not None:
+        base_root = Path(str(data_root)).resolve()
+        if "paths" not in cfg:
+            cfg.paths = OmegaConf.create({})
+        cfg.paths.data_root = str(base_root)
+    else:
+        base_root = Path(cfg.paths.data_root) if "paths" in cfg and cfg.paths.get("data_root") else TRM_ROOT
+    return cfg, base_root
+
+
+ 
+def _build_trm_sudoku_model(cfg: OmegaConf, *, trm_module) -> Any:
+    m = cfg.model
+    return trm_module.TRM(
+        vocab_size=int(m.vocab_size),
+        context_length=int(m.context_length),
+        d_model=int(m.embedding_size),
+        tiny_layers=int(m.tiny_layers),
+        variant=str(m.variant),
+        num_heads=int(m.num_heads),
+        rope_dim=int(m.rope_dim),
+        d_ff=int(m.feed_forward_size),
+        mixer_hidden=int(m.mixer_hidden),
+        dropout_rate=float(m.dropout_rate),
+        activation=str(m.activation),
+        add_positional_embedding=bool(getattr(m, "add_positional_embedding", True)),
+        L_cycles=int(m.recursion.L_cycles),
+        H_cycles=int(m.recursion.H_cycles),
+        max_supervision_steps=int(m.recursion.max_supervision_steps),
+        enable_early_stop=bool(m.recursion.enable_early_stop),
+        halt_threshold_logit=float(m.recursion.halt_threshold_logit),
+        halt_exploration_prob=float(getattr(m.recursion, "halt_exploration_prob", 0.0)),
+        no_act_continue=bool(getattr(m.recursion, "no_act_continue", True)),
+        aug_enabled=bool(m.augmentation.enabled),
+        aug_num_embeddings=int(m.augmentation.num_embeddings),
+        aug_default_id=int(m.augmentation.default_id),
+    )
+
+
+ 
+def _resolve_trm_checkpoint(base_root: Path, checkpoint_path: Optional[str], checkpoint_dir: str) -> Path:
+    if checkpoint_path:
+        path = Path(checkpoint_path)
+        if not path.is_absolute():
+            path = (base_root / path).resolve()
+        return path
+
+    ckpt_dir = Path(checkpoint_dir)
+    if not ckpt_dir.is_absolute():
+        ckpt_dir = (base_root / ckpt_dir).resolve()
+    from TRM.common import checkpoint_manager as trm_checkpoint_manager
+
+    latest = trm_checkpoint_manager.latest(str(ckpt_dir))
+    if latest is None:
+        raise FileNotFoundError(f"No TRM checkpoints found in {ckpt_dir}")
+    return Path(latest)
+
+
+ 
+def build_trm_sudoku_solver(
+    *,
+    config_path: Optional[str],
+    data_root: Optional[str],
+    checkpoint_path: Optional[str],
+    checkpoint_dir: str,
+) -> TrmSudokuSolver:
+
+    cfg, base_root = _load_trm_sudoku_cfg(config_path, data_root)
+    ckpt_path = _resolve_trm_checkpoint(base_root, checkpoint_path, checkpoint_dir)
+
+    from TRM.common import checkpoint_manager as trm_checkpoint_manager
+    from TRM.sudoku import jit_inference as sudoku_inference
+
+    params_np, step = trm_checkpoint_manager.load(str(ckpt_path))
+    params = jax.tree_util.tree_map(lambda x: jnp.asarray(x), params_np)
+    if isinstance(params, dict):
+        params = flax_core.freeze(params)
+
+    model = _build_trm_sudoku_model(cfg, trm_module=sudoku_inference)
+    infer_fn = sudoku_inference.make_jitted_inference(model)
+    return TrmSudokuSolver(
+        model=model,
+        params=params,
+        infer_fn=infer_fn,
+        checkpoint_path=ckpt_path,
+        step=int(step),
+    )
+
+
+ 
 def main() -> None:
+
     args = parse_args()
     cfg = load_config()
 
     build_custom_tokenizer(force=False)
     tokenizer = load_tokenizer()
     _apply_compute_dtype_override(cfg)
+
+    trm_solver = None
+    if args.use_trm_solver:
+        trm_solver = build_trm_sudoku_solver(
+            config_path=args.trm_config,
+            data_root=args.trm_data_root,
+            checkpoint_path=args.trm_checkpoint,
+            checkpoint_dir=args.trm_checkpoint_dir,
+        )
+        print(f"[trm] Loaded solver checkpoint {trm_solver.checkpoint_path} (step {trm_solver.step})")
 
     prompt_override = args.user_prompt
     if args.user_prompt_file:
@@ -297,7 +466,17 @@ def main() -> None:
             print(full_text[-800:])
         return
 
-    solved = solve_sudoku(extracted)
+    solver_label = "python"
+    if trm_solver is not None:
+        solved, trm_meta = trm_solver.solve(extracted)
+        solver_label = "trm"
+        print(
+            f"[trm] q_logit={trm_meta['q_logit']:+.3f} steps={trm_meta['steps']} "
+            f"halted={trm_meta['halted']}"
+        )
+    else:
+        solved = solve_sudoku(extracted)
+
     print("=== LLM PARSED TRM CALL ===")
     print(f"{TRM_OPEN} {_format_puzzle(extracted)} {TRM_CLOSE}")
     matches_input = bool(np.all(extracted.reshape(-1) == puzzle.reshape(-1)))
@@ -310,7 +489,7 @@ def main() -> None:
         print("Solver failed on extracted puzzle.")
         return
 
-    print("=== SOLVER OUTPUT ===")
+    print(f"=== SOLVER OUTPUT ({solver_label}) ===")
     print(_format_puzzle(solved))
     if solution is not None:
         match = bool(np.all(solved.reshape(-1) == solution.reshape(-1)))

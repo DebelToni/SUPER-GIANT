@@ -71,6 +71,7 @@ def _run_single(
     prompt_text: str,
     seed: int,
     max_new_tokens: int,
+    trm_solver: Optional[inference.TrmSudokuSolver],
 ) -> Dict[str, Any]:
     puzzle, solution = inference._generate_puzzle(seed)
     puzzle_str = inference._format_puzzle(puzzle)
@@ -110,9 +111,12 @@ def _run_single(
 
     solved_match = False
     if extracted is not None:
-        solved = inference.solve_sudoku(extracted)
+        if trm_solver is not None:
+            solved, _meta = trm_solver.solve(extracted)
+        else:
+            solved = inference.solve_sudoku(extracted)
         if solved is not None and solution is not None:
-            solved_match = bool(np.all(solved.reshape(-1) == solution.reshape(-1)))
+            solved_match = bool(np.all(np.asarray(solved).reshape(-1) == solution.reshape(-1)))
 
     ok = bool(open_found and close_found and matches_input and solved_match)
     return {
@@ -132,6 +136,23 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--output_json", default=None, help="Where to write results.")
     ap.add_argument("--max_new_tokens", type=int, default=512)
     ap.add_argument("--num_runs", type=int, default=10)
+    ap.add_argument("--use_trm_solver", action="store_true", help="Use TRM sudoku model for solving step.")
+    ap.add_argument("--trm_checkpoint", default=None, help="Path to TRM sudoku checkpoint (.npz).")
+    ap.add_argument(
+        "--trm_checkpoint_dir",
+        default=inference.TRM_DEFAULT_CHECKPOINT_DIR,
+        help="TRM checkpoint dir (relative to TRM data root).",
+    )
+    ap.add_argument(
+        "--trm_config",
+        default=None,
+        help="Path to TRM sudoku config (default: TRM/sudoku/Config.yml).",
+    )
+    ap.add_argument(
+        "--trm_data_root",
+        default=None,
+        help="Override TRM data root for checkpoints/cache.",
+    )
     return ap.parse_args()
 
 
@@ -142,6 +163,16 @@ def main() -> None:
     build_custom_tokenizer(force=False)
     tokenizer = load_tokenizer()
     inference._apply_compute_dtype_override(cfg)
+
+    trm_solver = None
+    if args.use_trm_solver:
+        trm_solver = inference.build_trm_sudoku_solver(
+            config_path=args.trm_config,
+            data_root=args.trm_data_root,
+            checkpoint_path=args.trm_checkpoint,
+            checkpoint_dir=args.trm_checkpoint_dir,
+        )
+        print(f"[trm] Using solver checkpoint {trm_solver.checkpoint_path} (step {trm_solver.step})")
 
     prompts_path = (
         Path(args.prompts_json)
@@ -197,6 +228,7 @@ def main() -> None:
                 prompt["text"],
                 seed,
                 args.max_new_tokens,
+                trm_solver,
             )
             runs.append(run)
         success = sum(int(r["ok"]) for r in runs)
@@ -216,6 +248,9 @@ def main() -> None:
 
     output = {
         "checkpoint": str(ckpt_path),
+        "solver": "trm" if trm_solver is not None else "python",
+        "trm_checkpoint": str(trm_solver.checkpoint_path) if trm_solver is not None else None,
+        "trm_step": trm_solver.step if trm_solver is not None else None,
         "max_new_tokens": args.max_new_tokens,
         "num_runs": args.num_runs,
         "total_prompts": len(results),

@@ -1,2 +1,0 @@
-[vllm.general_plugins]
-register_toy_decoder = toy_vllm_model.plugin:register

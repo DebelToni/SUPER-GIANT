@@ -1,4 +1,0 @@
-vllm>=0.13.0
-torch
-transformers
-safetensors

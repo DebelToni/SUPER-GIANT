@@ -232,6 +232,16 @@ def build_decode_position_ids(prefix_len: jnp.ndarray, draft_len: int) -> jnp.nd
     return jnp.concatenate([pos_verify, pos_predraft], axis=0)  # length K + K*K
 
 
+def build_decode_position_ids_template(draft_len: int) -> jnp.ndarray:
+    """Build position offsets template for decode step (0-indexed)."""
+    pos_verify = jnp.arange(draft_len, dtype=jnp.int32)
+    r = jnp.arange(1, draft_len + 1, dtype=jnp.int32)[:, None]
+    t = jnp.arange(draft_len, dtype=jnp.int32)[None, :]
+    offsets = (r + t).reshape(-1)
+    pos_predraft = offsets
+    return jnp.concatenate([pos_verify, pos_predraft], axis=0)
+
+
 @lru_cache(maxsize=None)
 def build_decode_bias_template(cache_len: int, draft_len: int, bias_value: float) -> jnp.ndarray:
     """
@@ -436,6 +446,15 @@ def make_tidar_generate_fn(
     prefill_bias = jnp.zeros((1, 1, draft_len, cache_len + draft_len), dtype=decode_bias.dtype)
     prefill_bias = jax.device_put(prefill_bias)
 
+    step_position_offsets = build_decode_position_ids_template(draft_len)
+    step_position_offsets = jax.device_put(step_position_offsets)
+
+    predraft_masks = jnp.full((draft_len * draft_len,), jnp.asarray(mask_id, dtype=jnp.int32), dtype=jnp.int32)
+    predraft_masks = jax.device_put(predraft_masks)
+
+    idx_k = jnp.arange(draft_len, dtype=jnp.int32)
+    idx_k = jax.device_put(idx_k)
+
     def decode_apply(params, cache_vars, step_tokens, step_pos_ids, prefix_len):
         # step_tokens: [1, q_len]
         logits = model.apply(
@@ -508,9 +527,6 @@ def make_tidar_generate_fn(
         # Optional: write initial draft tokens into out_ids? (Not committed yet) -> NO.
         # They are proposals only.
 
-        predraft_masks = jnp.full((draft_len * draft_len,), jnp.asarray(mask_id, dtype=jnp.int32), dtype=jnp.int32)
-        idx_k = jnp.arange(draft_len, dtype=jnp.int32)
-
         def cond_fn(state):
             _rng, _cache, _out, _prefix_len, _generated, _draft_toks, _draft_logits, _done = state
             return (_generated < max_steps) & (~_done)
@@ -520,7 +536,7 @@ def make_tidar_generate_fn(
 
             # Step tokens = [VERIFY(K)=draft_toks | PREDRAFT(K*K)=mask]
             step_tokens = jnp.concatenate([draft_toks, predraft_masks], axis=0).astype(jnp.int32)  # [q_len]
-            step_pos_ids = build_decode_position_ids(prefix_len, draft_len)[None, :]               # [1,q_len]
+            step_pos_ids = (prefix_len + step_position_offsets)[None, :]                          # [1,q_len]
 
             logits = decode_apply(
                 params,
@@ -531,19 +547,29 @@ def make_tidar_generate_fn(
             )[0]  # [q_len, V]
 
             verify_logits = logits[:draft_len, :]  # [K,V]
-            cand_logits = logits[draft_len:, :].reshape((draft_len, draft_len, -1))  # [K,K,V]
 
-            # Sample candidates (vectorized): sample for all K*K positions in one call
-            rng, sub_cand = jax.random.split(rng)
-            flat_cand = cand_logits.reshape((-1, cand_logits.shape[-1]))  # [K*K,V]
-            _, flat_cand_tokens = sample_tokens(sub_cand, flat_cand, temperature=temperature, top_k=top_k)  # [K*K]
-            cand_tokens = flat_cand_tokens.reshape((draft_len, draft_len)).astype(jnp.int32)  # [K,K]
-
-            # Rejection sampling to choose r and committed tokens (in JAX)
             if always_accept:
                 r = jnp.asarray(draft_len, dtype=jnp.int32)
                 committed_full = draft_toks
+
+                # Sample only the last candidate block (r = K)
+                rng, sub_cand = jax.random.split(rng)
+                start = draft_len + (draft_len - 1) * draft_len
+                end = draft_len + draft_len * draft_len
+                cand_logits_last = logits[start:end, :].reshape((draft_len, -1))
+                _, draft_toks2 = sample_tokens(sub_cand, cand_logits_last, temperature=temperature, top_k=top_k)
+                draft_toks2 = draft_toks2.astype(jnp.int32)
+                draft_lgts2 = cand_logits_last
             else:
+                cand_logits = logits[draft_len:, :].reshape((draft_len, draft_len, -1))  # [K,K,V]
+
+                # Sample candidates (vectorized): sample for all K*K positions in one call
+                rng, sub_cand = jax.random.split(rng)
+                flat_cand = cand_logits.reshape((-1, cand_logits.shape[-1]))  # [K*K,V]
+                _, flat_cand_tokens = sample_tokens(sub_cand, flat_cand, temperature=temperature, top_k=top_k)  # [K*K]
+                cand_tokens = flat_cand_tokens.reshape((draft_len, draft_len)).astype(jnp.int32)  # [K,K]
+
+                # Rejection sampling to choose r and committed tokens (in JAX)
                 rng, r, committed_full = rejection_sample_jax(
                     rng,
                     draft_ids=draft_toks,
@@ -552,6 +578,11 @@ def make_tidar_generate_fn(
                     temperature=temperature,
                     top_k=top_k,
                 )
+
+                # Next draft comes from candidate block (r-1), not eff_r
+                block_idx = jnp.clip(r - 1, 0, draft_len - 1)
+                draft_toks2 = cand_tokens[block_idx]          # [K]
+                draft_lgts2 = cand_logits[block_idx]          # [K,V]
 
             remaining = (max_steps - generated).astype(jnp.int32)
             eff_r = jnp.minimum(r, remaining)
@@ -583,11 +614,6 @@ def make_tidar_generate_fn(
             generated2 = generated + eff_r
 
             done2 = done | (generated2 >= max_steps) | has_eos
-
-            # Next draft comes from candidate block (r-1), not eff_r
-            block_idx = jnp.clip(r - 1, 0, draft_len - 1)
-            draft_toks2 = cand_tokens[block_idx]          # [K]
-            draft_lgts2 = cand_logits[block_idx]          # [K,V]
 
             return (rng, cache, out, prefix_len2, generated2, draft_toks2, draft_lgts2, done2)
 
@@ -728,7 +754,7 @@ def main() -> None:
 
     # Output buffer aligned with cache positions (length = cache_len).
     # IMPORTANT: do this on host to avoid dynamic slice sizes inside jit.
-    out_host = np.full((cache_len,), pad_token_id, dtype=np.int32)
+    out_host = np.full((required_cache_len,), pad_token_id, dtype=np.int32)
     out_host[:prompt_len] = prompt_ids
     out_ids = jax.device_put(jnp.asarray(out_host))
 

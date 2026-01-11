@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +20,8 @@ if str(REPO_ROOT) not in sys.path:
 from TiDAR.model.TiDAR import TiDAR
 from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embedding_params
 from v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
+
+DEFAULT_CACHE_BUCKETS: Tuple[int, ...] = (256, 512, 1024, 2048, 4096)
 
 
 def load_configs() -> OmegaConf:
@@ -300,20 +303,276 @@ def build_tidar_decode_bias(
     return bias[None, None, :, :]
 
 
+@lru_cache(maxsize=None)
+def build_prefill_bias_template(max_seq_len: int, draft_len: int, bias_value: float) -> jnp.ndarray:
+    # --- TiDAR-specific: Fig.7 prefill mask, cached and sliced per request.
+    return build_tidar_prefill_bias(prompt_len=max_seq_len, draft_len=draft_len, bias_value=bias_value)
+
+
+@lru_cache(maxsize=None)
+def build_decode_bias_template(cache_len: int, draft_len: int, bias_value: float) -> jnp.ndarray:
+    # --- TiDAR-specific: constant draft->draft + draft->prefix template.
+    step_len = draft_len + (draft_len * draft_len)
+    key_len = cache_len + step_len
+
+    q_idx = jnp.arange(step_len)[:, None]
+    k_idx = jnp.arange(key_len)[None, :]
+
+    is_verify_q = q_idx < draft_len
+    is_cand_q = q_idx >= draft_len
+    is_prefix_k = k_idx < cache_len
+    is_step_k = k_idx >= cache_len
+
+    step_k_idx = k_idx - cache_len
+    is_verify_k = is_step_k & (step_k_idx < draft_len)
+    is_cand_k = is_step_k & (step_k_idx >= draft_len)
+
+    allow_verify_to_prefix = is_verify_q & is_prefix_k
+    allow_verify_to_verify = is_verify_q & is_verify_k & (step_k_idx <= q_idx)
+
+    cand_q_offset = q_idx - draft_len
+    cand_k_offset = step_k_idx - draft_len
+    cand_q_block = cand_q_offset // draft_len
+    cand_k_block = cand_k_offset // draft_len
+    cand_r = cand_q_block + 1
+
+    allow_cand_to_prefix = is_cand_q & is_prefix_k
+    allow_cand_to_verify = is_cand_q & is_verify_k & (step_k_idx < cand_r)
+    allow_cand_to_cand = is_cand_q & is_cand_k & (cand_q_block == cand_k_block)
+
+    allow = (
+        allow_verify_to_prefix
+        | allow_verify_to_verify
+        | allow_cand_to_prefix
+        | allow_cand_to_verify
+        | allow_cand_to_cand
+    )
+
+    bias = jnp.where(allow, 0.0, bias_value)
+    return bias[None, None, :, :]
+
+
+def parse_cache_buckets(raw: Optional[str], *, context_length: int) -> Tuple[int, ...]:
+    if raw is None:
+        return tuple(b for b in DEFAULT_CACHE_BUCKETS if b <= context_length)
+    buckets = tuple(sorted({int(v) for v in raw.split(",") if v.strip()}))
+    return tuple(b for b in buckets if b <= context_length)
+
+
+def select_cache_bucket(required_len: int, buckets: Sequence[int]) -> int:
+    for bucket in buckets:
+        if bucket >= required_len:
+            return bucket
+    raise ValueError(f"No cache bucket >= {required_len} (available: {buckets})")
+
+
+def init_kv_cache(model: TiDAR, *, batch_size: int, pad_token_id: int) -> object:
+    dummy = jnp.full((batch_size, 1), pad_token_id, dtype=jnp.int32)
+    variables = model.init(
+        {"params": jax.random.PRNGKey(0)},
+        dummy,
+        deterministic=True,
+        use_kv_cache=True,
+        cur_index=0,
+        write_to_cache=True,
+    )
+    return variables["cache"]
+
+
+def prefill_prompt_cache(
+    model: TiDAR,
+    params,
+    cache_vars,
+    prompt_ids: np.ndarray,
+    *,
+    kv_cache_len: int,
+) -> Tuple[object, int]:
+    prompt_ids = np.asarray(prompt_ids, dtype=np.int32)
+    if prompt_ids.ndim == 1:
+        prompt_ids = prompt_ids[None, :]
+    batch_size, prompt_len = prompt_ids.shape
+    if prompt_len == 0:
+        return cache_vars, 0
+
+    position_ids = np.arange(prompt_len, dtype=np.int32)
+    position_ids = np.broadcast_to(position_ids[None, :], (batch_size, prompt_len))
+
+    _, mutated = model.apply(
+        {"params": params, "cache": cache_vars},
+        jnp.asarray(prompt_ids),
+        deterministic=True,
+        use_kv_cache=True,
+        write_to_cache=True,
+        cur_index=0,
+        position_ids=jnp.asarray(position_ids),
+        kv_cache_len=kv_cache_len,
+        mutable=["cache"],
+    )
+    return mutated["cache"], prompt_len
+
+
+def make_prefill_draft_fn(
+    model: TiDAR,
+    *,
+    cache_len: int,
+    prefill_bias: jnp.ndarray,
+):
+    prefill_bias = jax.device_put(prefill_bias)
+
+    @jax.jit
+    def prefill_draft(params, cache_vars, tokens, position_ids, prefix_len):
+        logits = model.apply(
+            {"params": params, "cache": cache_vars},
+            tokens,
+            deterministic=True,
+            use_kv_cache=True,
+            write_to_cache=False,
+            prefix_len=prefix_len,
+            attn_bias=prefill_bias,
+            position_ids=position_ids,
+            kv_cache_len=cache_len,
+        )
+        return logits
+
+    return prefill_draft
+
+
+def make_decode_step_fn(
+    model: TiDAR,
+    *,
+    cache_len: int,
+    draft_len: int,
+    bias_value: float,
+):
+    decode_bias = build_decode_bias_template(cache_len, draft_len, bias_value)
+    decode_bias = jax.device_put(decode_bias)
+
+    @jax.jit
+    def decode_step(params, cache_vars, tokens, position_ids, prefix_len):
+        logits = model.apply(
+            {"params": params, "cache": cache_vars},
+            tokens,
+            deterministic=True,
+            use_kv_cache=True,
+            write_to_cache=False,
+            prefix_len=prefix_len,
+            attn_bias=decode_bias,
+            position_ids=position_ids,
+            kv_cache_len=cache_len,
+        )
+        return logits
+
+    return decode_step
+
+
+def commit_tokens_to_cache(
+    model: TiDAR,
+    params,
+    cache_vars,
+    *,
+    committed: np.ndarray,
+    prefix_len: int,
+    kv_cache_len: int,
+) -> Tuple[object, int]:
+    committed = np.asarray(committed, dtype=np.int32)
+    if committed.size == 0:
+        return cache_vars, prefix_len
+
+    tokens = committed[None, :]
+    batch_size, step_len = tokens.shape
+    position_ids = np.arange(prefix_len, prefix_len + step_len, dtype=np.int32)
+    position_ids = np.broadcast_to(position_ids[None, :], (batch_size, step_len))
+
+    _, mutated = model.apply(
+        {"params": params, "cache": cache_vars},
+        jnp.asarray(tokens),
+        deterministic=True,
+        use_kv_cache=True,
+        write_to_cache=True,
+        cur_index=prefix_len,
+        position_ids=jnp.asarray(position_ids),
+        kv_cache_len=kv_cache_len,
+        mutable=["cache"],
+    )
+    return mutated["cache"], prefix_len + step_len
+
+
+def build_prefill_position_ids(prefix_len: int, draft_len: int) -> np.ndarray:
+    """Positions for the prefill K mask tokens."""
+    return np.arange(prefix_len, prefix_len + draft_len, dtype=np.int32)
+
+
 def build_decode_position_ids(prefix_len: int, draft_len: int) -> np.ndarray:
-    pos_prefix = np.arange(prefix_len, dtype=np.int32)
-    pos_verify = prefix_len + np.arange(draft_len, dtype=np.int32)
+    """Positions for TiDAR decode layout [VERIFY | PREDRAFT]."""
+    pos_verify = np.arange(prefix_len, prefix_len + draft_len, dtype=np.int32)
+    offsets = np.arange(1, draft_len + 1, dtype=np.int32)[:, None] + np.arange(
+        draft_len, dtype=np.int32
+    )[None, :]
+    pos_predraft = prefix_len + offsets.reshape(-1)
+    return np.concatenate([pos_verify, pos_predraft], axis=0)
 
-    r_offsets = np.arange(1, draft_len + 1, dtype=np.int32)
-    local_offsets = np.arange(draft_len, dtype=np.int32)
-    pos_predraft = prefix_len + r_offsets[:, None] + local_offsets[None, :]
-    pos_predraft = pos_predraft.ravel()
 
-    return np.concatenate([pos_prefix, pos_verify, pos_predraft])
+def sanity_check_cached_decode(
+    *,
+    model: TiDAR,
+    params,
+    cache_vars,
+    cache_len: int,
+    prefix_ids: np.ndarray,
+    draft_tokens: np.ndarray,
+    mask_id: int,
+    draft_len: int,
+    bias_value: float,
+) -> None:
+    prefix_len = int(prefix_ids.shape[0])
+    predraft_masks = np.full((draft_len * draft_len,), mask_id, dtype=np.int32)
+    step_tokens = np.concatenate([draft_tokens, predraft_masks], axis=0)
+    step_len = step_tokens.shape[0]
+    position_ids = build_decode_position_ids(prefix_len, draft_len)
+    if position_ids.shape[0] != step_len:
+        raise ValueError(
+            f"Decode position ids length {position_ids.shape[0]} != step_len {step_len}"
+        )
+
+    decode_fn = make_decode_step_fn(
+        model,
+        cache_len=cache_len,
+        draft_len=draft_len,
+        bias_value=bias_value,
+    )
+    cached_logits = decode_fn(
+        params,
+        cache_vars,
+        jnp.asarray(step_tokens[None, :], dtype=jnp.int32),
+        jnp.asarray(position_ids[None, :], dtype=jnp.int32),
+        jnp.asarray(prefix_len, dtype=jnp.int32),
+    )
+    cached_logits = np.asarray(cached_logits[0])
+
+    full_tokens = np.concatenate([prefix_ids, step_tokens], axis=0)
+    full_position_ids = np.concatenate(
+        [np.arange(prefix_len, dtype=np.int32), position_ids], axis=0
+    )
+    full_bias = build_tidar_decode_bias(
+        prefix_len=prefix_len,
+        draft_len=draft_len,
+        bias_value=bias_value,
+    )
+    full_logits = model.apply(
+        {"params": params},
+        jnp.asarray(full_tokens[None, :], dtype=jnp.int32),
+        deterministic=True,
+        attn_bias=full_bias,
+        position_ids=jnp.asarray(full_position_ids[None, :], dtype=jnp.int32),
+    )
+    full_logits = np.asarray(full_logits[0, prefix_len:])
+
+    max_diff = float(np.max(np.abs(full_logits - cached_logits)))
+    print(f"[sanity] cached vs full max diff: {max_diff:.6f}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser("TiDAR inference (no KV cache)")
+    parser = argparse.ArgumentParser("TiDAR inference (KV cache)")
     parser.add_argument("--checkpoint", type=str, default="latest")
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--prompt", type=str, default="Once upon")
@@ -324,6 +583,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--strip_eos", action="store_true")
     parser.add_argument("--always_accept", action="store_true")
+    parser.add_argument("--cache_buckets", type=str, default=None)
+    parser.add_argument("--sanity_check", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 
@@ -355,6 +616,18 @@ def main() -> None:
     if prompt_ids.size == 0:
         raise ValueError("Prompt produced zero tokens. Provide non-empty text.")
 
+    prompt_len = int(prompt_ids.shape[0])
+    cache_buckets = parse_cache_buckets(args.cache_buckets, context_length=context_length)
+    if not cache_buckets:
+        raise ValueError("No valid cache buckets available within context length.")
+    required_cache_len = prompt_len + max_steps
+    if required_cache_len > context_length:
+        raise ValueError(
+            f"prompt_len + max_steps ({required_cache_len}) exceeds context_length {context_length}."
+        )
+    cache_len = select_cache_bucket(required_cache_len, cache_buckets)
+    print(f"Using cache bucket: {cache_len}")
+
     base_token = getattr(cfg.tokenizer, "mask_token_override", None) or "[MASK]"
     mask_token, mask_id, added_tokens = ensure_tidar_mask_token(tokenizer, base_token=base_token)
     if added_tokens:
@@ -371,42 +644,55 @@ def main() -> None:
     if added_rows:
         print(f"[checkpoint] expanded embeddings by {added_rows} rows for TiDAR mask token")
 
+    params = jax.device_put(params)
+
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+
+    cache_vars = init_kv_cache(model, batch_size=1, pad_token_id=pad_token_id)
+    cache_vars = jax.device_put(cache_vars)
+
+    # --- TiDAR-specific: prefill cache with committed prompt tokens only.
+    cache_vars, cache_index = prefill_prompt_cache(
+        model,
+        params,
+        cache_vars,
+        prompt_ids,
+        kv_cache_len=cache_len,
+    )
+
     np_rng = np.random.default_rng(args.seed)
 
-    @jax.jit
-    def run_model(params, tokens, attn_bias, position_ids):
-        return model.apply(
-            {"params": params},
-            tokens,
-            deterministic=True,
-            attn_bias=attn_bias,
-            position_ids=position_ids,
-        )
+    # --- TiDAR-specific: prefill draft using cached prefix + precomputed Fig.7 mask.
+    prefill_template = build_prefill_bias_template(context_length, draft_len, bias_value)
+    prefill_slice = prefill_template[:, :, :draft_len, : (draft_len + prompt_len)]
+    if cache_len > prompt_len:
+        pad_width = cache_len - prompt_len
+        pad = jnp.zeros((1, 1, draft_len, pad_width), dtype=prefill_slice.dtype)
+        prefill_bias = jnp.concatenate([prefill_slice, pad], axis=-1)
+    else:
+        prefill_bias = prefill_slice
 
-    # --- TiDAR-specific: prefill with K masks then prompt.
-    prompt_len = int(prompt_ids.shape[0])
-    prefill_masks = np.full((draft_len,), mask_id, dtype=np.int32)
-    prefill_tokens = np.concatenate([prefill_masks, prompt_ids], axis=0)
-    prefill_position_ids = np.concatenate(
-        [
-            np.arange(prompt_len, prompt_len + draft_len, dtype=np.int32),
-            np.arange(prompt_len, dtype=np.int32),
-        ]
+    prefill_draft_fn = make_prefill_draft_fn(
+        model,
+        cache_len=cache_len,
+        prefill_bias=prefill_bias,
     )
-    prefill_bias = build_tidar_prefill_bias(
-        prompt_len=prompt_len,
-        draft_len=draft_len,
-        bias_value=bias_value,
-    )
+
+    prefill_masks = jnp.full((1, draft_len), mask_id, dtype=jnp.int32)
+    prefill_position_ids = build_prefill_position_ids(cache_index, draft_len)
 
     prefill_start = time.perf_counter()
-    prefill_logits = run_model(
+    prefill_logits = prefill_draft_fn(
         params,
-        jnp.asarray(prefill_tokens[None, :], dtype=jnp.int32),
-        prefill_bias,
+        cache_vars,
+        prefill_masks,
         jnp.asarray(prefill_position_ids[None, :], dtype=jnp.int32),
+        jnp.asarray(cache_index, dtype=jnp.int32),
     )
-    prefill_logits = np.asarray(prefill_logits[0, :draft_len])
+    prefill_logits.block_until_ready()
+    prefill_logits = np.asarray(prefill_logits[0])
     draft_tokens = sample_from_logits(
         prefill_logits,
         rng=np_rng,
@@ -421,36 +707,50 @@ def main() -> None:
     stop_on_eos = bool(cfg.inference.stop_on_eos)
     eos_id = tokenizer.eos_token_id
 
-    decode_start = time.perf_counter()
-    while generated < max_steps:
-        prefix_len = int(prefix_ids.shape[0])
-        step_len = prefix_len + draft_len + (draft_len * draft_len)
-        if step_len > context_length:
-            raise ValueError(
-                f"Step length {step_len} exceeds context_length {context_length}. "
-                "Reduce draft_len or prompt length."
-            )
-
-        # --- TiDAR-specific: decode layout = prefix | verify | predraft masks.
-        predraft_masks = np.full((draft_len * draft_len,), mask_id, dtype=np.int32)
-        step_tokens = np.concatenate([prefix_ids, draft_tokens, predraft_masks], axis=0)
-        step_position_ids = build_decode_position_ids(prefix_len, draft_len)
-        step_bias = build_tidar_decode_bias(
-            prefix_len=prefix_len,
+    if args.sanity_check:
+        sanity_check_cached_decode(
+            model=model,
+            params=params,
+            cache_vars=cache_vars,
+            cache_len=cache_len,
+            prefix_ids=prefix_ids,
+            draft_tokens=draft_tokens,
+            mask_id=mask_id,
             draft_len=draft_len,
             bias_value=bias_value,
         )
 
-        step_logits = run_model(
+    decode_fn = make_decode_step_fn(
+        model,
+        cache_len=cache_len,
+        draft_len=draft_len,
+        bias_value=bias_value,
+    )
+
+    decode_start = time.perf_counter()
+    while generated < max_steps:
+        step_len = draft_len + (draft_len * draft_len)
+
+        # --- TiDAR-specific: decode layout = verify | predraft masks (prefix in KV cache).
+        predraft_masks = np.full((draft_len * draft_len,), mask_id, dtype=np.int32)
+        step_tokens = np.concatenate([draft_tokens, predraft_masks], axis=0)
+        step_position_ids = build_decode_position_ids(cache_index, draft_len)
+        if step_position_ids.shape[0] != step_len:
+            raise ValueError(
+                f"Decode position ids length {step_position_ids.shape[0]} != step_len {step_len}"
+            )
+
+        step_logits = decode_fn(
             params,
+            cache_vars,
             jnp.asarray(step_tokens[None, :], dtype=jnp.int32),
-            step_bias,
             jnp.asarray(step_position_ids[None, :], dtype=jnp.int32),
+            jnp.asarray(cache_index, dtype=jnp.int32),
         )
         step_logits = np.asarray(step_logits[0])
 
-        verify_logits = step_logits[prefix_len: prefix_len + draft_len]
-        cand_logits = step_logits[prefix_len + draft_len :].reshape(draft_len, draft_len, -1)
+        verify_logits = step_logits[:draft_len]
+        cand_logits = step_logits[draft_len:].reshape(draft_len, draft_len, -1)
 
         candidate_tokens = np.zeros((draft_len, draft_len), dtype=np.int32)
         for block_idx in range(draft_len):
@@ -478,19 +778,21 @@ def main() -> None:
         remaining = max_steps - generated
         if committed.shape[0] > remaining:
             committed = committed[:remaining]
-            prefix_ids = np.concatenate([prefix_ids, committed], axis=0)
-            generated = max_steps
-            break
 
-        block_idx = min(max(r - 1, 0), draft_len - 1)
-        next_draft_tokens = candidate_tokens[block_idx]
-        next_draft_logits = cand_logits[block_idx]
+        cache_vars, cache_index = commit_tokens_to_cache(
+            model,
+            params,
+            cache_vars,
+            committed=committed,
+            prefix_len=cache_index,
+            kv_cache_len=cache_len,
+        )
 
         prefix_ids = np.concatenate([prefix_ids, committed], axis=0)
-        draft_tokens = next_draft_tokens
-        draft_logits = next_draft_logits
-
         generated += int(committed.shape[0])
+        if generated >= max_steps:
+            break
+
         if stop_on_eos and eos_id is not None:
             eos_hits = np.where(committed == eos_id)[0]
             if eos_hits.size > 0:
@@ -498,8 +800,9 @@ def main() -> None:
                 prefix_ids = prefix_ids[: -(committed.shape[0] - cut)]
                 break
 
-        if generated >= max_steps:
-            break
+        block_idx = min(max(r - 1, 0), draft_len - 1)
+        draft_tokens = candidate_tokens[block_idx]
+        draft_logits = cand_logits[block_idx]
 
     decode_time = time.perf_counter() - decode_start
 
@@ -517,7 +820,7 @@ def main() -> None:
     if args.verbose:
         toks_per_s = (generated / decode_time) if decode_time > 0 else float("inf")
         print("\n[perf]")
-        print(f"prompt_tokens: {prompt_len}")
+        print(f"prompt_tokens: {prompt_ids.shape[0]}")
         print(f"generated_tokens: {generated}")
         print(f"prefill_time_s: {prefill_time:.6f}")
         print(f"decode_time_s:  {decode_time:.6f}")

@@ -14,9 +14,9 @@ from config_utils import load_config
 from tokenizer_utils import build_custom_tokenizer, load_tokenizer
 
 
-from v2.smol.GiantGPT import GiantGPT
-from v2.smol.checkpoint_io import load_npz
-from v2.smol.jit_inference import init_inference_state, make_prefill_and_decode_fns
+from GIANT.v2.smol.GiantGPT import GiantGPT
+from GIANT.v2.smol.checkpoint_io import load_npz
+from GIANT.v2.smol.jit_inference import init_inference_state, make_prefill_and_decode_fns
 
 
 TRM_OPEN = "<TRM-sudoku>"
@@ -49,8 +49,8 @@ def _apply_compute_dtype_override(cfg) -> None:
         return
     dtype = _to_dtype(str(desired))
     try:
-        import v2.smol.GiantGPT as smol_gpt_module
-        import v2.smol.Transformer_block as smol_block_module
+        import GIANT.v2.smol.GiantGPT as smol_gpt_module
+        import GIANT.v2.smol.Transformer_block as smol_block_module
     except Exception as exc:
         print(f"[dtype] Failed to import smol modules for override: {exc}")
         return

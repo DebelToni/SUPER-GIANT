@@ -17,15 +17,15 @@ from config_utils import load_config
 from tokenizer_utils import build_custom_tokenizer, load_tokenizer
 
 PROJECT_DIR = Path(__file__).resolve().parent
-V2_ROOT = PROJECT_DIR.parent.parent / "v2"
+V2_ROOT = PROJECT_DIR.parent.parent / "GIANT" / "v2"
 
-from v2.smol.GiantGPT import GiantGPT
-from v2.smol.checkpoint_io import load_npz
+from GIANT.v2.smol.GiantGPT import GiantGPT
+from GIANT.v2.smol.checkpoint_io import load_npz
 
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser("Evaluate general loss: base vs fine-tuned SmolLM.")
-    ap.add_argument("--stage", default="simple_wiki", help="Stage name from v2/data_pipeline/Config.yml.")
+    ap.add_argument("--stage", default="simple_wiki", help="Stage name from GIANT/v2/data_pipeline/Config.yml.")
     ap.add_argument("--seq_len", type=int, default=256)
     ap.add_argument("--batch_size", type=int, default=2)
     ap.add_argument("--num_batches", type=int, default=20)
@@ -51,8 +51,8 @@ def _apply_compute_dtype_override(cfg) -> None:
         return
     dtype = _to_dtype(str(desired))
     try:
-        import v2.smol.GiantGPT as smol_gpt_module
-        import v2.smol.Transformer_block as smol_block_module
+        import GIANT.v2.smol.GiantGPT as smol_gpt_module
+        import GIANT.v2.smol.Transformer_block as smol_block_module
     except Exception as exc:
         print(f"[dtype] Failed to import smol modules for override: {exc}")
         return

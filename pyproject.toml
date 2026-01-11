@@ -25,4 +25,5 @@ requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["v2*", "TRM*", "TiDAR*"]
+namespaces = true
+include = ["GIANT.v0*", "GIANT.v1*", "GIANT.v2*", "TRM*", "TiDAR*"]

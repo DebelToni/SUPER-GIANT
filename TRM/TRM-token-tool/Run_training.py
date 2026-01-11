@@ -22,20 +22,20 @@ from config_utils import load_config
 from tokenizer_utils import build_custom_tokenizer, load_tokenizer
 
 
-from v2.smol.GiantGPT import GiantGPT
-from v2.model.arrow_data_loader import (
+from GIANT.v2.smol.GiantGPT import GiantGPT
+from GIANT.v2.model.arrow_data_loader import (
     ShardedArrowDataset,
     StageDataLoader,
     load_dataloader_state,
     save_dataloader_state,
 )
-from v2.model.checkpoint_manager import AsyncMiniCheckpointManager
-from v2.smol.checkpoint_io import load_npz
-from v2.smol.checkpoint_manager import latest as latest_ckpt
-from v2.smol.checkpoint_manager import load as load_ckpt
-from v2.smol.checkpoint_manager import save as save_ckpt
-from v2.smol.checkpoint_manager import save_opt_state, load_opt_state
-from v2.model.optimizer_utils import create_weight_decay_mask
+from GIANT.v2.model.checkpoint_manager import AsyncMiniCheckpointManager
+from GIANT.v2.smol.checkpoint_io import load_npz
+from GIANT.v2.smol.checkpoint_manager import latest as latest_ckpt
+from GIANT.v2.smol.checkpoint_manager import load as load_ckpt
+from GIANT.v2.smol.checkpoint_manager import save as save_ckpt
+from GIANT.v2.smol.checkpoint_manager import save_opt_state, load_opt_state
+from GIANT.v2.model.optimizer_utils import create_weight_decay_mask
 
 
 _stop_requested = False
@@ -93,8 +93,8 @@ def _apply_compute_dtype_override(cfg: OmegaConf) -> None:
         return
     dtype = _to_dtype(str(desired))
     try:
-        import v2.smol.GiantGPT as smol_gpt_module
-        import v2.smol.Transformer_block as smol_block_module
+        import GIANT.v2.smol.GiantGPT as smol_gpt_module
+        import GIANT.v2.smol.Transformer_block as smol_block_module
     except Exception as exc:
         print(f"[dtype] Failed to import smol modules for override: {exc}")
         return

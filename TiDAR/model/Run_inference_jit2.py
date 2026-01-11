@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from TiDAR.model.TiDAR import TiDAR
 from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embedding_params
-from v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
+from GIANT.v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
 
 DEFAULT_CACHE_BUCKETS: Tuple[int, ...] = (256, 512, 1024, 2048, 4096)
 

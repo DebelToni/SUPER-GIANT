@@ -4,7 +4,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from v2.model.Transformer_block import TinyTransformerBlock, MODEL_CFG, COMPUTE_DTYPE
+from GIANT.v2.model.Transformer_block import TinyTransformerBlock, MODEL_CFG, COMPUTE_DTYPE
 
 
 def main() -> None:

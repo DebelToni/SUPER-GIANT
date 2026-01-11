@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from omegaconf import OmegaConf
 
-from v2.model.Transformer_block import TinyTransformerBlock
+from GIANT.v2.model.Transformer_block import TinyTransformerBlock
 
 MODEL_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = MODEL_DIR.parent

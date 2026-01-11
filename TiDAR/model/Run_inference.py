@@ -571,6 +571,15 @@ def sanity_check_cached_decode(
     print(f"[sanity] cached vs full max diff: {max_diff:.6f}")
 
 
+def _parse_bool(value: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered in {"1", "true", "yes", "y", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("TiDAR inference (KV cache)")
     parser.add_argument("--checkpoint", type=str, default="latest")
@@ -580,6 +589,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top_k", type=int, default=None)
     parser.add_argument("--draft_len", type=int, default=None)
+    parser.add_argument("--context_length", type=int, default=None)
+    parser.add_argument("--stop_on_eos", type=_parse_bool, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--strip_eos", action="store_true")
     parser.add_argument("--always_accept", action="store_true")
@@ -600,18 +611,32 @@ def main() -> None:
     max_steps = args.steps if args.steps is not None else int(cfg.inference.max_decode_steps)
     bias_value = float(cfg.tidar.attn_bias_value)
 
+    stop_on_eos = args.stop_on_eos if args.stop_on_eos is not None else bool(cfg.inference.stop_on_eos)
+
+    model_context_length = int(cfg.model.context_length)
+    context_length = args.context_length if args.context_length is not None else model_context_length
+
     if max_steps <= 0:
         raise ValueError("steps must be > 0")
     if top_k < 0:
         raise ValueError("top_k must be >= 0")
     if draft_len <= 0:
         raise ValueError("draft_len must be > 0")
+    if args.draft_len is not None and draft_len > int(cfg.tidar.draft_length):
+        raise ValueError(
+            f"draft_len {draft_len} exceeds config tidar.draft_length {cfg.tidar.draft_length}."
+        )
+    if context_length <= 0:
+        raise ValueError("context_length must be > 0")
+    if context_length > model_context_length:
+        raise ValueError(
+            f"context_length {context_length} exceeds model context_length {model_context_length}."
+        )
 
     checkpoint_path = resolve_checkpoint_path(cfg, args.checkpoint, args.checkpoint_dir)
     print(f"Using checkpoint: {checkpoint_path}")
 
     tokenizer = load_tokenizer(cfg)
-    context_length = int(cfg.model.context_length)
     prompt_ids = tokenize_prompt(tokenizer, args.prompt, context_length, strip_eos=args.strip_eos)
     if prompt_ids.size == 0:
         raise ValueError("Prompt produced zero tokens. Provide non-empty text.")
@@ -704,7 +729,6 @@ def main() -> None:
 
     prefix_ids = prompt_ids.astype(np.int32)
     generated = 0
-    stop_on_eos = bool(cfg.inference.stop_on_eos)
     eos_id = tokenizer.eos_token_id
 
     if args.sanity_check:

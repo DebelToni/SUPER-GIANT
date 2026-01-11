@@ -13,8 +13,7 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from v2.model.GiantGPT import GiantGPT
-from v2.model.checkpoint_io import load_npz
-from v2.model.checkpoint_manager import latest as latest_ckpt
+from v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
 from v2.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
 
 

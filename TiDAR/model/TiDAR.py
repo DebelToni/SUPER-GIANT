@@ -3,6 +3,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 from flax import linen as nn
+from flax.linen import RMSNorm
 from omegaconf import OmegaConf
 
 from TiDAR.model.Transformer_block import TinyTransformerBlock
@@ -86,6 +87,9 @@ class TiDAR(nn.Module):
 
         if return_hidden:
             return x
+
+        # SmolLM/LLaMA-style final RMSNorm
+        x = RMSNorm(name="final_norm", dtype=COMPUTE_DTYPE, epsilon=1e-5)(x)
 
         logits = jnp.einsum("bld,vd->blv",
                             x.astype(jnp.float32),

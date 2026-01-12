@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from TiDAR.model.TiDAR import TiDAR
+from TiDAR.model.GiantTiDAR import TiDAR
 from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embedding_params
 from GIANT.v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
 

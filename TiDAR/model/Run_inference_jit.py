@@ -495,7 +495,7 @@ def make_tidar_generate_fn(
 
     def write_cache_apply(params, cache_vars, tokens_k, pos_ids_k, cur_index):
         # tokens_k: [1,K]
-        _, mutated = model.apply(
+        logits, mutated = model.apply(
             {"params": params, "cache": cache_vars},
             tokens_k,
             deterministic=True,
@@ -506,21 +506,7 @@ def make_tidar_generate_fn(
             kv_cache_len=cache_len,
             mutable=["cache"],
         )
-        return mutated["cache"]
-
-    def next_logit_apply(params, cache_vars, token_1, cur_index):
-        # token_1: [1,1]
-        logits, mutated = model.apply(
-            {"params": params, "cache": cache_vars},
-            token_1,
-            deterministic=True,
-            use_kv_cache=True,
-            write_to_cache=True,
-            cur_index=cur_index,
-            kv_cache_len=cache_len,
-            mutable=["cache"],
-        )
-        return logits[0, 0], mutated["cache"]
+        return logits, mutated["cache"]
 
     @jax.jit
     def generate(
@@ -640,7 +626,13 @@ def make_tidar_generate_fn(
             # Write to cache at current prefix_len with fixed K tokens
             # NOTE: requires prefix_len + K <= cache_len always (we enforce via bucket selection + slack).
             pos_ids_k = (prefix_len + idx_k)[None, :]  # [1,K]
-            cache = write_cache_apply(params, cache, commit_fixed[None, :], pos_ids_k.astype(jnp.int32), prefix_len)
+            logits_k, cache = write_cache_apply(
+                params,
+                cache,
+                commit_fixed[None, :],
+                pos_ids_k.astype(jnp.int32),
+                prefix_len,
+            )
 
             # Update output buffer aligned with cache positions
             out = jax.lax.dynamic_update_slice(out, commit_fixed, (prefix_len,))
@@ -649,23 +641,11 @@ def make_tidar_generate_fn(
             prefix_len2 = prefix_len + eff_r
             generated2 = generated + eff_r
 
-            def _update_prev(args):
-                cache_in, eff_r_in, prefix_len_in, committed_in = args
-                last_tok = jnp.take(committed_in, eff_r_in - 1)
-                last_index = prefix_len_in - 1
-                token_1 = last_tok[None, None]
-                next_logit, cache_next = next_logit_apply(params, cache_in, token_1, last_index)
-                return cache_next, next_logit
-
-            def _keep_prev(args):
-                cache_in, _eff_r_in, _prefix_len_in, _committed_in = args
-                return cache_in, prev_logit
-
-            cache, prev_logit2 = jax.lax.cond(
+            prev_logit2 = jax.lax.cond(
                 eff_r > 0,
-                _update_prev,
-                _keep_prev,
-                (cache, eff_r, prefix_len2, committed_full),
+                lambda _: logits_k[0, eff_r - 1],
+                lambda _: prev_logit,
+                operand=None,
             )
 
             done2 = done | (generated2 >= max_steps) | has_eos
@@ -808,10 +788,6 @@ def main() -> None:
 
     params = jax.device_put(params)
 
-    prompt_ids_jax = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)
-    prompt_logits = model.apply({"params": params}, prompt_ids_jax, deterministic=True)
-    prev_logit = jax.device_put(prompt_logits[0, -1])
-
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
@@ -823,7 +799,7 @@ def main() -> None:
     cache_vars = jax.device_put(cache_vars)
 
     # Prefill committed prefix (prompt) into KV cache
-    cache_vars, cache_index = prefill_prompt_cache(
+    cache_vars, cache_index, prev_logit = prefill_prompt_cache(
         model,
         params,
         cache_vars,

@@ -1,24 +1,14 @@
-"""
-TiDAR inference with full JIT compilation.
-
-Key optimizations:
-1. All sampling happens on device using JAX (no numpy)
-2. Decode loop uses lax.while_loop (no Python loops)
-3. Single JITed function for the entire decode step
-4. Minimal host-device transfers
-"""
 from __future__ import annotations
 
 import argparse
 import sys
 import time
-from functools import lru_cache, partial
+from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
-import jax.lax as lax
 import numpy as np
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
@@ -31,9 +21,12 @@ from TiDAR.model.GiantTiDAR import TiDAR
 from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embedding_params
 from GIANT.v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
 
-DEFAULT_CACHE_BUCKETS: Tuple[int, ...] = (256, 512, 1024, 2048, 4096, 8192)
+DEFAULT_CACHE_BUCKETS: Tuple[int, ...] = (256, 512, 1024, 2048, 4096)
 
 
+# =========================
+# Config / IO helpers
+# =========================
 def load_configs() -> OmegaConf:
     model_dir = Path(__file__).resolve().parent
     project_root = model_dir.parent
@@ -153,149 +146,9 @@ def load_params(path: Path):
     return jax.tree_util.tree_map(lambda x: jnp.asarray(x), params)
 
 
-# ==============================================================================
-# JAX-native sampling functions (all on device, no numpy)
-# ==============================================================================
-
-def sample_from_logits_jax(
-    logits: jnp.ndarray,
-    rng_key: jax.Array,
-    temperature: float = 1.0,
-    top_k: int = 0,
-) -> jnp.ndarray:
-    """Sample from logits using JAX (on device).
-    
-    Args:
-        logits: shape (..., vocab_size)
-        rng_key: JAX random key
-        temperature: sampling temperature
-        top_k: if > 0, only sample from top_k tokens
-        
-    Returns:
-        Sampled token ids with shape (...)
-    """
-    # Handle greedy decoding
-    if temperature <= 0:
-        return jnp.argmax(logits, axis=-1)
-    
-    # Scale by temperature
-    scaled = logits / jnp.maximum(temperature, 1e-6)
-    
-    # Apply top-k masking
-    if top_k > 0:
-        # Get top-k values and create mask
-        top_k_values = jax.lax.top_k(scaled, top_k)[0]
-        threshold = top_k_values[..., -1:]  # minimum value in top-k
-        scaled = jnp.where(scaled >= threshold, scaled, -jnp.inf)
-    
-    # Sample using Gumbel-max trick (more efficient than explicit softmax + categorical)
-    # This is equivalent to: sample from softmax(scaled)
-    gumbel_noise = jax.random.gumbel(rng_key, scaled.shape, dtype=scaled.dtype)
-    return jnp.argmax(scaled + gumbel_noise, axis=-1)
-
-
-def sample_batch_from_logits_jax(
-    logits: jnp.ndarray,
-    rng_key: jax.Array,
-    temperature: float = 1.0,
-    top_k: int = 0,
-) -> jnp.ndarray:
-    """Sample from logits for a batch of positions.
-    
-    Args:
-        logits: shape (batch, seq, vocab_size) or (seq, vocab_size)
-        rng_key: JAX random key
-        
-    Returns:
-        Sampled tokens with shape (batch, seq) or (seq,)
-    """
-    if logits.ndim == 2:
-        # (seq, vocab)
-        keys = jax.random.split(rng_key, logits.shape[0])
-        return jax.vmap(
-            lambda l, k: sample_from_logits_jax(l, k, temperature, top_k)
-        )(logits, keys)
-    else:
-        # (batch, seq, vocab)
-        batch_size, seq_len = logits.shape[:2]
-        keys = jax.random.split(rng_key, batch_size * seq_len).reshape(batch_size, seq_len, 2)
-        return jax.vmap(
-            jax.vmap(lambda l, k: sample_from_logits_jax(l, k, temperature, top_k))
-        )(logits, keys)
-
-
-# ==============================================================================
-# Attention bias builders (same as original but optimized)
-# ==============================================================================
-
-@lru_cache(maxsize=None)
-def build_prefill_bias_template(max_seq_len: int, draft_len: int, bias_value: float) -> jnp.ndarray:
-    """TiDAR-specific: Fig.7 prefill mask, cached and sliced per request."""
-    total = draft_len + max_seq_len
-    idx = jnp.arange(total)
-    q_idx = idx[:, None]
-    k_idx = idx[None, :]
-
-    is_mask_q = q_idx < draft_len
-    is_mask_k = k_idx < draft_len
-    is_prompt_k = k_idx >= draft_len
-
-    allow_mask_to_mask = is_mask_q & is_mask_k
-    allow_mask_to_prompt = is_mask_q & is_prompt_k
-
-    prompt_q_pos = q_idx - draft_len
-    prompt_k_pos = k_idx - draft_len
-    is_prompt_q = q_idx >= draft_len
-    allow_prompt_to_prompt = is_prompt_q & is_prompt_k & (prompt_k_pos <= prompt_q_pos)
-
-    allow = allow_mask_to_mask | allow_mask_to_prompt | allow_prompt_to_prompt
-    bias = jnp.where(allow, 0.0, bias_value)
-    return bias[None, None, :, :]
-
-
-@lru_cache(maxsize=None)
-def build_decode_bias_template(cache_len: int, draft_len: int, bias_value: float) -> jnp.ndarray:
-    """TiDAR-specific: constant draft->draft + draft->prefix template."""
-    step_len = draft_len + (draft_len * draft_len)
-    key_len = cache_len + step_len
-
-    q_idx = jnp.arange(step_len)[:, None]
-    k_idx = jnp.arange(key_len)[None, :]
-
-    is_verify_q = q_idx < draft_len
-    is_cand_q = q_idx >= draft_len
-    is_prefix_k = k_idx < cache_len
-    is_step_k = k_idx >= cache_len
-
-    step_k_idx = k_idx - cache_len
-    is_verify_k = is_step_k & (step_k_idx < draft_len)
-    is_cand_k = is_step_k & (step_k_idx >= draft_len)
-
-    allow_verify_to_prefix = is_verify_q & is_prefix_k
-    allow_verify_to_verify = is_verify_q & is_verify_k & (step_k_idx <= q_idx)
-
-    cand_q_offset = q_idx - draft_len
-    cand_k_offset = step_k_idx - draft_len
-    cand_q_block = cand_q_offset // draft_len
-    cand_k_block = cand_k_offset // draft_len
-    cand_r = cand_q_block + 1
-
-    allow_cand_to_prefix = is_cand_q & is_prefix_k
-    allow_cand_to_verify = is_cand_q & is_verify_k & (step_k_idx < cand_r)
-    allow_cand_to_cand = is_cand_q & is_cand_k & (cand_q_block == cand_k_block)
-
-    allow = (
-        allow_verify_to_prefix
-        | allow_verify_to_verify
-        | allow_cand_to_prefix
-        | allow_cand_to_verify
-        | allow_cand_to_cand
-    )
-
-    bias = jnp.where(allow, 0.0, bias_value)
-    return bias[None, None, :, :]
-
-
+# =========================
+# Bucketing
+# =========================
 def parse_cache_buckets(raw: Optional[str], *, context_length: int) -> Tuple[int, ...]:
     if raw is None:
         return tuple(b for b in DEFAULT_CACHE_BUCKETS if b <= context_length)
@@ -303,54 +156,16 @@ def parse_cache_buckets(raw: Optional[str], *, context_length: int) -> Tuple[int
     return tuple(b for b in buckets if b <= context_length)
 
 
-def select_cache_bucket(required_len: int, buckets) -> int:
+def select_cache_bucket(required_len: int, buckets: Sequence[int]) -> int:
     for bucket in buckets:
         if bucket >= required_len:
             return bucket
     raise ValueError(f"No cache bucket >= {required_len} (available: {buckets})")
 
 
-# ==============================================================================
-# Position ID builders
-# ==============================================================================
-
-def build_prefill_position_ids(prefix_len: int, draft_len: int) -> jnp.ndarray:
-    """Positions for the prefill K mask tokens."""
-    return jnp.arange(prefix_len, prefix_len + draft_len, dtype=jnp.int32)
-
-
-def build_decode_position_ids(prefix_len: int, draft_len: int) -> jnp.ndarray:
-    """Positions for TiDAR decode layout [VERIFY | PREDRAFT].
-    
-    Note: For use inside JIT, use build_decode_position_ids_template + offset instead.
-    """
-    pos_verify = jnp.arange(prefix_len, prefix_len + draft_len, dtype=jnp.int32)
-    # Candidate positions: for r in [1..K], positions [prefix_len+r, prefix_len+r+K-1]
-    offsets = (jnp.arange(1, draft_len + 1, dtype=jnp.int32)[:, None] + 
-               jnp.arange(draft_len, dtype=jnp.int32)[None, :])
-    pos_predraft = prefix_len + offsets.reshape(-1)
-    return jnp.concatenate([pos_verify, pos_predraft], axis=0)
-
-
-def build_decode_position_ids_template(draft_len: int) -> jnp.ndarray:
-    """Build position offsets template for decode step (0-indexed).
-    
-    Returns offsets that can be added to cache_idx to get actual positions.
-    This allows the template to be precomputed and used with traced cache_idx.
-    """
-    # Verify positions: [0, 1, ..., K-1] (relative to cache_idx)
-    pos_verify = jnp.arange(draft_len, dtype=jnp.int32)
-    # Candidate positions: for r in [1..K], offsets [r, r+1, ..., r+K-1]
-    offsets = (jnp.arange(1, draft_len + 1, dtype=jnp.int32)[:, None] + 
-               jnp.arange(draft_len, dtype=jnp.int32)[None, :])
-    pos_predraft = offsets.reshape(-1)
-    return jnp.concatenate([pos_verify, pos_predraft], axis=0)
-
-
-# ==============================================================================
-# KV Cache initialization and management
-# ==============================================================================
-
+# =========================
+# KV-cache init / prefix prefill
+# =========================
 def init_kv_cache(model: TiDAR, *, batch_size: int, pad_token_id: int) -> object:
     dummy = jnp.full((batch_size, 1), pad_token_id, dtype=jnp.int32)
     variables = model.init(
@@ -368,465 +183,527 @@ def prefill_prompt_cache(
     model: TiDAR,
     params,
     cache_vars,
-    prompt_ids: jnp.ndarray,
+    prompt_ids: np.ndarray,
     *,
     kv_cache_len: int,
-) -> Tuple[object, int]:
-    """Prefill the KV cache with prompt tokens."""
+) -> Tuple[object, int, jnp.ndarray]:
+    prompt_ids = np.asarray(prompt_ids, dtype=np.int32)
     if prompt_ids.ndim == 1:
         prompt_ids = prompt_ids[None, :]
     batch_size, prompt_len = prompt_ids.shape
     if prompt_len == 0:
-        return cache_vars, 0
+        dummy_prev = jnp.zeros((model.vocab_size,), dtype=jnp.float32)
+        return cache_vars, 0, dummy_prev
 
-    position_ids = jnp.arange(prompt_len, dtype=jnp.int32)
-    position_ids = jnp.broadcast_to(position_ids[None, :], (batch_size, prompt_len))
+    position_ids = np.arange(prompt_len, dtype=np.int32)
+    position_ids = np.broadcast_to(position_ids[None, :], (batch_size, prompt_len))
 
-    _, mutated = model.apply(
+    logits, mutated = model.apply(
         {"params": params, "cache": cache_vars},
-        prompt_ids,
+        jnp.asarray(prompt_ids),
         deterministic=True,
         use_kv_cache=True,
         write_to_cache=True,
         cur_index=0,
-        position_ids=position_ids,
+        position_ids=jnp.asarray(position_ids),
         kv_cache_len=kv_cache_len,
         mutable=["cache"],
     )
-    return mutated["cache"], prompt_len
+    prev_logit = logits[0, -1]
+    return mutated["cache"], prompt_len, prev_logit
 
 
-# ==============================================================================
-# JIT-compiled model application functions
-# ==============================================================================
+# =========================
+# TiDAR masks / position ids
+# =========================
+def build_decode_position_ids(prefix_len: jnp.ndarray, draft_len: int) -> jnp.ndarray:
+    """
+    JAX version (static draft_len): positions for TiDAR decode layout [VERIFY(K) | PREDRAFT(K*K)].
+    VERIFY:   [L .. L+K-1]
+    PREDRAFT: for r=1..K, block r predicts [L+r .. L+r+K-1]
+    """
+    # verify
+    pos_verify = prefix_len + jnp.arange(draft_len, dtype=jnp.int32)
 
-def make_prefill_draft_fn(
+    # predraft offsets: shape (K,K): r + t, where r in [1..K], t in [0..K-1]
+    r = jnp.arange(1, draft_len + 1, dtype=jnp.int32)[:, None]
+    t = jnp.arange(draft_len, dtype=jnp.int32)[None, :]
+    offsets = (r + t).reshape(-1)  # length K*K
+    pos_predraft = prefix_len + offsets
+
+    return jnp.concatenate([pos_verify, pos_predraft], axis=0)  # length K + K*K
+
+
+def build_decode_position_ids_template(draft_len: int) -> jnp.ndarray:
+    """Build position offsets template for decode step (0-indexed)."""
+    pos_verify = jnp.arange(draft_len, dtype=jnp.int32)
+    r = jnp.arange(1, draft_len + 1, dtype=jnp.int32)[:, None]
+    t = jnp.arange(draft_len, dtype=jnp.int32)[None, :]
+    offsets = (r + t).reshape(-1)
+    pos_predraft = offsets
+    return jnp.concatenate([pos_verify, pos_predraft], axis=0)
+
+
+@lru_cache(maxsize=None)
+def build_decode_bias_template(cache_len: int, draft_len: int, bias_value: float) -> jnp.ndarray:
+    """
+    Constant TiDAR decode bias for KV-cache mode:
+      queries are step tokens (q_len = K + K^2),
+      keys are [prefix-cache of length cache_len] + [step tokens of length q_len].
+
+    Dynamic "prefix_len validity" masking is applied inside attention (your model code),
+    so this template can treat all cache positions as allowed for step->prefix and rely
+    on prefix-valid masking to block inactive cache slots.
+    """
+    q_len = draft_len + (draft_len * draft_len)
+    key_len = cache_len + q_len
+
+    q_idx = jnp.arange(q_len)[:, None]          # [q_len, 1]
+    k_idx = jnp.arange(key_len)[None, :]        # [1, key_len]
+
+    is_verify_q = q_idx < draft_len
+    is_cand_q = q_idx >= draft_len
+
+    is_prefix_k = k_idx < cache_len
+    is_step_k = k_idx >= cache_len
+    step_k_idx = k_idx - cache_len
+
+    is_verify_k = is_step_k & (step_k_idx < draft_len)
+    is_cand_k = is_step_k & (step_k_idx >= draft_len)
+
+    # Verify queries:
+    allow_verify_to_prefix = is_verify_q & is_prefix_k
+    allow_verify_to_verify = is_verify_q & is_verify_k & (step_k_idx <= q_idx)
+
+    # Candidate queries:
+    cand_q_offset = q_idx - draft_len
+    cand_k_offset = step_k_idx - draft_len
+
+    cand_q_block = cand_q_offset // draft_len   # [0..K-1]
+    cand_k_block = cand_k_offset // draft_len   # [0..K-1]
+    cand_r = cand_q_block + 1                   # r in [1..K]
+
+    allow_cand_to_prefix = is_cand_q & is_prefix_k
+    allow_cand_to_verify = is_cand_q & is_verify_k & (step_k_idx < cand_r)
+    allow_cand_to_cand = is_cand_q & is_cand_k & (cand_q_block == cand_k_block)
+
+    allow = (
+        allow_verify_to_prefix
+        | allow_verify_to_verify
+        | allow_cand_to_prefix
+        | allow_cand_to_verify
+        | allow_cand_to_cand
+    )
+
+    bias = jnp.where(allow, 0.0, bias_value)
+    return bias[None, None, :, :]  # [1,1,q_len,key_len]
+
+
+# =========================
+# JAX sampling utilities (JIT-friendly)
+# =========================
+def _mask_top_k_2d(logits_2d: jnp.ndarray, top_k: int) -> jnp.ndarray:
+    """logits_2d: [N, V]. top_k must be static (Python int) when jitted."""
+    if top_k <= 0:
+        return logits_2d
+    top_vals, top_idx = jax.lax.top_k(logits_2d, top_k)  # [N,K], [N,K]
+    masked = jnp.full_like(logits_2d, -jnp.inf)
+    n = logits_2d.shape[0]
+    rows = jnp.arange(n, dtype=jnp.int32)[:, None]
+    masked = masked.at[rows, top_idx].set(top_vals)
+    return masked
+
+
+def _prepare_logits_2d(logits_2d: jnp.ndarray, *, temperature: float, top_k: int) -> jnp.ndarray:
+    # temperature <= 0 handled by caller (argmax path)
+    scaled = logits_2d / jnp.maximum(jnp.asarray(temperature, dtype=logits_2d.dtype), 1e-6)
+    scaled = _mask_top_k_2d(scaled, top_k)
+    return scaled
+
+
+def sample_tokens(
+    key: jax.Array,
+    logits: jnp.ndarray,
+    *,
+    temperature: float,
+    top_k: int,
+) -> Tuple[jax.Array, jnp.ndarray]:
+    """
+    Sample tokens from logits with optional temperature/top_k.
+
+    logits: [..., V]
+    returns tokens: [...]
+    """
+    v = logits.shape[-1]
+    flat = logits.reshape((-1, v))  # [N, V]
+
+    def do_sample(k):
+        prepared = _prepare_logits_2d(flat, temperature=temperature, top_k=top_k)
+        # One key is enough: categorical is vectorized across batch
+        toks = jax.random.categorical(k, prepared, axis=-1).astype(jnp.int32)  # [N]
+        return toks
+
+    def do_argmax(_k):
+        return jnp.argmax(flat, axis=-1).astype(jnp.int32)
+
+    toks_flat = jax.lax.cond(jnp.asarray(temperature) > 0.0, do_sample, do_argmax, key)
+    return key, toks_flat.reshape(logits.shape[:-1])
+
+
+def rejection_sample_jax(
+    key: jax.Array,
+    *,
+    draft_ids: jnp.ndarray,        # [K]
+    verify_logits: jnp.ndarray,    # [K, V]
+    draft_logits: jnp.ndarray,     # [K, V]
+    temperature: float,
+    top_k: int,
+) -> Tuple[jax.Array, jnp.ndarray, jnp.ndarray]:
+    """
+    TiDAR rejection sampling in JAX:
+      - sequentially accept draft token i with prob min(1, p_i(tok)/q_i(tok))
+      - if rejected at i: sample new token from p_i and stop
+    Returns:
+      key, r (int32 scalar), committed_full ([K] int32)
+    """
+    k = draft_ids.shape[0]
+
+    # Prepare p and q logits consistently with sampling distribution
+    p_logits = _prepare_logits_2d(verify_logits, temperature=temperature, top_k=top_k)  # [K,V]
+    q_logits = _prepare_logits_2d(draft_logits, temperature=temperature, top_k=top_k)  # [K,V]
+
+    # log-probs for ratio
+    p_log = jax.nn.log_softmax(p_logits, axis=-1)
+    q_log = jax.nn.log_softmax(q_logits, axis=-1)
+
+    idx = jnp.arange(k, dtype=jnp.int32)
+    p_log_tok = p_log[idx, draft_ids]
+    q_log_tok = q_log[idx, draft_ids]
+    ratio = jnp.exp(p_log_tok - q_log_tok)
+    accept_prob = jnp.minimum(1.0, ratio).astype(jnp.float32)  # [K]
+
+    key_u, key_resample = jax.random.split(key, 2)
+    u = jax.random.uniform(key_u, (k,), dtype=jnp.float32)
+    # Pre-sample replacement tokens from p for each position (only used at first rejection)
+    resampled = jax.random.categorical(key_resample, p_logits, axis=-1).astype(jnp.int32)  # [K]
+
+    def step(carry, x):
+        stopped, r = carry
+        draft_tok, repl_tok, u_i, ap_i = x
+
+        accept = u_i < ap_i
+        do_accept = (~stopped) & accept
+        do_reject = (~stopped) & (~accept)
+
+        out_tok = jnp.where(
+            stopped,
+            draft_tok,  # ignored beyond r
+            jnp.where(accept, draft_tok, repl_tok),
+        )
+        stopped2 = stopped | do_reject
+        r2 = r + (~stopped).astype(jnp.int32)
+        return (stopped2, r2), out_tok
+
+    (stopped_fin, r_fin), committed = jax.lax.scan(
+        step,
+        init=(jnp.asarray(False), jnp.asarray(0, dtype=jnp.int32)),
+        xs=(draft_ids, resampled, u, accept_prob),
+        length=k,
+    )
+    # r_fin is guaranteed >= 1 for k>0
+    return key, r_fin, committed
+
+
+# =========================
+# JITted TiDAR generation (NO python loops)
+# =========================
+def make_tidar_generate_fn(
     model: TiDAR,
     *,
     cache_len: int,
-    prefill_bias: jnp.ndarray,
+    draft_len: int,
+    mask_id: int,
+    pad_token_id: int,
+    eos_id: int,
+    stop_on_eos: bool,
+    always_accept: bool,
+    temperature: float,
+    top_k: int,
+    bias_value: float,
 ):
-    """Create JITed prefill function."""
+    """
+    Returns a single jitted function that:
+      - takes an already-prefilled KV cache (prompt committed)
+      - takes an output buffer aligned with cache positions (length cache_len)
+      - prefill-samples initial draft (K tokens) in JAX
+      - runs TiDAR decode using lax.while_loop (no Python loops)
+      - commits to KV cache using fixed-length K writes per iteration
+        (prefix_len increases by r, and prefix-valid attention masking blocks junk cache slots)
+    """
+    q_len = draft_len + (draft_len * draft_len)
+    decode_bias = jax.device_put(build_decode_bias_template(cache_len, draft_len, bias_value))
+
+    # Nice visualization: # for allowed (0), . for blocked (bias_value)
+    # mask_2d = decode_bias[0, 0]
+    # print(f"Decode attention mask ({mask_2d.shape[0]}x{mask_2d.shape[1]}):")
+    # for i in range(mask_2d.shape[0]):
+    #     row = ''.join('#' if mask_2d[i, j] == 0.0 else '.' for j in range(250,mask_2d.shape[1]))
+    #     print(row)
+
+    # Prefill bias in KV-cache mode: only mask queries exist, so allow everything.
+    # Shape must match [1,1,K, cache_len + K]
+    prefill_bias = jnp.zeros((1, 1, draft_len, cache_len + draft_len), dtype=decode_bias.dtype)
     prefill_bias = jax.device_put(prefill_bias)
 
-    @jax.jit
-    def prefill_draft(params, cache_vars, tokens, position_ids, prefix_len):
+    step_position_offsets = build_decode_position_ids_template(draft_len)
+    step_position_offsets = jax.device_put(step_position_offsets)
+
+    predraft_masks = jnp.full((draft_len * draft_len,), jnp.asarray(mask_id, dtype=jnp.int32), dtype=jnp.int32)
+    predraft_masks = jax.device_put(predraft_masks)
+
+    idx_k = jnp.arange(draft_len, dtype=jnp.int32)
+    idx_k = jax.device_put(idx_k)
+
+    def decode_apply(params, cache_vars, step_tokens, step_pos_ids, prefix_len):
+        # step_tokens: [1, q_len]
         logits = model.apply(
             {"params": params, "cache": cache_vars},
-            tokens,
+            step_tokens,
+            deterministic=True,
+            use_kv_cache=True,
+            write_to_cache=False,
+            prefix_len=prefix_len,
+            attn_bias=decode_bias,
+            position_ids=step_pos_ids,
+            kv_cache_len=cache_len,
+        )
+        return logits
+
+    def prefill_apply(params, cache_vars, mask_tokens, mask_pos_ids, prefix_len):
+        logits = model.apply(
+            {"params": params, "cache": cache_vars},
+            mask_tokens,
             deterministic=True,
             use_kv_cache=True,
             write_to_cache=False,
             prefix_len=prefix_len,
             attn_bias=prefill_bias,
-            position_ids=position_ids,
+            position_ids=mask_pos_ids,
             kv_cache_len=cache_len,
         )
         return logits
 
-    return prefill_draft
-
-
-def make_decode_step_fn(
-    model: TiDAR,
-    *,
-    cache_len: int,
-    draft_len: int,
-    bias_value: float,
-):
-    """Create JITed decode step function."""
-    decode_bias = build_decode_bias_template(cache_len, draft_len, bias_value)
-    decode_bias = jax.device_put(decode_bias)
-
-    @jax.jit
-    def decode_step(params, cache_vars, tokens, position_ids, prefix_len):
-        logits = model.apply(
-            {"params": params, "cache": cache_vars},
-            tokens,
-            deterministic=True,
-            use_kv_cache=True,
-            write_to_cache=False,
-            prefix_len=prefix_len,
-            attn_bias=decode_bias,
-            position_ids=position_ids,
-            kv_cache_len=cache_len,
-        )
-        return logits
-
-    return decode_step
-
-
-def make_commit_fn(
-    model: TiDAR,
-    *,
-    kv_cache_len: int,
-    max_commit_len: int,
-):
-    """Create JITed cache commit function.
-    
-    Uses static shapes with padding to avoid recompilation.
-    """
-    @jax.jit
-    def commit_tokens(params, cache_vars, tokens, prefix_len, actual_len):
-        """Commit tokens to cache.
-        
-        Args:
-            tokens: shape (1, max_commit_len) - padded to max length
-            prefix_len: current cache index
-            actual_len: actual number of tokens to commit
-        """
-        # Build position ids
-        position_ids = prefix_len + jnp.arange(max_commit_len, dtype=jnp.int32)
-        position_ids = position_ids[None, :]
-        
-        # Apply model to update cache
+    def write_cache_apply(params, cache_vars, tokens_k, pos_ids_k, cur_index):
+        # tokens_k: [1,K]
         _, mutated = model.apply(
             {"params": params, "cache": cache_vars},
-            tokens,
+            tokens_k,
             deterministic=True,
             use_kv_cache=True,
             write_to_cache=True,
-            cur_index=prefix_len,
-            position_ids=position_ids,
-            kv_cache_len=kv_cache_len,
-            cache_write_len=actual_len,  # Only write actual_len tokens
+            cur_index=cur_index,
+            position_ids=pos_ids_k,
+            kv_cache_len=cache_len,
             mutable=["cache"],
         )
         return mutated["cache"]
 
-    return commit_tokens
-
-
-# ==============================================================================
-# Full JIT-compiled decode loop
-# ==============================================================================
-
-def make_full_decode_fn(
-    model: TiDAR,
-    *,
-    cache_len: int,
-    draft_len: int,
-    max_steps: int,
-    mask_id: int,
-    bias_value: float,
-    temperature: float,
-    top_k: int,
-    always_accept: bool,
-):
-    """Create a fully JIT-compiled decode function using lax.while_loop.
-    
-    This function runs the entire decode loop on device without returning to Python.
-    """
-    decode_bias = build_decode_bias_template(cache_len, draft_len, bias_value)
-    decode_bias = jax.device_put(decode_bias)
-    step_len = draft_len + (draft_len * draft_len)
-    
-    # Precompute position offsets template (can be added to cache_idx)
-    step_position_offsets = build_decode_position_ids_template(draft_len)
-    step_position_offsets = jax.device_put(step_position_offsets)
-    
-    # Precompute commit position offsets
-    commit_position_offsets = jnp.arange(draft_len, dtype=jnp.int32)
-    commit_position_offsets = jax.device_put(commit_position_offsets)
-    
-    # Precompute predraft masks (constant)
-    predraft_masks = jnp.full((draft_len * draft_len,), mask_id, dtype=jnp.int32)
-    predraft_masks = jax.device_put(predraft_masks)
-
-    def decode_step_inner(params, cache_vars, tokens, position_ids, prefix_len):
-        """Single decode step - returns logits."""
-        return model.apply(
+    def next_logit_apply(params, cache_vars, token_1, cur_index):
+        # token_1: [1,1]
+        logits, mutated = model.apply(
             {"params": params, "cache": cache_vars},
-            tokens,
-            deterministic=True,
-            use_kv_cache=True,
-            write_to_cache=False,
-            prefix_len=prefix_len,
-            attn_bias=decode_bias,
-            position_ids=position_ids,
-            kv_cache_len=cache_len,
-        )
-
-    def commit_step_inner(params, cache_vars, tokens, position_ids, prefix_len, write_len):
-        """Commit tokens to cache."""
-        _, mutated = model.apply(
-            {"params": params, "cache": cache_vars},
-            tokens,
+            token_1,
             deterministic=True,
             use_kv_cache=True,
             write_to_cache=True,
-            cur_index=prefix_len,
-            position_ids=position_ids,
+            cur_index=cur_index,
             kv_cache_len=cache_len,
-            cache_write_len=write_len,
             mutable=["cache"],
         )
-        return mutated["cache"]
+        return logits[0, 0], mutated["cache"]
 
-    @partial(jax.jit, static_argnames=['eos_id'])
-    def full_decode(
+    @jax.jit
+    def generate(
         params,
         cache_vars,
-        initial_draft_tokens: jnp.ndarray,  # (draft_len,)
-        initial_draft_logits: jnp.ndarray,  # (draft_len, vocab_size)
-        initial_prefix_ids: jnp.ndarray,    # (prompt_len,)
-        cache_index: int,
+        out_ids,
+        prefix_len_init: jnp.ndarray,
+        max_steps: jnp.ndarray,
+        prev_logit_init: jnp.ndarray,
         rng_key: jax.Array,
-        eos_id: Optional[int],
     ):
-        """Run the full decode loop on device.
-        
-        Returns:
-            generated_tokens: (buffer_size,) - generated token ids (padded)
-            num_generated: scalar - actual number of generated tokens
         """
-        vocab_size = initial_draft_logits.shape[-1]
-        
-        # Round up buffer size to multiple of draft_len for safe slicing
-        buffer_size = ((max_steps + draft_len - 1) // draft_len) * draft_len
-        
-        # State for lax.while_loop
-        # - generated_tokens: buffer for generated tokens
-        # - num_generated: count of generated tokens
-        # - draft_tokens: current draft (K tokens)
-        # - draft_logits: logits for current draft (for rejection sampling)
-        # - cache_vars: KV cache
-        # - cache_index: current position in cache
-        # - rng_key: random key
-        # - done: whether to stop
-        
-        initial_state = (
-            jnp.zeros((buffer_size,), dtype=jnp.int32),  # generated_tokens
-            jnp.int32(0),                               # num_generated
-            initial_draft_tokens,                       # draft_tokens
-            initial_draft_logits,                       # draft_logits  
-            cache_vars,                                 # cache
-            jnp.int32(cache_index),                    # cache_index
-            rng_key,                                    # rng_key
-            jnp.bool_(False),                          # done
-        )
-        
+        params: model params pytree
+        cache_vars: KV cache pytree (already contains prompt)
+        out_ids: [cache_len] int32 buffer, with prompt already written at [0:prefix_len_init]
+        prefix_len_init: scalar int32 (prompt length)
+        max_steps: scalar int32 (#new tokens to generate)
+        prev_logit_init: [V] logit for token after prompt
+        rng_key: PRNGKey
+        Returns: out_ids, final_prefix_len, generated_count
+        """
+        prefix_len = prefix_len_init.astype(jnp.int32)
+        prev_logit = prev_logit_init
+        generated = jnp.asarray(0, dtype=jnp.int32)
+        done = jnp.asarray(False)
+
+        # ---- Prefill draft: run K mask tokens and sample draft tokens
+        mask_tokens = jnp.full((1, draft_len), jnp.asarray(mask_id, dtype=jnp.int32), dtype=jnp.int32)
+        mask_pos_ids = (prefix_len + jnp.arange(draft_len, dtype=jnp.int32))[None, :]
+        prefill_logits = prefill_apply(params, cache_vars, mask_tokens, mask_pos_ids, prefix_len)[0]  # [K,V]
+
+        rng_key, sub = jax.random.split(rng_key)
+        _, draft_tokens = sample_tokens(sub, prefill_logits, temperature=temperature, top_k=top_k)  # [K]
+        draft_tokens = draft_tokens.astype(jnp.int32)
+        draft_logits = prefill_logits  # q for the first rejection step
+
+        # Optional: write initial draft tokens into out_ids? (Not committed yet) -> NO.
+        # They are proposals only.
+
         def cond_fn(state):
-            (generated_tokens, num_generated, draft_tokens, draft_logits,
-             cache, cache_idx, key, done) = state
-            return ~done & (num_generated < max_steps)
-        
+            _rng, _cache, _out, _prefix_len, _generated, _draft_toks, _draft_logits, _prev_logit, _done = state
+            return (_generated < max_steps) & (~_done)
+
         def body_fn(state):
-            (generated_tokens, num_generated, draft_tokens, draft_logits,
-             cache, cache_idx, key, done) = state
-            
-            key, sample_key, cand_key = jax.random.split(key, 3)
-            
-            # Build step tokens: [verify (K) | predraft masks (K*K)]
-            step_tokens = jnp.concatenate([draft_tokens, predraft_masks], axis=0)
-            step_tokens = step_tokens[None, :]  # (1, step_len)
-            
-            # Build position ids by adding cache_idx to precomputed offsets
-            step_position_ids = (cache_idx + step_position_offsets)[None, :]
-            
-            # Forward pass
-            step_logits = decode_step_inner(
-                params, cache, step_tokens, step_position_ids, cache_idx
-            )
-            step_logits = step_logits[0]  # (step_len, vocab_size)
-            
-            # Split logits
-            verify_logits = step_logits[:draft_len]  # (K, vocab)
-            cand_logits = step_logits[draft_len:].reshape(draft_len, draft_len, vocab_size)  # (K, K, vocab)
-            
-            # Sample candidates for each block
-            cand_keys = jax.random.split(cand_key, draft_len)
-            candidate_tokens = jax.vmap(
-                lambda logits, k: sample_batch_from_logits_jax(logits, k, temperature, top_k)
-            )(cand_logits, cand_keys)  # (K, K)
-            
-            # Determine committed tokens (always accept all draft tokens)
-            # Note: We always commit draft_len tokens and use masking for EOS
-            committed = draft_tokens
-            
-            # Write all draft_len generated tokens to buffer
-            # Use lax.dynamic_update_slice for in-place update
-            generated_tokens = lax.dynamic_update_slice(
-                generated_tokens,
-                committed,
-                (num_generated,)
-            )
-            num_generated = num_generated + draft_len
-            
-            # Commit to cache (always commit all draft_len tokens)
-            commit_position_ids = (cache_idx + commit_position_offsets)[None, :]
-            cache = commit_step_inner(
-                params, cache, committed[None, :], commit_position_ids, 
-                cache_idx, draft_len
-            )
-            cache_idx = cache_idx + draft_len
-            
-            # Check for EOS if enabled
-            if eos_id is not None:
-                has_eos = jnp.any(committed == eos_id)
-                done = done | has_eos
-            
-            # Check if we've generated enough
-            done = done | (num_generated >= max_steps)
-            
-            # Select next draft based on r (always draft_len for always_accept)
-            block_idx = draft_len - 1
-            next_draft_tokens = candidate_tokens[block_idx]
-            next_draft_logits = cand_logits[block_idx]
-            
-            return (generated_tokens, num_generated, next_draft_tokens, next_draft_logits,
-                    cache, cache_idx, key, done)
-        
-        final_state = lax.while_loop(cond_fn, body_fn, initial_state)
-        generated_tokens, num_generated = final_state[0], final_state[1]
-        
-        return generated_tokens, num_generated
+            rng, cache, out, prefix_len, generated, draft_toks, draft_lgts, prev_logit, done = state
 
-    return full_decode
+            # Step tokens = [VERIFY(K)=draft_toks | PREDRAFT(K*K)=mask]
+            step_tokens = jnp.concatenate([draft_toks, predraft_masks], axis=0).astype(jnp.int32)  # [q_len]
+            step_pos_ids = (prefix_len + step_position_offsets)[None, :]                          # [1,q_len]
 
+            logits = decode_apply(
+                params,
+                cache,
+                step_tokens[None, :],
+                step_pos_ids.astype(jnp.int32),
+                prefix_len,
+            )[0]  # [q_len, V]
 
-# ==============================================================================
-# Simpler version: JITed single step with fori_loop for fixed iterations
-# ==============================================================================
-
-def make_decode_loop_fn(
-    model: TiDAR,
-    *,
-    cache_len: int,
-    draft_len: int,
-    max_steps: int,
-    mask_id: int,
-    bias_value: float,
-    temperature: float,
-    top_k: int,
-):
-    """Create a decode function using lax.fori_loop for fixed number of iterations.
-    
-    This is simpler than while_loop and works well when we want exactly max_steps tokens.
-    """
-    decode_bias = build_decode_bias_template(cache_len, draft_len, bias_value)
-    decode_bias = jax.device_put(decode_bias)
-    
-    # Precompute position offsets template (can be added to cache_idx)
-    step_position_offsets = build_decode_position_ids_template(draft_len)
-    step_position_offsets = jax.device_put(step_position_offsets)
-    
-    # Precompute commit position offsets
-    commit_position_offsets = jnp.arange(draft_len, dtype=jnp.int32)
-    commit_position_offsets = jax.device_put(commit_position_offsets)
-    
-    # Precompute predraft masks (constant)
-    predraft_masks = jnp.full((draft_len * draft_len,), mask_id, dtype=jnp.int32)
-    predraft_masks = jax.device_put(predraft_masks)
-    
-    # Number of iterations = ceil(max_steps / draft_len)
-    num_iterations = (max_steps + draft_len - 1) // draft_len
-
-    def decode_step_inner(params, cache_vars, tokens, position_ids, prefix_len):
-        return model.apply(
-            {"params": params, "cache": cache_vars},
-            tokens,
-            deterministic=True,
-            use_kv_cache=True,
-            write_to_cache=False,
-            prefix_len=prefix_len,
-            attn_bias=decode_bias,
-            position_ids=position_ids,
-            kv_cache_len=cache_len,
-        )
-
-    def commit_step_inner(params, cache_vars, tokens, position_ids, prefix_len, write_len):
-        _, mutated = model.apply(
-            {"params": params, "cache": cache_vars},
-            tokens,
-            deterministic=True,
-            use_kv_cache=True,
-            write_to_cache=True,
-            cur_index=prefix_len,
-            position_ids=position_ids,
-            kv_cache_len=cache_len,
-            cache_write_len=write_len,
-            mutable=["cache"],
-        )
-        return mutated["cache"]
-
-    @jax.jit
-    def decode_loop(
-        params,
-        cache_vars,
-        initial_draft_tokens: jnp.ndarray,
-        cache_index: int,
-        rng_key: jax.Array,
-    ):
-        """Run decode loop for fixed number of iterations.
-        
-        Always accepts all draft tokens (--always_accept mode).
-        """
-        
-        def body_fn(i, state):
-            (generated_tokens, cache, cache_idx, draft_tokens, key) = state
-            
-            key, sample_key = jax.random.split(key)
-            
-            # Build step tokens (draft + predraft masks)
-            step_tokens = jnp.concatenate([draft_tokens, predraft_masks], axis=0)
-            step_tokens = step_tokens[None, :]
-            
-            # Build position ids by adding cache_idx to precomputed offsets
-            step_position_ids = (cache_idx + step_position_offsets)[None, :]
-            
-            # Forward pass
-            step_logits = decode_step_inner(
-                params, cache, step_tokens, step_position_ids, cache_idx
+            verify_logits_raw = logits[:draft_len, :]  # [K,V]
+            verify_logits = jnp.concatenate(
+                [prev_logit[None, :], verify_logits_raw[:-1, :]], axis=0
             )
-            step_logits = step_logits[0]
-            
-            # Get candidate logits
-            cand_logits = step_logits[draft_len:].reshape(draft_len, draft_len, -1)
-            
-            # Sample from last candidate block (r=draft_len in always_accept mode)
-            next_draft_logits = cand_logits[-1]  # (draft_len, vocab)
-            next_draft_tokens = sample_batch_from_logits_jax(
-                next_draft_logits, sample_key, temperature, top_k
+
+            if always_accept:
+                r = jnp.asarray(draft_len, dtype=jnp.int32)
+                committed_full = draft_toks
+
+                # Sample only the last candidate block (r = K)
+                rng, sub_cand = jax.random.split(rng)
+                start = draft_len + (draft_len - 1) * draft_len
+                end = draft_len + draft_len * draft_len
+                cand_logits_last = logits[start:end, :].reshape((draft_len, -1))
+                _, draft_toks2 = sample_tokens(sub_cand, cand_logits_last, temperature=temperature, top_k=top_k)
+                draft_toks2 = draft_toks2.astype(jnp.int32)
+                draft_lgts2 = cand_logits_last
+            else:
+                cand_logits = logits[draft_len:, :].reshape((draft_len, draft_len, -1))  # [K,K,V]
+
+                # Sample candidates (vectorized): sample for all K*K positions in one call
+                rng, sub_cand = jax.random.split(rng)
+                flat_cand = cand_logits.reshape((-1, cand_logits.shape[-1]))  # [K*K,V]
+                _, flat_cand_tokens = sample_tokens(sub_cand, flat_cand, temperature=temperature, top_k=top_k)  # [K*K]
+                cand_tokens = flat_cand_tokens.reshape((draft_len, draft_len)).astype(jnp.int32)  # [K,K]
+
+                # Rejection sampling to choose r and committed tokens (in JAX)
+                rng, r, committed_full = rejection_sample_jax(
+                    rng,
+                    draft_ids=draft_toks,
+                    verify_logits=verify_logits,
+                    draft_logits=draft_lgts,
+                    temperature=temperature,
+                    top_k=top_k,
+                )
+
+                # Next draft comes from candidate block (r-1), not eff_r
+                block_idx = jnp.clip(r - 1, 0, draft_len - 1)
+                draft_toks2 = cand_tokens[block_idx]          # [K]
+                draft_lgts2 = cand_logits[block_idx]          # [K,V]
+
+            remaining = (max_steps - generated).astype(jnp.int32)
+            eff_r = jnp.minimum(r, remaining)
+
+            # EOS early stop inside committed tokens
+            has_eos = jnp.asarray(False)
+            if stop_on_eos and eos_id >= 0:
+                eos = jnp.asarray(eos_id, dtype=jnp.int32)
+                pos = idx_k
+                eos_mask = (committed_full == eos) & (pos < eff_r)
+                first_eos = jnp.min(jnp.where(eos_mask, pos, jnp.asarray(draft_len, dtype=jnp.int32)))
+                has_eos = first_eos < draft_len
+                eff_r = jnp.where(has_eos, jnp.minimum(eff_r, first_eos + 1), eff_r)
+
+            # Build fixed-length commit tokens (K) so cache write has static shape
+            commit_fixed = jnp.where(idx_k < eff_r, committed_full, jnp.asarray(pad_token_id, dtype=jnp.int32))
+            commit_fixed = commit_fixed.astype(jnp.int32)
+
+            # Write to cache at current prefix_len with fixed K tokens
+            # NOTE: requires prefix_len + K <= cache_len always (we enforce via bucket selection + slack).
+            pos_ids_k = (prefix_len + idx_k)[None, :]  # [1,K]
+            cache = write_cache_apply(params, cache, commit_fixed[None, :], pos_ids_k.astype(jnp.int32), prefix_len)
+
+            # Update output buffer aligned with cache positions
+            out = jax.lax.dynamic_update_slice(out, commit_fixed, (prefix_len,))
+
+            # Advance prefix_len by eff_r (NOT by K)
+            prefix_len2 = prefix_len + eff_r
+            generated2 = generated + eff_r
+
+            def _update_prev(args):
+                cache_in, eff_r_in, prefix_len_in, committed_in = args
+                last_tok = jnp.take(committed_in, eff_r_in - 1)
+                last_index = prefix_len_in - 1
+                token_1 = last_tok[None, None]
+                next_logit, cache_next = next_logit_apply(params, cache_in, token_1, last_index)
+                return cache_next, next_logit
+
+            def _keep_prev(args):
+                cache_in, _eff_r_in, _prefix_len_in, _committed_in = args
+                return cache_in, prev_logit
+
+            cache, prev_logit2 = jax.lax.cond(
+                eff_r > 0,
+                _update_prev,
+                _keep_prev,
+                (cache, eff_r, prefix_len2, committed_full),
             )
-            
-            # Commit current draft tokens to output buffer
-            write_start = i * draft_len
-            generated_tokens = lax.dynamic_update_slice(
-                generated_tokens, draft_tokens, (write_start,)
+
+            done2 = done | (generated2 >= max_steps) | has_eos
+
+            return (
+                rng,
+                cache,
+                out,
+                prefix_len2,
+                generated2,
+                draft_toks2,
+                draft_lgts2,
+                prev_logit2,
+                done2,
             )
-            
-            # Update cache with current draft tokens
-            commit_position_ids = (cache_idx + commit_position_offsets)[None, :]
-            cache = commit_step_inner(
-                params, cache, draft_tokens[None, :], commit_position_ids,
-                cache_idx, draft_len
-            )
-            cache_idx = cache_idx + draft_len
-            
-            return (generated_tokens, cache, cache_idx, next_draft_tokens, key)
-        
-        initial_state = (
-            jnp.zeros((num_iterations * draft_len,), dtype=jnp.int32),
-            cache_vars,
-            jnp.int32(cache_index),
-            initial_draft_tokens,
+
+        state0 = (
             rng_key,
+            cache_vars,
+            out_ids,
+            prefix_len,
+            generated,
+            draft_tokens,
+            draft_logits,
+            prev_logit,
+            done,
         )
-        
-        final_state = lax.fori_loop(0, num_iterations, body_fn, initial_state)
-        generated_tokens = final_state[0]
-        
-        # Trim to max_steps
-        return generated_tokens[:max_steps]
+        stateF = jax.lax.while_loop(cond_fn, body_fn, state0)
 
-    return decode_loop
+        rngF, cacheF, outF, prefix_lenF, generatedF, _draft_toksF, _draft_logitsF, _prev_logitF, doneF = stateF
+        return outF, prefix_lenF, generatedF
+
+    return generate
 
 
-# ==============================================================================
-# Main
-# ==============================================================================
-
+# =========================
+# CLI
+# =========================
 def _parse_bool(value: str) -> bool:
     lowered = value.strip().lower()
     if lowered in {"1", "true", "yes", "y", "on"}:
@@ -837,7 +714,7 @@ def _parse_bool(value: str) -> bool:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser("TiDAR inference (JIT optimized)")
+    parser = argparse.ArgumentParser("TiDAR inference (KV cache, jitted decode)")
     parser.add_argument("--checkpoint", type=str, default="latest")
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--prompt", type=str, default="Once upon")
@@ -852,14 +729,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--always_accept", action="store_true")
     parser.add_argument("--cache_buckets", type=str, default=None)
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--use_while_loop", action="store_true", 
-                       help="Use while_loop instead of fori_loop (for variable length)")
     return parser.parse_args()
 
 
+# =========================
+# Main
+# =========================
 def main() -> None:
     args = parse_args()
     cfg = load_configs()
+
+    # Keep your existing config update (even if name is a bit odd)
     jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
 
     temperature = args.temperature if args.temperature is not None else float(cfg.inference.temperature)
@@ -882,17 +762,7 @@ def main() -> None:
     if context_length <= 0:
         raise ValueError("context_length must be > 0")
     if context_length > model_context_length:
-        raise ValueError(
-            f"context_length {context_length} exceeds model context_length {model_context_length}."
-        )
-
-    # Ensure max_steps is divisible by draft_len for fori_loop
-    if not args.use_while_loop:
-        # Round up to nearest multiple of draft_len
-        original_steps = max_steps
-        max_steps = ((max_steps + draft_len - 1) // draft_len) * draft_len
-        if max_steps != original_steps and args.verbose:
-            print(f"[info] Rounded max_steps from {original_steps} to {max_steps} for fori_loop")
+        raise ValueError(f"context_length {context_length} exceeds model context_length {model_context_length}.")
 
     checkpoint_path = resolve_checkpoint_path(cfg, args.checkpoint, args.checkpoint_dir)
     print(f"Using checkpoint: {checkpoint_path}")
@@ -903,14 +773,20 @@ def main() -> None:
         raise ValueError("Prompt produced zero tokens. Provide non-empty text.")
 
     prompt_len = int(prompt_ids.shape[0])
+
+    # IMPORTANT CHANGE:
+    # We write K tokens into cache every TiDAR iteration (fixed-shape write),
+    # even though prefix_len advances by r. This requires extra slack so that
+    # prefix_len+K never exceeds cache_len during the run.
+    required_cache_len = prompt_len + max_steps + draft_len
+    if required_cache_len > context_length:
+        raise ValueError(
+            f"prompt_len + max_steps + draft_len ({required_cache_len}) exceeds context_length {context_length}."
+        )
+
     cache_buckets = parse_cache_buckets(args.cache_buckets, context_length=context_length)
     if not cache_buckets:
         raise ValueError("No valid cache buckets available within context length.")
-    required_cache_len = prompt_len + max_steps
-    if required_cache_len > context_length:
-        raise ValueError(
-            f"prompt_len + max_steps ({required_cache_len}) exceeds context_length {context_length}."
-        )
     cache_len = select_cache_bucket(required_cache_len, cache_buckets)
     print(f"Using cache bucket: {cache_len}")
 
@@ -932,154 +808,89 @@ def main() -> None:
 
     params = jax.device_put(params)
 
+    prompt_ids_jax = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)
+    prompt_logits = model.apply({"params": params}, prompt_ids_jax, deterministic=True)
+    prev_logit = jax.device_put(prompt_logits[0, -1])
+
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
 
+    eos_id = tokenizer.eos_token_id
+    eos_id_for_jit = int(eos_id) if eos_id is not None else -1
+
     cache_vars = init_kv_cache(model, batch_size=1, pad_token_id=pad_token_id)
     cache_vars = jax.device_put(cache_vars)
 
-    # Prefill cache with prompt
-    prompt_ids_jax = jnp.asarray(prompt_ids, dtype=jnp.int32)
+    # Prefill committed prefix (prompt) into KV cache
     cache_vars, cache_index = prefill_prompt_cache(
         model,
         params,
         cache_vars,
-        prompt_ids_jax,
+        prompt_ids,
         kv_cache_len=cache_len,
     )
 
-    # Build prefill bias for initial draft
-    prefill_template = build_prefill_bias_template(context_length, draft_len, bias_value)
-    prefill_slice = prefill_template[:, :, :draft_len, : (draft_len + prompt_len)]
-    if cache_len > prompt_len:
-        pad_width = cache_len - prompt_len
-        pad = jnp.zeros((1, 1, draft_len, pad_width), dtype=prefill_slice.dtype)
-        prefill_bias = jnp.concatenate([prefill_slice, pad], axis=-1)
-    else:
-        prefill_bias = prefill_slice
+    # Output buffer aligned with cache positions (length = cache_len).
+    # IMPORTANT: do this on host to avoid dynamic slice sizes inside jit.
+    out_host = np.full((required_cache_len,), pad_token_id, dtype=np.int32)
+    out_host[:prompt_len] = prompt_ids
+    out_ids = jax.device_put(jnp.asarray(out_host))
 
-    prefill_draft_fn = make_prefill_draft_fn(
+    # Build a single jitted generator (NO python decode loop)
+    generate_fn = make_tidar_generate_fn(
         model,
         cache_len=cache_len,
-        prefill_bias=prefill_bias,
+        draft_len=draft_len,
+        mask_id=int(mask_id),
+        pad_token_id=int(pad_token_id),
+        eos_id=eos_id_for_jit,
+        stop_on_eos=bool(stop_on_eos),
+        always_accept=bool(args.always_accept),
+        temperature=float(temperature),
+        top_k=int(top_k),  # static for top_k masking/top_k op
+        bias_value=float(bias_value),
     )
 
-    # Initial draft via prefill
-    rng, prefill_key = jax.random.split(rng)
-    prefill_masks = jnp.full((1, draft_len), mask_id, dtype=jnp.int32)
-    prefill_position_ids = build_prefill_position_ids(cache_index, draft_len)
-
-    prefill_start = time.perf_counter()
-    prefill_logits = prefill_draft_fn(
+    # Run generation
+    decode_start = time.perf_counter()
+    out_ids_f, final_len, generated = generate_fn(
         params,
         cache_vars,
-        prefill_masks,
-        prefill_position_ids[None, :],
-        jnp.int32(cache_index),
+        out_ids,
+        jnp.asarray(cache_index, dtype=jnp.int32),
+        jnp.asarray(max_steps, dtype=jnp.int32),
+        prev_logit,
+        rng,
     )
-    prefill_logits.block_until_ready()
-    prefill_logits = prefill_logits[0]  # (draft_len, vocab_size)
-    
-    # Sample initial draft tokens on device
-    draft_tokens = sample_batch_from_logits_jax(
-        prefill_logits, prefill_key, temperature, top_k
-    )
-    prefill_time = time.perf_counter() - prefill_start
+    out_ids_f.block_until_ready()
+    decode_time = time.perf_counter() - decode_start
 
-    eos_id = tokenizer.eos_token_id if stop_on_eos else None
+    final_len = int(np.asarray(final_len))
+    out_tokens = np.asarray(out_ids_f[:final_len], dtype=np.int32)
 
-    # Choose decode function based on mode
-    if args.use_while_loop:
-        # Use while_loop for variable-length generation with early stopping
-        decode_fn = make_full_decode_fn(
-            model,
-            cache_len=cache_len,
-            draft_len=draft_len,
-            max_steps=max_steps,
-            mask_id=mask_id,
-            bias_value=bias_value,
-            temperature=temperature,
-            top_k=top_k,
-            always_accept=args.always_accept,
-        )
-        
-        rng, decode_key = jax.random.split(rng)
-        decode_start = time.perf_counter()
-        
-        generated_tokens, num_generated = decode_fn(
-            params,
-            cache_vars,
-            draft_tokens,
-            prefill_logits,
-            prompt_ids_jax,
-            cache_index,
-            decode_key,
-            eos_id,
-        )
-        generated_tokens.block_until_ready()
-        decode_time = time.perf_counter() - decode_start
-        
-        # Clip to max_steps (buffer may be larger due to rounding)
-        actual_generated = min(int(num_generated), max_steps)
-        generated_tokens = np.asarray(generated_tokens[:actual_generated])
-        generated = actual_generated
-    else:
-        # Use fori_loop for fixed iterations (simpler, faster compilation)
-        if not args.always_accept:
-            print("[warning] fori_loop mode requires --always_accept, enabling it")
-        
-        decode_fn = make_decode_loop_fn(
-            model,
-            cache_len=cache_len,
-            draft_len=draft_len,
-            max_steps=max_steps,
-            mask_id=mask_id,
-            bias_value=bias_value,
-            temperature=temperature,
-            top_k=top_k,
-        )
-        
-        rng, decode_key = jax.random.split(rng)
-        decode_start = time.perf_counter()
-        
-        generated_tokens = decode_fn(
-            params,
-            cache_vars,
-            draft_tokens,
-            cache_index,
-            decode_key,
-        )
-        generated_tokens.block_until_ready()
-        decode_time = time.perf_counter() - decode_start
-        
-        generated_tokens = np.asarray(generated_tokens)
-        generated = min(len(generated_tokens), max_steps)
-        generated_tokens = generated_tokens[:generated]
-
-    # Combine prompt and generated tokens for decoding
-    all_ids = np.concatenate([prompt_ids, generated_tokens], axis=0)
-    text = tokenizer.decode(all_ids, skip_special_tokens=True)
-    
+    # Stop-on-eos pretty printing (match your previous behavior)
+    text = tokenizer.decode(out_tokens, skip_special_tokens=True)
     if stop_on_eos and eos_id is not None:
-        eos_hits = np.where(all_ids == eos_id)[0]
+        eos_hits = np.where(out_tokens == eos_id)[0]
         if eos_hits.size > 0:
             cut = int(eos_hits[0])
-            text = tokenizer.decode(all_ids[:cut], skip_special_tokens=True) + "<EOS>"
+            text = tokenizer.decode(out_tokens[:cut], skip_special_tokens=True) + "<EOS>"
 
     print("\n==================== RESULT ====================")
     print(text)
     print("================================================")
 
     if args.verbose:
-        toks_per_s = (generated / decode_time) if decode_time > 0 else float("inf")
+        gen_count = int(np.asarray(generated))
+        toks_per_s = (gen_count / decode_time) if decode_time > 0 else float("inf")
         print("\n[perf]")
         print(f"prompt_tokens: {prompt_len}")
-        print(f"generated_tokens: {generated}")
-        print(f"prefill_time_s: {prefill_time:.6f}")
+        print(f"generated_tokens: {gen_count}")
         print(f"decode_time_s:  {decode_time:.6f}")
         print(f"tokens_per_second_decode: {toks_per_s:.6f}")
 
 
 if __name__ == "__main__":
     main()
+

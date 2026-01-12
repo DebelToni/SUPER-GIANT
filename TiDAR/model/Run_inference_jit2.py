@@ -499,18 +499,42 @@ def make_tidar_generate_fn(
         )
         return mutated["cache"]
 
+    def next_logit_apply(params, cache_vars, token_1, cur_index):
+        # token_1: [1,1]
+        logits, mutated = model.apply(
+            {"params": params, "cache": cache_vars},
+            token_1,
+            deterministic=True,
+            use_kv_cache=True,
+            write_to_cache=True,
+            cur_index=cur_index,
+            kv_cache_len=cache_len,
+            mutable=["cache"],
+        )
+        return logits[0, 0], mutated["cache"]
+
     @jax.jit
-    def generate(params, cache_vars, out_ids, prefix_len_init: jnp.ndarray, max_steps: jnp.ndarray, rng_key: jax.Array):
+    def generate(
+        params,
+        cache_vars,
+        out_ids,
+        prefix_len_init: jnp.ndarray,
+        max_steps: jnp.ndarray,
+        prev_logit_init: jnp.ndarray,
+        rng_key: jax.Array,
+    ):
         """
         params: model params pytree
         cache_vars: KV cache pytree (already contains prompt)
         out_ids: [cache_len] int32 buffer, with prompt already written at [0:prefix_len_init]
         prefix_len_init: scalar int32 (prompt length)
         max_steps: scalar int32 (#new tokens to generate)
+        prev_logit_init: [V] logit for token after prompt
         rng_key: PRNGKey
         Returns: out_ids, final_prefix_len, generated_count
         """
         prefix_len = prefix_len_init.astype(jnp.int32)
+        prev_logit = prev_logit_init
         generated = jnp.asarray(0, dtype=jnp.int32)
         done = jnp.asarray(False)
 
@@ -528,11 +552,11 @@ def make_tidar_generate_fn(
         # They are proposals only.
 
         def cond_fn(state):
-            _rng, _cache, _out, _prefix_len, _generated, _draft_toks, _draft_logits, _done = state
+            _rng, _cache, _out, _prefix_len, _generated, _draft_toks, _draft_logits, _prev_logit, _done = state
             return (_generated < max_steps) & (~_done)
 
         def body_fn(state):
-            rng, cache, out, prefix_len, generated, draft_toks, draft_lgts, done = state
+            rng, cache, out, prefix_len, generated, draft_toks, draft_lgts, prev_logit, done = state
 
             # Step tokens = [VERIFY(K)=draft_toks | PREDRAFT(K*K)=mask]
             step_tokens = jnp.concatenate([draft_toks, predraft_masks], axis=0).astype(jnp.int32)  # [q_len]
@@ -546,7 +570,10 @@ def make_tidar_generate_fn(
                 prefix_len,
             )[0]  # [q_len, V]
 
-            verify_logits = logits[:draft_len, :]  # [K,V]
+            verify_logits_raw = logits[:draft_len, :]  # [K,V]
+            verify_logits = jnp.concatenate(
+                [prev_logit[None, :], verify_logits_raw[:-1, :]], axis=0
+            )
 
             if always_accept:
                 r = jnp.asarray(draft_len, dtype=jnp.int32)
@@ -613,14 +640,53 @@ def make_tidar_generate_fn(
             prefix_len2 = prefix_len + eff_r
             generated2 = generated + eff_r
 
+            def _update_prev(args):
+                cache_in, eff_r_in, prefix_len_in, committed_in = args
+                last_tok = jnp.take(committed_in, eff_r_in - 1)
+                last_index = prefix_len_in - 1
+                token_1 = last_tok[None, None]
+                next_logit, cache_next = next_logit_apply(params, cache_in, token_1, last_index)
+                return cache_next, next_logit
+
+            def _keep_prev(args):
+                cache_in, _eff_r_in, _prefix_len_in, _committed_in = args
+                return cache_in, prev_logit
+
+            cache, prev_logit2 = jax.lax.cond(
+                eff_r > 0,
+                _update_prev,
+                _keep_prev,
+                (cache, eff_r, prefix_len2, committed_full),
+            )
+
             done2 = done | (generated2 >= max_steps) | has_eos
 
-            return (rng, cache, out, prefix_len2, generated2, draft_toks2, draft_lgts2, done2)
+            return (
+                rng,
+                cache,
+                out,
+                prefix_len2,
+                generated2,
+                draft_toks2,
+                draft_lgts2,
+                prev_logit2,
+                done2,
+            )
 
-        state0 = (rng_key, cache_vars, out_ids, prefix_len, generated, draft_tokens, draft_logits, done)
+        state0 = (
+            rng_key,
+            cache_vars,
+            out_ids,
+            prefix_len,
+            generated,
+            draft_tokens,
+            draft_logits,
+            prev_logit,
+            done,
+        )
         stateF = jax.lax.while_loop(cond_fn, body_fn, state0)
 
-        rngF, cacheF, outF, prefix_lenF, generatedF, _draft_toksF, _draft_logitsF, doneF = stateF
+        rngF, cacheF, outF, prefix_lenF, generatedF, _draft_toksF, _draft_logitsF, _prev_logitF, doneF = stateF
         return outF, prefix_lenF, generatedF
 
     return generate
@@ -733,6 +799,10 @@ def main() -> None:
 
     params = jax.device_put(params)
 
+    prompt_ids_jax = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)
+    prompt_logits = model.apply({"params": params}, prompt_ids_jax, deterministic=True)
+    prev_logit = jax.device_put(prompt_logits[0, -1])
+
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
@@ -781,6 +851,7 @@ def main() -> None:
         out_ids,
         jnp.asarray(cache_index, dtype=jnp.int32),
         jnp.asarray(max_steps, dtype=jnp.int32),
+        prev_logit,
         rng,
     )
     out_ids_f.block_until_ready()

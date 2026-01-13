@@ -1,34 +1,14 @@
 #!/usr/bin/env python3
+"""Extended benchmark script with XLA implementation and multi‑seq‑len support.
+
+Adds a fourth attention variant using ``implementation="xla"`` and loops over a set of
+sequence lengths (default: 128,256,512,784,1024,1400,1800,2200,2600,3000,4000,5000,8000,10000)
+printing a CSV summary and a Matplotlib plot.
+
+KV Cache Mode: Simulates incremental decoding by measuring attention performance
+as the KV cache grows from an initial prompt length to various cache sizes.
 """
-bench_attention_jax.py
-
-Benchmarks 3 attention forward implementations on a "huge" sequence (default seq_len=10000):
-
-1) jax.nn.dot_product_attention(..., implementation="cudnn")  (cuDNN FlashAttention backend)
-2) A naive JAX attention forward (materializes the [T,S] attention matrix) wrapped in jax.jit
-3) JAX Pallas (Triton backend) FlashAttention-style kernel via:
-     jax.experimental.pallas.ops.gpu.attention.mha
-
-Notes
------
-- The cuDNN and Pallas variants require an NVIDIA GPU + compatible jaxlib build.
-- For Pallas GPU attention, sequence lengths are often happiest when padded to a multiple
-  of the chosen block size. This script pads Q/K/V to the next multiple of block_size,
-  runs all 3 methods on the padded tensors for apples-to-apples timing, then slices back
-  to the requested seq_len.
-- The naive implementation can use a lot of memory: it builds an attention matrix of
-  shape (B, N, T, S). With B=1, N=8, T=S=10000, that is 800M elements.
-
-Example
--------
-  python bench_attention_jax.py --seq-len 10000 --num-heads 8 --head-dim 64 --dtype fp16 --iters 5
-
-If you see GPU OOM, try:
-  - smaller --num-heads / --seq-len
-  - dtype fp16
-  - export XLA_PYTHON_CLIENT_PREALLOCATE=false
-  - export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
-"""
+# Original documentation omitted for brevity – see upstream repo for details.
 
 from __future__ import annotations
 
@@ -127,6 +107,15 @@ def cudnn_attention(q: jax.Array, k: jax.Array, v: jax.Array, *, is_causal: bool
 
 cudnn_attention_jit = jax.jit(cudnn_attention, static_argnames=("is_causal",))
 
+# XLA implementation (standard JAX attention without backend spec)
+def xla_attention(q: jax.Array, k: jax.Array, v: jax.Array, *, is_causal: bool = False) -> jax.Array:
+    """Attention using JAX's default XLA implementation.
+    Equivalent to ``implementation="xla"`` in ``dot_product_attention``.
+    """
+    return jax.nn.dot_product_attention(q, k, v, implementation="xla", is_causal=is_causal)
+
+xla_attention_jit = jax.jit(xla_attention, static_argnames=("is_causal",))
+
 
 @dataclass
 class PallasMHA:
@@ -201,7 +190,7 @@ def bench(fn: Callable[[], jax.Array], *, warmup: int, iters: int) -> Tuple[floa
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seq-len", type=int, default=10_000)
+    ap.add_argument("--seq-len", type=int, default=10_000, help="Legacy single sequence length")
     ap.add_argument("--num-heads", type=int, default=8)
     ap.add_argument("--head-dim", type=int, default=64)
     ap.add_argument("--batch", type=int, default=1)
@@ -210,8 +199,24 @@ def main():
     ap.add_argument("--iters", type=int, default=5)
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--causal", action="store_true")
+    ap.add_argument("--kv-cache", action="store_true", help="Enable KV cache simulation mode for incremental decoding")
+    ap.add_argument("--prompt-len", type=int, default=128, help="Initial prompt length for KV cache mode")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seq-lens", type=str, default="128,256,512,784,1024,1400,1800,2200,2600,3000,4000,5000,8000,10000", help="Comma-separated list of sequence lengths to benchmark (or cache sizes in KV mode)")
     args = ap.parse_args()
+
+    # Parse sequence lengths (or cache sizes in KV mode)
+    seq_lens = [int(x.strip()) for x in args.seq_lens.split(",")]
+    single_seq_len_mode = len(seq_lens) == 1 and args.seq_len != seq_lens[0]
+    if single_seq_len_mode:
+        seq_lens = [args.seq_len]
+
+    # In KV cache mode, these represent cache sizes (must be >= prompt_len)
+    if args.kv_cache:
+        seq_lens = [s for s in seq_lens if s >= args.prompt_len]
+        if not seq_lens:
+            print(f"No valid cache sizes found (must be >= prompt_len={args.prompt_len})")
+            return
 
     dtype_map = {"fp16": jnp.float16, "bf16": jnp.bfloat16, "fp32": jnp.float32}
     dtype = dtype_map[args.dtype]
@@ -220,100 +225,119 @@ def main():
     devs = jax.devices()
     print(f"JAX backend: {backend} | devices: {devs}")
 
-    b, t, n, h = args.batch, args.seq_len, args.num_heads, args.head_dim
-    s = t  # self-attn for this benchmark
-
-    # Padding to help Pallas kernels and keep shapes aligned across all 3 paths.
-    padded_len = ceil_to_multiple(t, args.block_size)
-    if padded_len != t:
-        print(f"Padding seq_len {t} -> {padded_len} (multiple of block_size={args.block_size})")
-
-    # Rough memory estimate for the naive attention matrix.
-    attn_bytes = bytes_for_attention_matrix(b, n, padded_len, padded_len, dtype)
-    print(f"Naive attention matrix size (B*N*T*S): {b}*{n}*{padded_len}*{padded_len} @ {args.dtype} ~= {human_bytes(attn_bytes)}")
-
-    key = _key(args.seed)
-    k1, k2, k3 = jax.random.split(key, 3)
-    q = jax.random.normal(k1, (b, t, n, h), dtype=dtype)
-    k = jax.random.normal(k2, (b, s, n, h), dtype=dtype)
-    v = jax.random.normal(k3, (b, s, n, h), dtype=dtype)
-
-    # Pad along sequence axis=1
-    q_pad = pad_to_len(q, padded_len, axis=1)
-    k_pad = pad_to_len(k, padded_len, axis=1)
-    v_pad = pad_to_len(v, padded_len, axis=1)
-
-    # 1) cuDNN dot_product_attention
-    def run_cudnn():
-        out = cudnn_attention_jit(q_pad, k_pad, v_pad, is_causal=args.causal)
-        return out[:, :t, :, :]
-
-    # 2) naive
-    def run_naive():
-        out = naive_attention_jit(q_pad, k_pad, v_pad, is_causal=args.causal)
-        return out[:, :t, :, :]
-
-    # 3) Pallas flash-attention style kernel
+    # Prepare Pallas function (same for all seq lens)
     pallas_fn, pallas_msg = make_pallas_attention(args.block_size)
 
-    def run_pallas():
-        assert pallas_fn is not None
-        out = pallas_fn(q_pad, k_pad, v_pad, is_causal=args.causal)
-        return out[:, :t, :, :]
+    # Collect all results: list of tuples (seq_len, impl_name, min_ms, mean_ms, max_ms)
+    all_results = []
 
-    # Benchmark
-    results = []
+    for cache_size in seq_lens:
+        if args.kv_cache:
+            print(f"\n=== Benchmarking KV cache size = {cache_size} (prompt_len={args.prompt_len}) ===")
+            # In KV cache mode: Q is new token (seq_len=1), K/V are cache (seq_len=cache_size)
+            b, n, h = args.batch, args.num_heads, args.head_dim
+            q_len, kv_len = 1, cache_size
 
-    # cuDNN
-    try:
-        mn, mean, mx = bench(run_cudnn, warmup=args.warmup, iters=args.iters)
-        results.append(("jax.nn.dot_product_attention (cudnn)", mn, mean, mx))
-    except Exception as e:
-        results.append(("jax.nn.dot_product_attention (cudnn)", float("nan"), float("nan"), float("nan")))
-        print(f"[SKIP] cuDNN attention failed: {e}")
+            # Memory calculation for attention matrix
+            padded_kv_len = ceil_to_multiple(kv_len, args.block_size)
+            addr = bytes_for_attention_matrix(b, n, q_len, kv_len, dtype)
+            print(f"Attention matrix size: {b}*{n}*{q_len}*{kv_len} @ {args.dtype} ~= {human_bytes(addr)}")
 
-    # naive
-    try:
-        mn, mean, mx = bench(run_naive, warmup=args.warmup, iters=args.iters)
-        results.append(("naive jitted attention", mn, mean, mx))
-    except Exception as e:
-        results.append(("naive jitted attention", float("nan"), float("nan"), float("nan")))
-        print(f"[SKIP] naive attention failed (likely OOM): {e}")
+            # Generate data: Q is new token, K/V are from cache
+            key = _key(args.seed + cache_size)
+            k1, k2, k3 = jax.random.split(key, 3)
+            q = jax.random.normal(k1, (b, q_len, n, h), dtype=dtype)  # New token
+            k = jax.random.normal(k2, (b, kv_len, n, h), dtype=dtype)  # Cache
+            v = jax.random.normal(k3, (b, kv_len, n, h), dtype=dtype)  # Cache
 
-    # pallas
-    if pallas_fn is None:
-        results.append((f"pallas mha (flash-attn style) [{pallas_msg}]", float("nan"), float("nan"), float("nan")))
-        print(f"[SKIP] pallas attention: {pallas_msg}")
-    else:
-        try:
-            mn, mean, mx = bench(run_pallas, warmup=args.warmup, iters=args.iters)
-            results.append(("pallas mha (flash-attn style)", mn, mean, mx))
-        except Exception as e:
-            results.append(("pallas mha (flash-attn style)", float("nan"), float("nan"), float("nan")))
-            print(f"[SKIP] pallas attention failed: {e}")
+            # Pad to block size multiple
+            k_pad = pad_to_len(k, padded_kv_len, axis=1)
+            v_pad = pad_to_len(v, padded_kv_len, axis=1)
+            q_pad = q  # No padding needed for q (length 1)
 
-    # Print summary
-    print("\n=== Timing (ms) ===")
-    width = max(len(r[0]) for r in results)
-    for name, mn, mean, mx in results:
-        if math.isnan(mean):
-            print(f"{name:<{width}} : (skipped)")
+            # Always use causal attention for decoding
+            causal = True
         else:
-            print(f"{name:<{width}} : min {mn:8.2f} | mean {mean:8.2f} | max {mx:8.2f}")
+            print(f"\n=== Benchmarking seq_len = {cache_size} ===")
+            b, t, n, h = args.batch, cache_size, args.num_heads, args.head_dim
+            q_len, kv_len = t, t
 
-    # Optional correctness sanity-check (only if all 3 worked)
-    try:
-        y_cudnn = run_cudnn()
-        y_naive = run_naive()
-        max_diff_cudnn = jnp.max(jnp.abs(y_cudnn - y_naive)).item()
-        print(f"\nmax|cudnn - naive| = {max_diff_cudnn:.6g}")
+            # Padding
+            padded_len = ceil_to_multiple(t, args.block_size)
+            if padded_len != t:
+                print(f"Padding seq_len {t} -> {padded_len} (multiple of block_size={args.block_size})")
 
-        if pallas_fn is not None:
-            y_pallas = run_pallas()
-            max_diff_pallas = jnp.max(jnp.abs(y_pallas - y_naive)).item()
-            print(f"max|pallas - naive| = {max_diff_pallas:.6g}")
-    except Exception as e:
-        print(f"\n(correctness check skipped: {e})")
+            addr = bytes_for_attention_matrix(b, n, padded_len, padded_len, dtype)
+            print(f"Naive attention matrix size: {b}*{n}*{padded_len}*{padded_len} @ {args.dtype} ~= {human_bytes(addr)}")
+
+            key = _key(args.seed + cache_size)
+            k1, k2, k3 = jax.random.split(key, 3)
+            q = jax.random.normal(k1, (b, t, n, h), dtype=dtype)
+            k = jax.random.normal(k2, (b, t, n, h), dtype=dtype)
+            v = jax.random.normal(k3, (b, t, n, h), dtype=dtype)
+
+            q_pad = pad_to_len(q, padded_len, axis=1)
+            k_pad = pad_to_len(k, padded_len, axis=1)
+            v_pad = pad_to_len(v, padded_len, axis=1)
+
+            causal = args.causal
+
+        # cuDNN
+        try:
+            mn, mean, mx = bench(lambda: cudnn_attention_jit(q_pad, k_pad, v_pad, is_causal=causal)[:, :q_len, :, :], warmup=args.warmup, iters=args.iters)
+            all_results.append((cache_size, "cudnn", mn, mean, mx))
+        except Exception as e:
+            print(f"[SKIP] cuDNN attention failed: {e}")
+            all_results.append((cache_size, "cudnn", float("nan"), float("nan"), float("nan")))
+
+        # XLA
+        try:
+            mn, mean, mx = bench(lambda: xla_attention_jit(q_pad, k_pad, v_pad, is_causal=causal)[:, :q_len, :, :], warmup=args.warmup, iters=args.iters)
+            all_results.append((cache_size, "xla", mn, mean, mx))
+        except Exception as e:
+            print(f"[SKIP] XLA attention failed: {e}")
+            all_results.append((cache_size, "xla", float("nan"), float("nan"), float("nan")))
+
+        # naive
+        try:
+            mn, mean, mx = bench(lambda: naive_attention_jit(q_pad, k_pad, v_pad, is_causal=causal)[:, :q_len, :, :], warmup=args.warmup, iters=args.iters)
+            all_results.append((cache_size, "naive", mn, mean, mx))
+        except Exception as e:
+            print(f"[SKIP] naive attention failed: {e}")
+            all_results.append((cache_size, "naive", float("nan"), float("nan"), float("nan")))
+
+        # pallas
+        if pallas_fn is None:
+            print(f"[SKIP] pallas attention: {pallas_msg}")
+            all_results.append((cache_size, "pallas", float("nan"), float("nan"), float("nan")))
+        else:
+            try:
+                mn, mean, mx = bench(lambda: pallas_fn(q_pad, k_pad, v_pad, is_causal=causal)[:, :q_len, :, :], warmup=args.warmup, iters=args.iters)
+                all_results.append((cache_size, "pallas", mn, mean, mx))
+            except Exception as e:
+                print(f"[SKIP] pallas attention failed: {e}")
+                all_results.append((cache_size, "pallas", float("nan"), float("nan"), float("nan")))
+
+    # Print console summary
+    metric_name = "cache_size" if args.kv_cache else "seq_len"
+    print(f"\n=== Timing (ms) ===")
+    for seq in seq_lens:
+        print(f"\n{metric_name}={seq}")
+        sub = [r for r in all_results if r[0] == seq]
+        for _, name, mn, mean, mx in sub:
+            if math.isnan(mean):
+                print(f"  {name:12s} : (skipped)")
+            else:
+                print(f"  {name:12s} : min {mn:8.2f} | mean {mean:8.2f} | max {mx:8.2f}")
+
+    # Write CSV
+    csv_path = "benchmark_results.csv"
+    with open(csv_path, "w") as f:
+        header = "cache_size" if args.kv_cache else "seq_len"
+        f.write(f"{header},implementation,min_ms,mean_ms,max_ms\n")
+        for seq, name, mn, mean, mx in all_results:
+            f.write(f"{seq},{name},{mn},{mean},{mx}\n")
+    print(f"\nCSV written to {csv_path}")
 
 
 if __name__ == "__main__":

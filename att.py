@@ -148,8 +148,8 @@ def make_pallas_attention(block_size: int) -> Tuple[Optional[Callable], str]:
     BlockSizes = pmha.BlockSizes
     mha = pmha.mha
 
-    # Forward-only call site with separate paths for causal and non-causal
-    def pallas_attn_non_causal(q: jax.Array, k: jax.Array, v: jax.Array) -> jax.Array:
+    # Forward-only call site.
+    def pallas_attn(q: jax.Array, k: jax.Array, v: jax.Array, *, is_causal: bool = False) -> jax.Array:
         bs = BlockSizes(
             block_q=block_size,
             block_k=block_size,
@@ -158,7 +158,23 @@ def make_pallas_attention(block_size: int) -> Tuple[Optional[Callable], str]:
             block_q_dq=block_size,
             block_kv_dq=block_size,
         )
-        return mha(q, k, v, None, block_sizes=bs)
+        # For causal attention, create a causal mask as bias
+        if is_causal:
+            # Create causal mask: (B, N, T, S) where T=q_len, S=k_len
+            b, t, n, h = q.shape
+            s = k.shape[1]
+            # Causal mask: allow attending only to <= current position
+            # For KV cache: when t=1 (single token), mask should be all ones since we attend to all cache
+            # For full sequence: standard lower triangular mask
+            mask = jnp.tril(jnp.ones((t, s), dtype=bool))
+            # Convert to bias: 0 for allowed, -inf for masked
+            bias = jnp.where(mask, 0.0, jnp.finfo(q.dtype).min)
+            # Expand to (B, N, T, S)
+            bias = jnp.broadcast_to(bias[None, None, :, :], (b, n, t, s))
+        else:
+            bias = None
+        
+        return mha(q, k, v, bias, block_sizes=bs)
 
     def pallas_attn_causal(q: jax.Array, k: jax.Array, v: jax.Array) -> jax.Array:
         # For causal attention with Pallas, we'll fall back to the naive implementation
@@ -222,6 +238,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--seq-lens", type=str, default="128,256,512,784,1024,1400,1800,2200,2600,3000,4000,5000,8000,10000", help="Comma-separated list of sequence lengths to benchmark (or cache sizes in KV mode)")
     args = ap.parse_args()
+
+    # In KV cache mode, use bf16 by default to avoid XLA precision issues
+    if args.kv_cache and args.dtype == "fp16":
+        print("Note: Switching from fp16 to bf16 for KV cache mode to avoid XLA precision issues")
+        args.dtype = "bf16"
 
     # Parse sequence lengths (or cache sizes in KV mode)
     seq_lens = [int(x.strip()) for x in args.seq_lens.split(",")]

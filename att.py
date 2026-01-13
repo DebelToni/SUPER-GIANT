@@ -223,11 +223,6 @@ def main():
     ap.add_argument("--seq-lens", type=str, default="128,256,512,784,1024,1400,1800,2200,2600,3000,4000,5000,8000,10000", help="Comma-separated list of sequence lengths to benchmark (or cache sizes in KV mode)")
     args = ap.parse_args()
 
-    # In KV cache mode, use bf16 by default to avoid XLA precision issues
-    if args.kv_cache and args.dtype == "fp16":
-        print("Note: Switching from fp16 to bf16 for KV cache mode to avoid XLA precision issues")
-        args.dtype = "bf16"
-
     # Parse sequence lengths (or cache sizes in KV mode)
     seq_lens = [int(x.strip()) for x in args.seq_lens.split(",")]
     single_seq_len_mode = len(seq_lens) == 1 and args.seq_len != seq_lens[0]

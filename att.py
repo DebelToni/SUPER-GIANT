@@ -148,8 +148,8 @@ def make_pallas_attention(block_size: int) -> Tuple[Optional[Callable], str]:
     BlockSizes = pmha.BlockSizes
     mha = pmha.mha
 
-    # Forward-only call site.
-    def pallas_attn(q: jax.Array, k: jax.Array, v: jax.Array, *, is_causal: bool = False) -> jax.Array:
+    # Forward-only call site with separate paths for causal and non-causal
+    def pallas_attn_non_causal(q: jax.Array, k: jax.Array, v: jax.Array) -> jax.Array:
         bs = BlockSizes(
             block_q=block_size,
             block_k=block_size,
@@ -158,23 +158,30 @@ def make_pallas_attention(block_size: int) -> Tuple[Optional[Callable], str]:
             block_q_dq=block_size,
             block_kv_dq=block_size,
         )
-        # For causal attention, create a causal mask as bias
-        if is_causal:
-            # Create causal mask: (B, N, T, S) where T=q_len, S=k_len
-            b, t, n, h = q.shape
-            s = k.shape[1]
-            # Causal mask: allow attending only to <= current position
-            # For KV cache: when t=1 (single token), mask should be all ones since we attend to all cache
-            # For full sequence: standard lower triangular mask
-            mask = jnp.tril(jnp.ones((t, s), dtype=bool))
-            # Convert to bias: 0 for allowed, -inf for masked
-            bias = jnp.where(mask, 0.0, jnp.finfo(q.dtype).min)
-            # Expand to (B, N, T, S)
-            bias = jnp.broadcast_to(bias[None, None, :, :], (b, n, t, s))
-        else:
-            bias = None
+        return mha(q, k, v, None, block_sizes=bs)
+
+    def pallas_attn_causal(q: jax.Array, k: jax.Array, v: jax.Array) -> jax.Array:
+        # For causal attention with Pallas, we'll fall back to the naive implementation
+        # since the Pallas MHA kernel has strict shape requirements for bias
+        b, t, n, h = q.shape
+        s = k.shape[1]
+        scale = 1.0 / math.sqrt(h)
         
-        return mha(q, k, v, bias, block_sizes=bs)
+        logits = jnp.einsum("btnh,bsnh->bnts", q, k) * scale
+        
+        # Causal mask
+        mask = jnp.tril(jnp.ones((t, s), dtype=bool))
+        logits = jnp.where(mask[None, None, :, :], logits, jnp.finfo(logits.dtype).min)
+        
+        weights = jax.nn.softmax(logits, axis=-1)
+        out = jnp.einsum("bnts,bsnh->btnh", weights, v)
+        return out
+    
+    def pallas_attn(q: jax.Array, k: jax.Array, v: jax.Array, *, is_causal: bool = False) -> jax.Array:
+        if is_causal:
+            return pallas_attn_causal(q, k, v)
+        else:
+            return pallas_attn_non_causal(q, k, v)
 
     return jax.jit(pallas_attn, static_argnames=("is_causal",)), "ok"
 

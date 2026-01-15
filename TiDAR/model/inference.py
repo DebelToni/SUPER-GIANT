@@ -330,7 +330,9 @@ def make_anchor_tidar_generate_fn(
             # Note: prefix_len - 1 because current_draft[0] (anchor) is at position prefix_len - 1
             
             # === Forward pass ===
-            logits = decode_apply(params, cache, step_tokens, step_pos_ids, prefix_len)
+            # Anchor was already committed; exclude it from the prefix cache used in attention.
+            decode_prefix_len = prefix_len - 1
+            logits = decode_apply(params, cache, step_tokens, step_pos_ids, decode_prefix_len)
             
             # Extract verify logits: positions 0..K-1 predict tokens at 1..K
             verify_logits = logits[:draft_len]  # [K, V]
@@ -581,6 +583,7 @@ def main():
     
     # Run generation
     print(f"Generating {max_steps} tokens with draft_len={draft_len}, temp={temperature}, top_k={top_k}...")
+    assert prefix_len > 0, "prefix_len must be > 0 before starting the decode loop"
     start_time = time.perf_counter()
     
     out_ids_final, final_len, generated, stats = generate_fn(

@@ -154,24 +154,14 @@ def build_prefill_draft_bias_template(cache_len: int, draft_len: int) -> jnp.nda
     """
     Build attention bias for initial draft prefill.
     
-    All K mask tokens can see the entire prefix and attend causally to each other.
+    All K mask tokens can see the entire prefix and attend bidirectionally to each other.
     Shape: [1, 1, K, cache_len + K]
     """
-    # All positions see prefix and each other causally
     q_len = draft_len
     key_len = cache_len + draft_len
     
-    q_idx = jnp.arange(q_len)[:, None]
-    k_idx = jnp.arange(key_len)[None, :]
-    
-    is_prefix_k = k_idx < cache_len
-    step_k_idx = k_idx - cache_len
-    is_step_k = k_idx >= cache_len
-    
-    # See all prefix + causal within step
-    allow = is_prefix_k | (is_step_k & (step_k_idx <= q_idx))
-    
-    # Return zeros (allow all - actual masking happens via prefix_len in attention)
+    # Prefix validity masking is handled in the attention layer; zero bias leaves
+    # the K mask tokens fully bidirectional within the draft block.
     return jnp.zeros((1, 1, q_len, key_len), dtype=jnp.float32)
 
 

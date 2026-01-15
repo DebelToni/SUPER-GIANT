@@ -1,7 +1,22 @@
 """Distributional invariance test for Anchor-TiDAR.
 
-Runs multiple sampling trials across draft lengths and compares histograms of the
-first generated tokens against a pure AR baseline.
+This script checks that non-greedy sampling from Anchor-TiDAR matches pure
+autoregressive (AR) sampling for the same prompt/temperature/top-k settings.
+It draws multiple samples for AR and each draft length, builds histograms for
+the first generated positions, and reports L1/KL distances versus the AR
+baseline.
+
+Example (N=2000, once a trained TiDAR checkpoint exists):
+
+  /opt/venv/bin/python TiDAR/model/distributional_invariance_test.py \
+    --checkpoint /proj/giant-data/TiDAR/smol/smollm-135m.npz \
+    --prompt "Hello" \
+    --temperature 0.7 \
+    --top_k 50 \
+    --draft_lens 2,8,20 \
+    --num_samples 2000 \
+    --num_tokens 1 \
+    --output_json /proj/giant-data/TiDAR/distributional_invariance/hello_t0p7_k50_n2000.json
 """
 from __future__ import annotations
 
@@ -89,6 +104,23 @@ def kl_divergence(p: Dict[int, float], q: Dict[int, float], eps: float = 1e-8) -
 def top_tokens(dist: Dict[int, float], tokenizer, top_n: int = 5) -> List[Tuple[int, float, str]]:
     sorted_items = sorted(dist.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
     return [(tok, prob, tokenizer.decode([tok])) for tok, prob in sorted_items]
+
+
+def top_differences(
+    baseline: Dict[int, float],
+    candidate: Dict[int, float],
+    tokenizer,
+    top_n: int = 5,
+) -> List[Tuple[int, float, float, str]]:
+    keys = set(baseline) | set(candidate)
+    diffs = []
+    for tok in keys:
+        base_prob = baseline.get(tok, 0.0)
+        cand_prob = candidate.get(tok, 0.0)
+        diffs.append((tok, cand_prob - base_prob))
+    diffs.sort(key=lambda item: abs(item[1]), reverse=True)
+    top = diffs[:top_n]
+    return [(tok, baseline.get(tok, 0.0), candidate.get(tok, 0.0), tokenizer.decode([tok])) for tok, _ in top]
 
 
 def collect_histograms(
@@ -326,6 +358,10 @@ def main() -> None:
     print(f"Tokens analyzed: {args.num_tokens}")
     print(f"Baseline: {baseline_label}")
 
+    summary = {}
+    for draft_len in draft_lens:
+        summary[draft_len] = {"l1": [], "kl": []}
+
     for pos in range(args.num_tokens):
         print(f"\n[Position {pos}] Baseline top tokens:")
         for tok, prob, text in top_tokens(baseline_dist[pos], tokenizer):
@@ -334,7 +370,27 @@ def main() -> None:
         for draft_len in draft_lens:
             l1 = l1_distance(baseline_dist[pos], distributions[draft_len][pos])
             kl = kl_divergence(baseline_dist[pos], distributions[draft_len][pos])
+            summary[draft_len]["l1"].append(l1)
+            summary[draft_len]["kl"].append(kl)
             print(f"  vs draft_len={draft_len}: L1={l1:.6f}, KL={kl:.6f}")
+            diff_tokens = top_differences(baseline_dist[pos], distributions[draft_len][pos], tokenizer)
+            for tok, base_prob, cand_prob, text in diff_tokens:
+                delta = cand_prob - base_prob
+                print(f"    Δ {tok:>6}  {base_prob:.4f} → {cand_prob:.4f} ({delta:+.4f})  {text!r}")
+
+    print("\n=== Summary (vs AR baseline) ===")
+    for draft_len in draft_lens:
+        l1_vals = summary[draft_len]["l1"]
+        kl_vals = summary[draft_len]["kl"]
+        l1_mean = float(np.mean(l1_vals))
+        l1_max = float(np.max(l1_vals))
+        kl_mean = float(np.mean(kl_vals))
+        kl_max = float(np.max(kl_vals))
+        print(
+            f"draft_len={draft_len}: "
+            f"L1 mean={l1_mean:.6f}, L1 max={l1_max:.6f}, "
+            f"KL mean={kl_mean:.6f}, KL max={kl_max:.6f}"
+        )
 
     if args.output_json:
         output_path = Path(args.output_json)

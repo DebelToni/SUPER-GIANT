@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import bz2
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -41,7 +42,7 @@ DEFAULT_TEXT_FIELDS = ("text", "content", "body", "article", "story", "completio
 
 @dataclass
 class TokenizerCfg:
-    name: str = "bert-base-uncased"
+    name: str = ""
     cache_dir: Optional[str] = ".cache/hf"
     use_custom: bool = False
     custom_path: str = ""
@@ -88,6 +89,9 @@ class StageSourceCfg:
     dataset_config: Optional[str] = None
     split: str = "train"
     streaming: bool = True
+    shuffle_streaming: bool = False
+    shuffle_buffer_size: int = 10000
+    shuffle_seed: Optional[int] = None
     data_files: Optional[Any] = None
     text_field: Optional[str] = None
     text_fields: List[str] = field(default_factory=list)
@@ -95,7 +99,7 @@ class StageSourceCfg:
     join_separator: str = " \n"
     text_template: Optional[str] = None
     json_root: Optional[str] = None
-    file_glob: str = "**/*.json"
+    file_glob: str = "**/*.json*"
     max_documents: Optional[int] = None
 
 
@@ -114,10 +118,11 @@ class StageCfg:
     long_document_strategy: str = "random_window"
     sequential_window_stride: Optional[int] = None
     max_windows_per_document: Optional[int] = None
+    random_windows_per_document: int = 1
     drop_remainder_windows: bool = False
     normalization: Dict[str, Any] = field(default_factory=dict)
     deduplicate: bool = False
-    dedup_hash_bits: int = 21
+    dedup_hash_bits: Optional[int] = None
     dedup_max_keys: Optional[int] = None
     rows_per_shard: Optional[int] = None
     max_documents: Optional[int] = None
@@ -211,8 +216,22 @@ def _stream_json_records(path: Path, chunk_size: int = 65536) -> Iterator[Any]:
             pass
 
 
+def _iter_jsonl_records(path: Path) -> Iterator[Any]:
+    with _open_text_stream(path) as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                LOGGER.warning("Skipping invalid jsonl line in %s", path)
+                continue
+
+
 def _maybe_hash(text: str) -> int:
-    return hash(text)
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "little", signed=False)
 
 
 class ShardWriter:
@@ -295,10 +314,10 @@ def load_tokenizer(tok_cfg: TokenizerCfg) -> PreTrainedTokenizerBase:
             time.sleep(time_wait)
     else:
         if snapshot_download is None:
-            raise last_err
+            raise RuntimeError("Tokenizer load failed and snapshot_download unavailable") from last_err
         repo = tok_cfg.name if not tok_cfg.use_custom else tok_cfg.hf_fallback
         if repo is None:
-            raise last_err
+            raise RuntimeError("Tokenizer load failed and no fallback repo configured") from last_err
         local_dir = snapshot_download(repo_id=repo, local_dir=tok_cfg.cache_dir, local_dir_use_symlinks=False)
         tokenizer = AutoTokenizer.from_pretrained(local_dir, use_fast=True)
         if tok_cfg.pad_token_override:
@@ -329,6 +348,8 @@ class SequenceEmitter:
         if eos is None:
             eos = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.sep_token_id
         self.eos_id = eos if eos is not None else 0
+        pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else self.eos_id
+        self.pad_id = pad if pad is not None else 0
         self.pack_buffer: List[int] = []
         self._done = False
 
@@ -347,17 +368,22 @@ class SequenceEmitter:
     def encode_batch(self, texts: List[str]) -> Iterator[Dict[str, Any]]:
         if not texts:
             return
-        encoded = self.tokenizer(
+        batch = self.tokenizer(
             texts,
             add_special_tokens=False,
             padding=False,
             truncation=False,
             return_attention_mask=False,
-        )["input_ids"]
+        )
+        encoded = batch["input_ids"]
+        if not isinstance(encoded, list):
+            encoded = list(encoded)  # type: ignore[assignment]
+        encoded = list(encoded)
         for tokens in encoded:
             if self.done:
                 return
-            yield from self.consume_tokens(tokens)
+            token_list = [int(t) for t in tokens]  # type: ignore[arg-type]
+            yield from self.consume_tokens(token_list)
             if self.done:
                 return
 
@@ -402,17 +428,21 @@ class SequenceEmitter:
             return
 
         max_start = max(0, length - seq_len)
-        start = int(self.rng.integers(0, max_start + 1)) if max_start > 0 else 0
-        window = tokens[start : start + seq_len]
-        row = self._emit_sequence(window)
-        if row:
-            yield row
+        windows = max(1, int(self.stage.random_windows_per_document or 1))
+        for _ in range(windows):
+            if self.done:
+                return
+            start = int(self.rng.integers(0, max_start + 1)) if max_start > 0 else 0
+            window = tokens[start : start + seq_len]
+            row = self._emit_sequence(window)
+            if row:
+                yield row
 
     def _emit_short(self, tokens: List[int]) -> Iterator[Dict[str, Any]]:
         if self.stage.pack_sequences:
-            seq = list(tokens)
+            seq = [int(t) for t in tokens]  # type: ignore[arg-type]
             if self.stage.add_eos:
-                seq.append(self.eos_id)
+                seq.append(int(self.eos_id))
             self.pack_buffer.extend(seq)
             while len(self.pack_buffer) >= self.seq_len:
                 chunk = self.pack_buffer[: self.seq_len]
@@ -423,9 +453,9 @@ class SequenceEmitter:
                 if self.done:
                     return
         else:
-            seq = list(tokens)
+            seq = [int(t) for t in tokens]
             if self.stage.add_eos and len(seq) < self.seq_len:
-                seq.append(self.eos_id)
+                seq.append(int(self.eos_id))
             row = self._emit_sequence(seq)
             if row:
                 yield row
@@ -447,6 +477,8 @@ class SequenceEmitter:
         if len(seq) > self.seq_len:
             seq = seq[: self.seq_len]
         length = len(seq)
+        if length < self.seq_len:
+            seq = seq + [self.pad_id] * (self.seq_len - length)
         self.stats.sequences += 1
         self.stats.tokens += length
         row = {"input_ids": seq, "length": length}
@@ -502,6 +534,12 @@ def _iter_hf_source(source: StageSourceCfg) -> Iterator[str]:
         streaming=source.streaming,
         **kwargs,
     )
+    if source.streaming and source.shuffle_streaming:
+        ds = ds.shuffle(
+            seed=source.shuffle_seed,
+            buffer_size=int(source.shuffle_buffer_size),
+        )  # type: ignore[call-arg,attr-defined]
+
     count = 0
     for row in ds:
         text = _extract_text(row, source) if isinstance(row, dict) else None
@@ -519,7 +557,12 @@ def _iter_json_dir(source: StageSourceCfg) -> Iterator[str]:
     files = sorted(root.rglob(source.file_glob))
     count = 0
     for path in files:
-        for record in _stream_json_records(path):
+        suffix = "".join(path.suffixes).lower()
+        if suffix.endswith(".jsonl") or suffix.endswith(".jsonl.gz"):
+            records = _iter_jsonl_records(path)
+        else:
+            records = _stream_json_records(path)
+        for record in records:
             if not isinstance(record, dict):
                 continue
             text = _extract_text(record, source)
@@ -601,9 +644,9 @@ def iter_stage_rows(
         yield from emitter.flush_remainder()
 
 
-def _arrow_schema() -> pa.Schema:
+def _arrow_schema(seq_len: int) -> pa.Schema:
     return pa.schema([
-        pa.field("input_ids", pa.list_(pa.int32())),
+        pa.field("input_ids", pa.list_(pa.int32(), list_size=seq_len)),
         pa.field("length", pa.int32()),
     ])
 
@@ -633,7 +676,12 @@ def stage_tokenize(top_cfg: TopConfig, stage: StageCfg, tokenizer: PreTrainedTok
     manifest: List[Dict[str, Any]] = []
     shard_writer: Optional[ShardWriter] = None
     if not top_cfg.dry_run:
-        shard_writer = ShardWriter(stage_output_dir, stage_dir_name, _arrow_schema(), rows_per_shard)
+        shard_writer = ShardWriter(
+            stage_output_dir,
+            stage_dir_name,
+            _arrow_schema(stage.sequence_length),
+            rows_per_shard,
+        )
 
     preview = top_cfg.scheduling.dry_run_preview_rows
     if top_cfg.dry_run:
@@ -725,6 +773,9 @@ def _parse_stage_sources(raw_sources: Iterable[Any]) -> List[StageSourceCfg]:
             dataset_config=src_dict.get("dataset_config"),
             split=src_dict.get("split", "train"),
             streaming=bool(src_dict.get("streaming", True)),
+            shuffle_streaming=bool(src_dict.get("shuffle_streaming", False)),
+            shuffle_buffer_size=int(src_dict.get("shuffle_buffer_size", 10000)),
+            shuffle_seed=src_dict.get("shuffle_seed"),
             data_files=src_dict.get("data_files"),
             text_field=src_dict.get("text_field"),
             text_fields=list(src_dict.get("text_fields", []) or []),
@@ -732,7 +783,7 @@ def _parse_stage_sources(raw_sources: Iterable[Any]) -> List[StageSourceCfg]:
             join_separator=str(src_dict.get("join_separator", " \n")),
             text_template=src_dict.get("text_template"),
             json_root=src_dict.get("json_root"),
-            file_glob=src_dict.get("file_glob", "**/*.json"),
+            file_glob=src_dict.get("file_glob", "**/*.json*"),
             max_documents=src_dict.get("max_documents"),
         )
         sources.append(cfg)
@@ -757,8 +808,11 @@ def _parse_stages(corpus_cfg: OmegaConf, outputs: OutputsCfg) -> List[StageCfg]:
             stage_cfg.target_tokens = int(stage_cfg.target_tokens)
         if stage_cfg.target_sequences is not None:
             stage_cfg.target_sequences = int(stage_cfg.target_sequences)
+        if stage_cfg.dedup_hash_bits is not None:
+            stage_cfg.dedup_hash_bits = int(stage_cfg.dedup_hash_bits)
         if stage_cfg.dedup_max_keys is not None:
             stage_cfg.dedup_max_keys = int(stage_cfg.dedup_max_keys)
+        stage_cfg.random_windows_per_document = int(stage_cfg.random_windows_per_document or 1)
         if not stage_cfg.sources:
             raise ValueError(f"Stage '{stage_cfg.name}' has no sources defined")
         stages.append(stage_cfg)

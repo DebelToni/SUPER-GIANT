@@ -38,7 +38,14 @@ class GiantGPT(nn.Module):
     dropout_rate:   float = 0.1
 
     @nn.compact
-    def __call__(self, tokens, *, deterministic: bool = False, use_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(
+        self,
+        tokens,
+        *,
+        deterministic: bool = False,
+        use_kv_cache: bool = False,
+        cur_index: Optional[jnp.ndarray | int] = None,
+    ):
         embed = nn.Embed(
             num_embeddings=self.vocab_size,
             features=self.d_model,

@@ -105,7 +105,14 @@ class NativeJaxSelfAttention(nn.Module):
         )
 
     @nn.compact
-    def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(
+        self,
+        x,
+        *,
+        deterministic: bool,
+        use_kv_cache: bool = False,
+        cur_index: Optional[jnp.ndarray | int] = None,
+    ):
         b, l, _ = x.shape
         # Flash attention (cuDNN) supports bias only when sequence length is even; fall back otherwise.
         impl = "cudnn" if (IS_GPU and l >= 128 and l % 2 == 0) else "xla"
@@ -122,16 +129,25 @@ class NativeJaxSelfAttention(nn.Module):
         v = v_chunk.reshape(b, l, self.num_kv,  head_dim)
 
         if use_kv_cache:
-            sin = jax.lax.dynamic_slice(
-                self._rope_sin,
-                (0, cur_index, 0, 0),
-                (1, 1, 1, self.rotary_dim),
-            )
-            cos = jax.lax.dynamic_slice(
-                self._rope_cos,
-                (0, cur_index, 0, 0),
-                (1, 1, 1, self.rotary_dim),
-            )
+            assert cur_index is not None, "Need cur_index when use_kv_cache=True"
+            cur_index = jnp.asarray(cur_index, jnp.int32)
+            if cur_index.ndim == 0:
+                sin = jax.lax.dynamic_slice(
+                    self._rope_sin,
+                    (0, cur_index, 0, 0),
+                    (1, l, 1, self.rotary_dim),
+                )
+                cos = jax.lax.dynamic_slice(
+                    self._rope_cos,
+                    (0, cur_index, 0, 0),
+                    (1, l, 1, self.rotary_dim),
+                )
+                sin = jnp.broadcast_to(sin, (b, l, 1, self.rotary_dim))
+                cos = jnp.broadcast_to(cos, (b, l, 1, self.rotary_dim))
+            else:
+                positions = cur_index[:, None] + jnp.arange(l, dtype=jnp.int32)[None, :]
+                sin = jnp.take(self._rope_sin[0], positions, axis=0)
+                cos = jnp.take(self._rope_cos[0], positions, axis=0)
         else:
             sin = self._rope_sin[:, :l, :, :]
             cos = self._rope_cos[:, :l, :, :]
@@ -142,38 +158,63 @@ class NativeJaxSelfAttention(nn.Module):
 
         if use_kv_cache:
             assert cur_index is not None, "Need cur_index when use_kv_cache=True"
+            cache_shape = (b, self.num_kv, MODEL_CFG.context_length, head_dim)
             cached_k = self.variable(
                 "cache",
                 "k",
                 jnp.zeros,
-                (b, self.num_kv, MODEL_CFG.context_length, head_dim),
+                cache_shape,
                 self.dtype,
             )
             cached_v = self.variable(
                 "cache",
                 "v",
                 jnp.zeros,
-                (b, self.num_kv, MODEL_CFG.context_length, head_dim),
+                cache_shape,
                 self.dtype,
             )
 
-
             k_to_cache = jnp.swapaxes(k, 1, 2)  # (b, num_kv, l, hd)
             v_to_cache = jnp.swapaxes(v, 1, 2)
-            if l == 1:
-                cached_k.value = cached_k.value.at[:, :, cur_index, :].set(k_to_cache[:, :, 0, :])
-                cached_v.value = cached_v.value.at[:, :, cur_index, :].set(v_to_cache[:, :, 0, :])
+            cur_index = jnp.asarray(cur_index, jnp.int32)
+            is_scalar = (cur_index.ndim == 0)
+
+            def _update_scalar(k_val, v_val, idx):
+                if l == 1:
+                    k_val = k_val.at[:, :, idx, :].set(k_to_cache[:, :, 0, :])
+                    v_val = v_val.at[:, :, idx, :].set(v_to_cache[:, :, 0, :])
+                else:
+                    k_val = k_val.at[:, :, idx : idx + l, :].set(k_to_cache)
+                    v_val = v_val.at[:, :, idx : idx + l, :].set(v_to_cache)
+                return k_val, v_val
+
+            def _update_vector(k_val, v_val, idx_vec):
+                pos = idx_vec[:, None] + jnp.arange(l, dtype=jnp.int32)[None, :]
+                batch_idx = jnp.arange(b)[:, None]
+                k_to_cache_t = jnp.transpose(k_to_cache, (0, 2, 1, 3))
+                v_to_cache_t = jnp.transpose(v_to_cache, (0, 2, 1, 3))
+                k_val = k_val.at[batch_idx, :, pos, :].set(k_to_cache_t)
+                v_val = v_val.at[batch_idx, :, pos, :].set(v_to_cache_t)
+                return k_val, v_val
+
+            if cur_index.ndim == 0:
+                new_k, new_v = _update_scalar(cached_k.value, cached_v.value, cur_index)
+                cur_max = cur_index + (l - 1)
+                valid = jnp.arange(MODEL_CFG.context_length) <= cur_max
+                attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
+                attn_bias = attn_bias[None, None, None, :]
             else:
-                cached_k.value = cached_k.value.at[:, :, cur_index : cur_index + l, :].set(k_to_cache)
-                cached_v.value = cached_v.value.at[:, :, cur_index : cur_index + l, :].set(v_to_cache)
+                new_k, new_v = _update_vector(cached_k.value, cached_v.value, cur_index)
+                cur_max = cur_index + (l - 1)
+                valid = jnp.arange(MODEL_CFG.context_length)[None, :] <= cur_max[:, None]
+                attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
+                attn_bias = attn_bias[:, None, None, :]
+
+            cached_k.value = new_k
+            cached_v.value = new_v
 
             k_full = jnp.swapaxes(cached_k.value, 1, 2)  # (b, context, num_kv, hd)
             v_full = jnp.swapaxes(cached_v.value, 1, 2)
-            key_len = k_full.shape[1]
-            cur_max = cur_index + (l - 1)
-            valid = jnp.arange(key_len) <= cur_max
-            attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
-            attn_bias = attn_bias[None, None, None, :]
             y = jax.nn.dot_product_attention(
                 q, k_full, v_full, bias=attn_bias, is_causal=False, implementation=impl
             )

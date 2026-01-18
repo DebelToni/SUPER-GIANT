@@ -12,7 +12,9 @@ def train_step(params, opt_state, batch, *, model, optimizer, dropout_rng):
         )
         loss = optax.softmax_cross_entropy_with_integer_labels(
             logits, batch["target"])
-        loss = (loss * batch["mask"]).sum() / batch["mask"].sum()
+        mask_sum = batch["mask"].sum()
+        denom = jnp.maximum(mask_sum, 1.0)
+        loss = (loss * batch["mask"]).sum() / denom
         return loss
 
     (loss, grads) = jax.value_and_grad(loss_fn)(params)

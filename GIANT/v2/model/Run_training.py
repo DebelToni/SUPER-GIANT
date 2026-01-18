@@ -518,54 +518,57 @@ def main() -> None:
             chunk = _stack_batches(batch_list)
             params, opt_state, losses = _run_chunk(params, opt_state, chunk, global_step)
             losses = np.asarray(jax.device_get(losses))
+            chunk_len = len(losses)
+            if chunk_len == 0:
+                break
+            chunk_start = global_step + 1
+            global_step += chunk_len
+            completed_in_stage += chunk_len
+            pbar.update(chunk_len)
+            stage_states[runtime.config.name] = runtime.loader.state_dict()
 
-            for loss_val in losses:
-                global_step += 1
-                completed_in_stage += 1
+            for offset, loss_val in enumerate(losses, start=0):
                 last_loss = float(loss_val)
-                pbar.update(1)
-
-                stage_states[runtime.config.name] = runtime.loader.state_dict()
-
-                if global_step % cfg.training.log_every == 0:
+                step_val = chunk_start + offset
+                if step_val % cfg.training.log_every == 0:
                     elapsed = time.time() - start
                     ppl = float(np.exp(loss_val)) if loss_val < 20 else float("inf")
                     print(
-                        f"step {global_step:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
+                        f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
                         f"loss {loss_val:.4f} ppl {ppl:.2f} ({elapsed:.1f}s)"
                     )
                     start = time.time()
 
-                if mini_every and (global_step % mini_every == 0):
-                    mini_state = {
-                        "params": params,
-                        "opt_state": opt_state,
-                        "global_step": global_step,
-                        "stage_index": stage_idx,
-                        "stage_step_total": completed_in_stage,
-                        "stage_states": stage_states,
-                    }
-                    mini_ckpt_mgr.save(global_step, mini_state)
+            if mini_every and (global_step % mini_every == 0):
+                mini_state = {
+                    "params": params,
+                    "opt_state": opt_state,
+                    "global_step": global_step,
+                    "stage_index": stage_idx,
+                    "stage_step_total": completed_in_stage,
+                    "stage_states": stage_states,
+                }
+                mini_ckpt_mgr.save(global_step, mini_state)
 
-                if global_step % checkpoint_every == 0:
-                    ckpt_file = save_training_state(
-                        cfg=cfg,
-                        params=params,
-                        opt_state=opt_state,
-                        checkpoint_dir=checkpoint_dir,
-                        global_step=global_step,
-                        stage_idx=stage_idx,
-                        completed_in_stage=completed_in_stage,
-                        stage_states=stage_states,
-                        runtime=runtime,
-                    )
-                    print(f"💾 checkpoint → {ckpt_file}")
+            if global_step % checkpoint_every == 0:
+                ckpt_file = save_training_state(
+                    cfg=cfg,
+                    params=params,
+                    opt_state=opt_state,
+                    checkpoint_dir=checkpoint_dir,
+                    global_step=global_step,
+                    stage_idx=stage_idx,
+                    completed_in_stage=completed_in_stage,
+                    stage_states=stage_states,
+                    runtime=runtime,
+                )
+                print(f"💾 checkpoint → {ckpt_file}")
 
-                if _stop_requested:
-                    mini_ckpt_mgr.wait_until_finished(timeout=4.0)
-                    print("[signal] Stop requested; exiting after current chunk.")
-                    pbar.close()
-                    return
+            if _stop_requested:
+                mini_ckpt_mgr.wait_until_finished(timeout=4.0)
+                print("[signal] Stop requested; exiting after current chunk.")
+                pbar.close()
+                return
 
         pbar.close()
         if last_loss is not None:

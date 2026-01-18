@@ -51,6 +51,20 @@ class ShardedArrowDataset:
         ids_column = table.column("input_ids")
         lengths_column = table.column("length") if "length" in table.column_names else None
 
+        ids_array = ids_column.combine_chunks()
+        ids_type = ids_array.type
+        if isinstance(ids_type, pa.FixedSizeListType) and ids_type.list_size == seq_len:
+            values = ids_array.values.to_numpy(zero_copy_only=False)
+            num_rows = ids_array.length()
+            tokens = values.reshape(num_rows, seq_len).astype(np.int32, copy=False)
+            if lengths_column is not None:
+                lengths_arr = lengths_column.combine_chunks()
+                lengths = np.asarray(lengths_arr.to_numpy(zero_copy_only=False), dtype=np.int32)
+                lengths = np.clip(lengths, 1, seq_len)
+            else:
+                lengths = np.full(num_rows, seq_len, dtype=np.int32)
+            return tokens, lengths
+
         seq_arrays = ids_column.to_pylist()
         num_rows = len(seq_arrays)
         pad_value = pad_id if pad_id is not None else 0
@@ -112,6 +126,9 @@ class StageDataLoader:
         self._current_lengths: Optional[np.ndarray] = None
         self._row_ptr = 0
         self._rows_consumed = 0
+
+        self._positions = np.arange(self.seq_len)[None, :]
+        self._pad_col = np.full((self.batch_size, 1), self.pad_token_id, dtype=np.int32)
 
         self._prepare_epoch()
 
@@ -226,13 +243,12 @@ class StageDataLoader:
 
         seq_len = self.seq_len
         inputs = batch_tokens
-        pad_col = np.full((self.batch_size, 1), self.pad_token_id, dtype=batch_tokens.dtype)
+        pad_col = self._pad_col.astype(batch_tokens.dtype, copy=False)
         targets = np.concatenate([batch_tokens[:, 1:], pad_col], axis=1)
         eff_lengths = np.clip(batch_lengths, 1, seq_len)
         valid_target_len = np.maximum(eff_lengths - 1, 0)
-        mask = np.zeros_like(inputs, dtype=np.float32)
-        positions = np.arange(seq_len)[None, :]
-        mask[positions < valid_target_len[:, None]] = 1.0
+        positions = self._positions
+        mask = (positions < valid_target_len[:, None]).astype(np.float32)
 
         return {"input": inputs, "target": targets, "mask": mask}
 

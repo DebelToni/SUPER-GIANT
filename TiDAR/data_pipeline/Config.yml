@@ -1,0 +1,28 @@
+outputs:
+  processed_root: "dataset_artifacts"
+  rows_per_shard: 32
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 123
+  write_batch_size: 4
+  dry_run_preview_rows: 4
+
+stages:
+  tidar_smoke:
+    description: "Tiny TiDAR smoke dataset"
+    output_dir: "tidar_smoke"
+    sequence_length: 16
+    target_sequences: 4
+    min_tokens: 4
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: json
+        json_root: "tidar_smoke"
+        file_glob: "*.jsonl"
+        text_field: "text"

@@ -1,6 +1,6 @@
 tokenizer:
   name: "HuggingFaceTB/cosmo2-tokenizer"
-  cache_dir: "tokenizer_cache"
+  cache_dir: "hf_cache/tokenizer_cache"
   use_custom: false
   custom_path: "custom_tokenizer"
   pad_token_override: null
@@ -20,6 +20,17 @@ training_defaults:
   warmup_steps: 200
   grad_accumulation: 1
   global_seed: 0
+
+optimizer:
+  base_learning_rate: 3.0e-4
+  min_learning_rate: 3.0e-5
+  warmup_steps: 200
+  weight_decay: 0.0
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
 
 io:
   shard_size_tokens: 2048

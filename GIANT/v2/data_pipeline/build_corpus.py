@@ -22,7 +22,10 @@ from datasets import load_dataset
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from cleaning import normalise_text
+try:
+    from .cleaning import normalise_text
+except ImportError:  # pragma: no cover - fallback for script usage
+    from cleaning import normalise_text
 
 try:
     from huggingface_hub import snapshot_download
@@ -48,6 +51,7 @@ class TokenizerCfg:
     custom_path: str = ""
     hf_fallback: Optional[str] = None
     pad_token_override: Optional[str] = None
+    mask_token_override: Optional[str] = None
 
 
 @dataclass
@@ -56,6 +60,8 @@ class PathsCfg:
     processed_data_root: str = "dataset_artifacts"
     dataloader_state_root: str = "checkpoints/dataloader_state"
     logs_root: str = "logs"
+    checkpoints_root: Optional[str] = None
+    hf_cache_root: Optional[str] = None
 
 
 @dataclass
@@ -488,10 +494,10 @@ class SequenceEmitter:
 
 def _extract_text(row: Dict[str, Any], source: StageSourceCfg) -> Optional[str]:
     if source.text_template:
-        safe_map = defaultdict(str)
+        safe_map: Dict[str, str] = defaultdict(str)
         for key, value in row.items():
             if isinstance(value, (str, int, float)):
-                safe_map[key] = value
+                safe_map[key] = str(value)
         try:
             text = source.text_template.format_map(safe_map)
         except KeyError:
@@ -819,7 +825,7 @@ def _parse_stages(corpus_cfg: OmegaConf, outputs: OutputsCfg) -> List[StageCfg]:
     return stages
 
 
-def load_combined_config(user_cfg_path: Optional[str]) -> TopConfig:
+def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional[str] = None) -> TopConfig:
     script_dir = Path(__file__).resolve().parent
     corpus_cfg_path = user_cfg_path or _find_default(
         [
@@ -829,7 +835,7 @@ def load_combined_config(user_cfg_path: Optional[str]) -> TopConfig:
             str(script_dir / "config.yml"),
         ]
     )
-    global_cfg_path = _find_default([
+    global_cfg_path = global_cfg_path or _find_default([
         "Global_Config.yml",
         "global_config.yml",
     ])
@@ -887,18 +893,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    top_cfg = load_combined_config(args.config)
-    if args.dry_run:
+def run_pipeline(
+    *,
+    config_path: Optional[str] = None,
+    global_config_path: Optional[str] = None,
+    stage: str = "all",
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    top_cfg = load_combined_config(config_path, global_cfg_path=global_config_path)
+    if dry_run:
         top_cfg.dry_run = True
 
     tokenizer = load_tokenizer(top_cfg.tokenizer)
     np.random.seed(top_cfg.training_defaults.global_seed or top_cfg.scheduling.seed)
 
-    stage_lookup = {stage.name: stage for stage in top_cfg.stages}
-    if args.stage != "all":
-        key = args.stage.strip()
+    stage_lookup = {stage_cfg.name: stage_cfg for stage_cfg in top_cfg.stages}
+    if stage != "all":
+        key = stage.strip()
         if key not in stage_lookup:
             available = ", ".join(stage_lookup.keys())
             raise KeyError(f"Stage '{key}' not found. Available stages: {available}")
@@ -907,8 +918,8 @@ def main() -> None:
         stages_to_run = list(top_cfg.stages)
 
     stats_bundle: Dict[str, Any] = {}
-    for idx, stage in enumerate(stages_to_run):
-        stats_bundle[stage.name] = stage_tokenize(top_cfg, stage, tokenizer, idx)
+    for idx, stage_cfg in enumerate(stages_to_run):
+        stats_bundle[stage_cfg.name] = stage_tokenize(top_cfg, stage_cfg, tokenizer, idx)
 
     if not top_cfg.dry_run and stages_to_run:
         manifest = stage_merge(top_cfg, stages_to_run)
@@ -919,6 +930,16 @@ def main() -> None:
     with stats_path.open("w", encoding="utf-8") as handle:
         json.dump(stats_bundle, handle, indent=2)
     LOGGER.info("Wrote stats → %s", stats_path)
+    return stats_bundle
+
+
+def main() -> None:
+    args = parse_args()
+    run_pipeline(
+        config_path=args.config,
+        stage=args.stage,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

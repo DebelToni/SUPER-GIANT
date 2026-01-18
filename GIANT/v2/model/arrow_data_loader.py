@@ -55,7 +55,7 @@ class ShardedArrowDataset:
         ids_type = ids_array.type
         if isinstance(ids_type, pa.FixedSizeListType) and ids_type.list_size == seq_len:
             values = ids_array.values.to_numpy(zero_copy_only=False)
-            num_rows = ids_array.length()
+            num_rows = len(ids_array)
             tokens = values.reshape(num_rows, seq_len).astype(np.int32, copy=False)
             if lengths_column is not None:
                 lengths_arr = lengths_column.combine_chunks()

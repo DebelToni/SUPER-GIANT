@@ -38,6 +38,7 @@ from GIANT.v2.model.checkpoint_manager import (
     save as save_ckpt,
     save_opt_state,
     load_opt_state,
+    set_npz_metadata,
 )
 from GIANT.v2.model.optimizer_utils import create_weight_decay_mask
 
@@ -574,7 +575,9 @@ def main() -> None:
                 mini_ckpt_mgr.save(global_step, mini_state)
 
             if global_step % checkpoint_every == 0:
-                ckpt_file = save_ckpt(params, global_step, checkpoint_dir)
+                ckpt_file = save_ckpt(params, global_step, checkpoint_dir, train_loss=last_loss)
+                if last_loss is not None:
+                    print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {ckpt_file}")
                 save_opt_state(opt_state, global_step, checkpoint_dir)
                 save_dataloader_state(
                     dataloader_state_path(cfg, global_step),
@@ -599,7 +602,9 @@ def main() -> None:
             print(f"✓ Stage {runtime.config.name} completed (no batches emitted)")
         stage_step_total = 0
 
-    final_ckpt = save_ckpt(params, global_step, checkpoint_dir)
+    final_ckpt = save_ckpt(params, global_step, checkpoint_dir, train_loss=last_loss)
+    if last_loss is not None:
+        print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {final_ckpt}")
     save_opt_state(opt_state, global_step, checkpoint_dir)
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),

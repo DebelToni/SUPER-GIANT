@@ -1,6 +1,6 @@
 tokenizer:
   name: "HuggingFaceTB/cosmo2-tokenizer"
-  cache_dir: "hf_cache/tokenizer_cache"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
   use_custom: false
   custom_path: "custom_tokenizer"
   pad_token_override: null
@@ -12,7 +12,7 @@ paths:
   dataloader_state_root: "checkpoints/dataloader_state"
   logs_root: "logs"
   checkpoints_root: "checkpoints"
-  hf_cache_root: "hf_cache"
+  hf_cache_root: "/proj/giant-data/hf_cache"
 
 training_defaults:
   progressive_sequence_lengths: [256]

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
+from omegaconf import OmegaConf
 from GIANT.v2.data_pipeline.build_corpus import run_pipeline
 
 
@@ -18,9 +20,23 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config_path = args.config or str(Path(__file__).resolve().parent / "Config.yml")
+    global_config_path = args.global_config
+    if global_config_path is None:
+        global_config_path = str(Path(__file__).resolve().parents[1] / "Global_Config.yml")
+    
+    # Set HF cache environment variables from global config
+    if global_config_path and Path(global_config_path).exists():
+        global_cfg = OmegaConf.load(global_config_path)
+        hf_cache_root = global_cfg.get("paths", {}).get("hf_cache_root")
+        if hf_cache_root:
+            os.environ["HF_HOME"] = str(hf_cache_root)
+            os.environ["HF_DATASETS_CACHE"] = str(Path(hf_cache_root) / "datasets")
+            os.environ["TRANSFORMERS_CACHE"] = str(Path(hf_cache_root) / "transformers")
+            print(f"[HF Cache] Set HF_HOME={hf_cache_root}")
+    
     run_pipeline(
         config_path=config_path,
-        global_config_path=args.global_config,
+        global_config_path=global_config_path,
         stage=args.stage,
         dry_run=args.dry_run,
     )

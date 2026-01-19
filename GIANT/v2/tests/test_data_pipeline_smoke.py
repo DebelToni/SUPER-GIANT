@@ -47,6 +47,9 @@ def test_arrow_schema_fixed_size() -> None:
     field = schema.field("input_ids")
     assert isinstance(field.type, pa.FixedSizeListType)
     assert field.type.list_size == 8
+    loss_field = schema.field("loss_mask")
+    assert isinstance(loss_field.type, pa.FixedSizeListType)
+    assert loss_field.type.list_size == 8
 
 
 def test_sequence_emitter_random_windows() -> None:

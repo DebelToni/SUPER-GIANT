@@ -40,7 +40,9 @@ class ShardedArrowDataset:
     def num_shards(self) -> int:
         return len(self.shards)
 
-    def load_shard(self, shard_index: int, seq_len: int, pad_id: int) -> Tuple[np.ndarray, np.ndarray]:
+    def load_shard(
+        self, shard_index: int, seq_len: int, pad_id: int
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
         meta = self.shards[shard_index]
         path = self.directory / meta.filename
         if not path.exists():
@@ -50,6 +52,7 @@ class ShardedArrowDataset:
             table = reader.read_all()
         ids_column = table.column("input_ids")
         lengths_column = table.column("length") if "length" in table.column_names else None
+        mask_column = table.column("loss_mask") if "loss_mask" in table.column_names else None
 
         ids_array = ids_column.combine_chunks()
         ids_type = ids_array.type
@@ -63,13 +66,23 @@ class ShardedArrowDataset:
                 lengths = np.clip(lengths, 1, seq_len)
             else:
                 lengths = np.full(num_rows, seq_len, dtype=np.int32)
-            return tokens, lengths
+            loss_mask = None
+            if mask_column is not None:
+                mask_array = mask_column.combine_chunks()
+                mask_type = mask_array.type
+                if isinstance(mask_type, pa.FixedSizeListType) and mask_type.list_size == seq_len:
+                    mask_values = mask_array.values.to_numpy(zero_copy_only=False)
+                    loss_mask = mask_values.reshape(num_rows, seq_len).astype(np.float32, copy=False)
+            return tokens, lengths, loss_mask
 
         seq_arrays = ids_column.to_pylist()
         num_rows = len(seq_arrays)
         pad_value = pad_id if pad_id is not None else 0
         tokens = np.full((num_rows, seq_len), pad_value, dtype=np.int32)
         lengths = np.zeros(num_rows, dtype=np.int32)
+        loss_mask = None
+        if mask_column is not None:
+            loss_mask = np.zeros((num_rows, seq_len), dtype=np.float32)
 
         for i, seq in enumerate(seq_arrays):
             if not isinstance(seq, list):
@@ -86,7 +99,18 @@ class ShardedArrowDataset:
             stored_lengths = np.clip(stored_lengths, 1, seq_len)
             lengths = np.minimum(lengths, stored_lengths)
         lengths = np.clip(lengths, 1, seq_len)
-        return tokens, lengths
+        if mask_column is not None:
+            mask_arrays = mask_column.to_pylist()
+            for i, mask_row in enumerate(mask_arrays):
+                if not isinstance(mask_row, list):
+                    mask_row = list(mask_row)
+                if loss_mask is None:
+                    continue
+                if len(mask_row) >= seq_len:
+                    loss_mask[i] = np.asarray(mask_row[:seq_len], dtype=np.float32)
+                else:
+                    loss_mask[i, : len(mask_row)] = np.asarray(mask_row, dtype=np.float32)
+        return tokens, lengths, loss_mask
 
 
 class StageDataLoader:
@@ -124,6 +148,7 @@ class StageDataLoader:
         self._current_shard_pos = 0
         self._current_data: Optional[np.ndarray] = None
         self._current_lengths: Optional[np.ndarray] = None
+        self._current_loss_mask: Optional[np.ndarray] = None
         self._row_ptr = 0
         self._rows_consumed = 0
 
@@ -144,15 +169,17 @@ class StageDataLoader:
         self._current_shard_pos = 0
         self._current_data = None
         self._current_lengths = None
+        self._current_loss_mask = None
         self._row_ptr = 0
         self._rows_consumed = 0
+
 
     def _load_shard_at(self, pos: int) -> bool:
         if self._rows_consumed >= self.total_rows:
             return False
         while pos < len(self._shard_order):
             shard_idx = self._shard_order[pos]
-            data, lengths = self.dataset.load_shard(shard_idx, self.seq_len, self.pad_token_id)
+            data, lengths, loss_mask = self.dataset.load_shard(shard_idx, self.seq_len, self.pad_token_id)
             if data.shape[0] == 0:
                 pos += 1
                 continue
@@ -162,14 +189,19 @@ class StageDataLoader:
             if data.shape[0] > remaining:
                 data = data[:remaining]
                 lengths = lengths[:remaining]
+                if loss_mask is not None:
+                    loss_mask = loss_mask[:remaining]
             if self.shuffle:
                 rng = np.random.default_rng(self._epoch_seed() ^ shard_idx)
                 order = rng.permutation(data.shape[0])
                 data = data[order]
                 lengths = lengths[order]
+                if loss_mask is not None:
+                    loss_mask = loss_mask[order]
             self._current_shard_pos = pos
             self._current_data = data
             self._current_lengths = lengths
+            self._current_loss_mask = loss_mask
             self._row_ptr = 0
             return True
         return False
@@ -184,6 +216,7 @@ class StageDataLoader:
             next_pos = self._current_shard_pos if self._current_data is None else self._current_shard_pos + 1
             self._current_data = None
             self._current_lengths = None
+            self._current_loss_mask = None
             self._row_ptr = 0
             if not self._load_shard_at(next_pos):
                 self.epoch += 1
@@ -231,12 +264,14 @@ class StageDataLoader:
         self._ensure_batch_available()
         data = self._current_data
         lengths = self._current_lengths
+        loss_mask = self._current_loss_mask
         if data is None or lengths is None:
             raise StopIteration
         start = self._row_ptr
         end = start + self.batch_size
         batch_tokens = data[start:end]
         batch_lengths = lengths[start:end]
+        batch_loss_mask = loss_mask[start:end] if loss_mask is not None else None
         self._row_ptr = end
         self._rows_consumed += end - start
         self.step_in_epoch += 1
@@ -248,7 +283,11 @@ class StageDataLoader:
         eff_lengths = np.clip(batch_lengths, 1, seq_len)
         valid_target_len = np.maximum(eff_lengths - 1, 0)
         positions = self._positions
-        mask = (positions < valid_target_len[:, None]).astype(np.float32)
+        length_mask = (positions < valid_target_len[:, None]).astype(np.float32)
+        if batch_loss_mask is not None:
+            mask = length_mask * batch_loss_mask
+        else:
+            mask = length_mask
 
         return {"input": inputs, "target": targets, "mask": mask}
 

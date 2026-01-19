@@ -13,7 +13,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pyarrow as pa
@@ -107,6 +107,12 @@ class StageSourceCfg:
     json_root: Optional[str] = None
     file_glob: str = "**/*.json*"
     max_documents: Optional[int] = None
+    chat_messages_field: str = "messages"
+    chat_role_field: str = "role"
+    chat_content_field: str = "content"
+    chat_assistant_roles: List[str] = field(default_factory=lambda: ["assistant"])
+    chat_role_prefix: str = "### {role}\n"
+    chat_turn_suffix: str = "\n"
 
 
 @dataclass
@@ -357,6 +363,7 @@ class SequenceEmitter:
         pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else self.eos_id
         self.pad_id = pad if pad is not None else 0
         self.pack_buffer: List[int] = []
+        self.pack_mask_buffer: List[float] = []
         self._done = False
 
     @property
@@ -393,6 +400,73 @@ class SequenceEmitter:
             if self.done:
                 return
 
+    def encode_batch_with_mask(
+        self, texts: List[str], spans: List[Optional[List[Tuple[int, int]]]]
+    ) -> Iterator[Dict[str, Any]]:
+        if not texts:
+            return
+        if not spans:
+            spans = [None] * len(texts)
+        batch = self.tokenizer(
+            texts,
+            add_special_tokens=False,
+            padding=False,
+            truncation=False,
+            return_attention_mask=False,
+            return_offsets_mapping=True,
+        )
+        encoded = batch["input_ids"]
+        offsets = batch["offset_mapping"]
+        if not isinstance(encoded, list):
+            encoded = list(encoded)  # type: ignore[assignment]
+        if not isinstance(offsets, list):
+            offsets = list(offsets)  # type: ignore[assignment]
+        encoded = list(encoded)
+        offsets = list(offsets)
+        for tokens, token_offsets, token_spans in zip(encoded, offsets, spans):
+            if self.done:
+                return
+            token_list = [int(t) for t in tokens]  # type: ignore[arg-type]
+            if token_spans:
+                mask = self._build_loss_mask(token_offsets, token_spans)
+            else:
+                mask = [1.0] * len(token_list)
+            yield from self.consume_tokens_with_mask(token_list, mask)
+            if self.done:
+                return
+
+    def _build_loss_mask(
+        self,
+        offsets: Iterable[Any],
+        spans: List[Tuple[int, int]],
+    ) -> List[float]:
+        mask: List[float] = []
+        for offset in offsets:
+            try:
+                start, end = offset
+            except Exception:
+                start, end = 0, 0
+            active = 0.0
+            for span_start, span_end in spans:
+                if end > span_start and start < span_end:
+                    active = 1.0
+                    break
+            mask.append(active)
+        return mask
+
+    def consume_tokens_with_mask(
+        self, tokens: Iterable[int], mask: Iterable[float]
+    ) -> Iterator[Dict[str, Any]]:
+        ids = [int(t) for t in tokens]
+        loss_mask = [float(m) for m in mask]
+        if len(ids) < self.stage.min_tokens:
+            self.stats.discarded += 1
+            return
+        if len(ids) >= self.seq_len:
+            yield from self._emit_long_masked(ids, loss_mask)
+        else:
+            yield from self._emit_short_masked(ids, loss_mask)
+
     def consume_tokens(self, tokens: Iterable[int]) -> Iterator[Dict[str, Any]]:
         ids = [int(t) for t in tokens]
         if len(ids) < self.stage.min_tokens:
@@ -404,6 +478,14 @@ class SequenceEmitter:
             yield from self._emit_short(ids)
 
     def _emit_long(self, tokens: List[int]) -> Iterator[Dict[str, Any]]:
+        yield from self._emit_long_masked(tokens, None)
+
+    def _emit_short(self, tokens: List[int]) -> Iterator[Dict[str, Any]]:
+        yield from self._emit_short_masked(tokens, None)
+
+    def _emit_long_masked(
+        self, tokens: List[int], mask: Optional[List[float]]
+    ) -> Iterator[Dict[str, Any]]:
         strategy = (self.stage.long_document_strategy or "random_window").lower()
         seq_len = self.seq_len
         length = len(tokens)
@@ -418,7 +500,8 @@ class SequenceEmitter:
                     break
                 if len(window) < self.stage.min_tokens:
                     break
-                row = self._emit_sequence(window)
+                mask_window = mask[offset : offset + seq_len] if mask is not None else None
+                row = self._emit_sequence(window, mask_window)
                 if row:
                     yield row
                 emitted += 1
@@ -440,29 +523,43 @@ class SequenceEmitter:
                 return
             start = int(self.rng.integers(0, max_start + 1)) if max_start > 0 else 0
             window = tokens[start : start + seq_len]
-            row = self._emit_sequence(window)
+            mask_window = mask[start : start + seq_len] if mask is not None else None
+            row = self._emit_sequence(window, mask_window)
             if row:
                 yield row
 
-    def _emit_short(self, tokens: List[int]) -> Iterator[Dict[str, Any]]:
+    def _emit_short_masked(
+        self, tokens: List[int], mask: Optional[List[float]]
+    ) -> Iterator[Dict[str, Any]]:
         if self.stage.pack_sequences:
             seq = [int(t) for t in tokens]  # type: ignore[arg-type]
             if self.stage.add_eos:
                 seq.append(int(self.eos_id))
             self.pack_buffer.extend(seq)
+            if mask is not None:
+                mask_seq = [float(m) for m in mask]
+                if self.stage.add_eos:
+                    mask_seq.append(0.0)
+                self.pack_mask_buffer.extend(mask_seq)
+            else:
+                self.pack_mask_buffer.extend([1.0] * len(seq))
             while len(self.pack_buffer) >= self.seq_len:
                 chunk = self.pack_buffer[: self.seq_len]
                 del self.pack_buffer[: self.seq_len]
-                row = self._emit_sequence(chunk)
+                mask_chunk = self.pack_mask_buffer[: self.seq_len]
+                del self.pack_mask_buffer[: self.seq_len]
+                row = self._emit_sequence(chunk, mask_chunk)
                 if row:
                     yield row
                 if self.done:
                     return
         else:
             seq = [int(t) for t in tokens]
+            mask_seq = [float(m) for m in mask] if mask is not None else [1.0] * len(seq)
             if self.stage.add_eos and len(seq) < self.seq_len:
                 seq.append(int(self.eos_id))
-            row = self._emit_sequence(seq)
+                mask_seq.append(0.0)
+            row = self._emit_sequence(seq, mask_seq)
             if row:
                 yield row
 
@@ -472,22 +569,34 @@ class SequenceEmitter:
         if not self.pack_buffer or self.done:
             return
         chunk = list(self.pack_buffer)
+        mask_chunk = list(self.pack_mask_buffer)
         self.pack_buffer.clear()
-        row = self._emit_sequence(chunk)
+        self.pack_mask_buffer.clear()
+        row = self._emit_sequence(chunk, mask_chunk if mask_chunk else None)
         if row:
             yield row
 
-    def _emit_sequence(self, seq: List[int]) -> Optional[Dict[str, Any]]:
+    def _emit_sequence(
+        self, seq: List[int], mask: Optional[List[float]] = None
+    ) -> Optional[Dict[str, Any]]:
         if not seq:
             return None
         if len(seq) > self.seq_len:
             seq = seq[: self.seq_len]
+            if mask is not None:
+                mask = mask[: self.seq_len]
         length = len(seq)
         if length < self.seq_len:
             seq = seq + [self.pad_id] * (self.seq_len - length)
+            if mask is not None:
+                mask = mask + [0.0] * (self.seq_len - length)
         self.stats.sequences += 1
         self.stats.tokens += length
         row = {"input_ids": seq, "length": length}
+        if mask is not None:
+            row["loss_mask"] = mask
+        else:
+            row["loss_mask"] = [1.0] * self.seq_len
         self._check_targets()
         return row
 
@@ -526,7 +635,46 @@ def _extract_text(row: Dict[str, Any], source: StageSourceCfg) -> Optional[str]:
     return None
 
 
-def _iter_hf_source(source: StageSourceCfg) -> Iterator[str]:
+def _build_chat_text_and_spans(
+    row: Dict[str, Any],
+    source: StageSourceCfg,
+    norm: Optional[SimpleNamespace] = None,
+) -> Optional[Tuple[str, List[Tuple[int, int]]]]:
+    messages = row.get(source.chat_messages_field)
+    if not isinstance(messages, list):
+        return None
+    text_parts: List[str] = []
+    spans: List[Tuple[int, int]] = []
+    offset = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get(source.chat_role_field)
+        content = message.get(source.chat_content_field)
+        if not isinstance(content, str) or not content.strip():
+            continue
+        role_str = str(role) if role is not None else ""
+        prefix = source.chat_role_prefix.format(role=role_str)
+        text_parts.append(prefix)
+        offset += len(prefix)
+        content_str = content.strip()
+        if norm is not None:
+            content_str = normalise_text(content_str, norm)
+        if not content_str:
+            continue
+        text_parts.append(content_str)
+        end = offset + len(content_str)
+        if role_str in source.chat_assistant_roles:
+            spans.append((offset, end))
+        text_parts.append(source.chat_turn_suffix)
+        offset = end + len(source.chat_turn_suffix)
+    full_text = "".join(text_parts)
+    if not full_text.strip():
+        return None
+    return full_text, spans
+
+
+def _iter_hf_source(source: StageSourceCfg) -> Iterator[Dict[str, Any]]:
     if not source.dataset_name:
         raise ValueError("HuggingFace source requires 'dataset_name'.")
     kwargs: Dict[str, Any] = {}
@@ -548,15 +696,14 @@ def _iter_hf_source(source: StageSourceCfg) -> Iterator[str]:
 
     count = 0
     for row in ds:
-        text = _extract_text(row, source) if isinstance(row, dict) else None
-        if text:
-            yield text
+        if isinstance(row, dict):
+            yield row
             count += 1
             if source.max_documents and count >= source.max_documents:
                 break
 
 
-def _iter_json_dir(source: StageSourceCfg) -> Iterator[str]:
+def _iter_json_dir(source: StageSourceCfg) -> Iterator[Dict[str, Any]]:
     if not source.json_root:
         raise ValueError("json_dir source requires 'json_root'.")
     root = _as_path(source.json_root)
@@ -571,21 +718,21 @@ def _iter_json_dir(source: StageSourceCfg) -> Iterator[str]:
         for record in records:
             if not isinstance(record, dict):
                 continue
-            text = _extract_text(record, source)
-            if text:
-                yield text
-                count += 1
-                if source.max_documents and count >= source.max_documents:
-                    return
+            yield record
+            count += 1
+            if source.max_documents and count >= source.max_documents:
+                return
 
 
-def iter_stage_text(stage: StageCfg) -> Iterator[str]:
+def iter_stage_rows_raw(stage: StageCfg) -> Iterator[Tuple[StageSourceCfg, Dict[str, Any]]]:
     for source in stage.sources:
         source_type = (source.type or "huggingface").lower()
         if source_type in {"hf", "huggingface"}:
-            yield from _iter_hf_source(source)
+            for row in _iter_hf_source(source):
+                yield source, row
         elif source_type in {"json", "jsonl", "json_dir"}:
-            yield from _iter_json_dir(source)
+            for row in _iter_json_dir(source):
+                yield source, row
         else:
             raise ValueError(f"Unknown source.type '{source.type}' for stage {stage.name}")
 
@@ -608,23 +755,37 @@ def iter_stage_rows(
         if stage.dedup_max_keys:
             dedupe_queue = deque()
 
-    batch: List[str] = []
+    batch_texts: List[str] = []
+    batch_spans: List[Optional[List[Tuple[int, int]]]] = []
     doc_limit = stage.max_documents
-    for raw_text in iter_stage_text(stage):
+    for source, row in iter_stage_rows_raw(stage):
         if emitter.done:
             break
         if doc_limit and stats.documents >= doc_limit:
             break
-        if not isinstance(raw_text, str):
+        if not isinstance(row, dict):
             continue
         stats.documents += 1
-        text = raw_text.strip()
-        if stage.normalization:
-            text = normalise_text(text, norm)
-        text = text.strip()
-        if not text:
-            stats.discarded += 1
-            continue
+        chat_payload = _build_chat_text_and_spans(row, source, norm if stage.normalization else None)
+        if chat_payload is None:
+            text = _extract_text(row, source)
+            spans = None
+            if not text:
+                stats.discarded += 1
+                continue
+            text = text.strip()
+            if stage.normalization:
+                text = normalise_text(text, norm)
+            text = text.strip()
+            if not text:
+                stats.discarded += 1
+                continue
+        else:
+            text, spans = chat_payload
+            text = text.strip()
+            if not text:
+                stats.discarded += 1
+                continue
         if stage.deduplicate:
             h = _maybe_hash(text)
             if dedup_mask is not None:
@@ -640,12 +801,14 @@ def iter_stage_rows(
                     if old in seen_hashes:
                         seen_hashes.remove(old)
         stats.unique_documents += 1
-        batch.append(text)
-        if len(batch) >= batch_size:
-            yield from emitter.encode_batch(batch)
-            batch.clear()
-    if batch and not emitter.done:
-        yield from emitter.encode_batch(batch)
+        batch_texts.append(text)
+        batch_spans.append(spans)
+        if len(batch_texts) >= batch_size:
+            yield from emitter.encode_batch_with_mask(batch_texts, batch_spans)
+            batch_texts.clear()
+            batch_spans.clear()
+    if batch_texts and not emitter.done:
+        yield from emitter.encode_batch_with_mask(batch_texts, batch_spans)
     if not emitter.done:
         yield from emitter.flush_remainder()
 
@@ -654,6 +817,7 @@ def _arrow_schema(seq_len: int) -> pa.Schema:
     return pa.schema([
         pa.field("input_ids", pa.list_(pa.int32(), list_size=seq_len)),
         pa.field("length", pa.int32()),
+        pa.field("loss_mask", pa.list_(pa.float32(), list_size=seq_len)),
     ])
 
 
@@ -791,6 +955,12 @@ def _parse_stage_sources(raw_sources: Iterable[Any]) -> List[StageSourceCfg]:
             json_root=src_dict.get("json_root"),
             file_glob=src_dict.get("file_glob", "**/*.json*"),
             max_documents=src_dict.get("max_documents"),
+            chat_messages_field=src_dict.get("chat_messages_field", "messages"),
+            chat_role_field=src_dict.get("chat_role_field", "role"),
+            chat_content_field=src_dict.get("chat_content_field", "content"),
+            chat_assistant_roles=list(src_dict.get("chat_assistant_roles", ["assistant"]) or ["assistant"]),
+            chat_role_prefix=str(src_dict.get("chat_role_prefix", "### {role}\n")),
+            chat_turn_suffix=str(src_dict.get("chat_turn_suffix", "\n")),
         )
         sources.append(cfg)
     return sources

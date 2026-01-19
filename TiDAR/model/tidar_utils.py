@@ -17,6 +17,7 @@ def build_train_batch(
     block_len: int,
     bias_value: float = -1.0e10,
     ignore_index: int = IGNORE_INDEX,
+    token_mask: Optional[jnp.ndarray] = None,
 ) -> Dict[str, jnp.ndarray]:
     """Build TiDAR training inputs for a batch of token sequences."""
     batch_size, seq_len = tokens.shape
@@ -41,6 +42,8 @@ def build_train_batch(
     else:
         positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
         valid = (positions < lengths[:, None]).astype(jnp.float32)
+    if token_mask is not None:
+        valid = valid * token_mask.astype(jnp.float32)
 
     if seq_len > 1:
         loss_mask_ntp = loss_mask_ntp.at[:, : seq_len - 1].set(valid[:, 1:])

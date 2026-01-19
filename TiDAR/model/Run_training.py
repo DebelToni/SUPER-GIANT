@@ -522,13 +522,14 @@ def main() -> None:
             for batch in batch_list:
                 batch_tokens = jnp.asarray(batch["input"])
                 mask = jnp.asarray(batch["mask"])
-                lengths = jnp.clip(mask.sum(axis=1).astype(jnp.int32) + 1, 1, runtime.config.seq_len)
+                lengths = jnp.clip((batch_tokens != pad_token_id).sum(axis=1), 1, runtime.config.seq_len)
                 train_batch = build_train_batch(
                     batch_tokens,
                     lengths,
                     mask_id=mask_token_id,
                     block_len=draft_len,
                     bias_value=bias_value,
+                    token_mask=mask,
                 )
                 prepared_batches.append({k: jnp.asarray(v) for k, v in train_batch.items()})
 

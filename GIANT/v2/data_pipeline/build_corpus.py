@@ -1044,6 +1044,14 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
             if source.json_root:
                 source.json_root = _resolve_path(base_prefix, source.json_root)
 
+    # Set HF cache environment variables if configured
+    if paths.hf_cache_root:
+        hf_cache = str(Path(paths.hf_cache_root))
+        os.environ["HF_HOME"] = hf_cache
+        os.environ["HF_DATASETS_CACHE"] = str(Path(hf_cache) / "datasets")
+        os.environ["TRANSFORMERS_CACHE"] = str(Path(hf_cache) / "transformers")
+        LOGGER.info("Set HF_HOME=%s", hf_cache)
+
     return TopConfig(
         tokenizer=tok,
         paths=paths,

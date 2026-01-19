@@ -131,9 +131,9 @@ qa_finetune:
   dataset_fraction: 1.0
 
 evaluate:
-  total_samples: 1024
-  samples_per_stage: 64
-  batch_size: 1
+  total_samples: 50000
+  samples_per_stage: 5000
+  batch_size: 4
   seed: 42
   checkpoint_dir: "checkpoints"
 

@@ -29,6 +29,7 @@ from GIANT.v2.model.checkpoint_manager import (
     save as save_ckpt,
     save_opt_state,
     load_opt_state,
+    set_npz_metadata,
 )
 from GIANT.v2.model.optimizer_utils import create_weight_decay_mask
 from flax import core as flax_core
@@ -264,10 +265,13 @@ def save_training_state(
     completed_in_stage: int,
     stage_states: Dict[str, Dict[str, int]],
     runtime: StageRuntime,
+    train_loss: float | None = None,
 ):
     """Persist params, optimizer, and dataloader progress atomically."""
     os.makedirs(checkpoint_dir, exist_ok=True)
-    ckpt_file = save_ckpt(params, global_step, checkpoint_dir)
+    ckpt_file = save_ckpt(params, global_step, checkpoint_dir, train_loss=train_loss)
+    if train_loss is not None:
+        print(f"[metadata] Wrote train_loss={train_loss:.6f} to checkpoint {ckpt_file}")
     save_opt_state(opt_state, global_step, checkpoint_dir)
     stage_states[runtime.config.name] = runtime.loader.state_dict()
     save_dataloader_state(
@@ -483,6 +487,7 @@ def main() -> None:
         return params, opt_state, losses
 
     start = time.time()
+    last_loss = None
     for stage_idx in range(current_stage_idx, len(stage_runtimes)):
         runtime = stage_runtimes[stage_idx]
         stage_steps_target = runtime.total_steps
@@ -561,6 +566,7 @@ def main() -> None:
                     completed_in_stage=completed_in_stage,
                     stage_states=stage_states,
                     runtime=runtime,
+                    train_loss=last_loss,
                 )
                 print(f"💾 checkpoint → {ckpt_file}")
 
@@ -580,7 +586,9 @@ def main() -> None:
         # Stage finished → reset step tracker
         stage_step_total = 0
 
-    final_ckpt = save_ckpt(params, global_step, checkpoint_dir)
+    final_ckpt = save_ckpt(params, global_step, checkpoint_dir, train_loss=last_loss)
+    if last_loss is not None:
+        print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {final_ckpt}")
     save_opt_state(opt_state, global_step, checkpoint_dir)
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),

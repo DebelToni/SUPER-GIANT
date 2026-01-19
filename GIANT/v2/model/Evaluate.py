@@ -17,6 +17,7 @@ from GIANT.v2.model.GiantGPT import GiantGPT
 from GIANT.v2.model.arrow_data_loader import ShardedArrowDataset, StageDataLoader
 from GIANT.v2.model.checkpoint_manager import latest as latest_ckpt
 from GIANT.v2.model.checkpoint_manager import load as load_ckpt
+from GIANT.v2.model.checkpoint_manager import set_npz_metadata
 
 
 def load_configs() -> OmegaConf:
@@ -129,6 +130,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate SUPER-GIANT on a random curriculum sample.")
     parser.add_argument("--checkpoint", default="latest", help="Path to checkpoint (.npz) or 'latest'.")
     parser.add_argument("--checkpoint_dir", default=None, help="Override checkpoint directory for --checkpoint latest.")
+    parser.add_argument("--no_write_metadata", action="store_true", help="Skip writing validation metrics to checkpoint metadata.")
     args = parser.parse_args()
 
     cfg = load_configs()
@@ -169,13 +171,24 @@ def main():
     )
 
     rng = np.random.default_rng(eval_seed)
-    remaining = total_samples
+    
+    # Weight sampling towards later stages (quadratic weighting)
+    num_stages = len(stage_cfgs)
+    stage_weights = np.array([(i + 1) ** 2 for i in range(num_stages)])
+    stage_weights = stage_weights / stage_weights.sum()
+    
+    # Allocate samples per stage based on weights
+    stage_samples = (stage_weights * total_samples).astype(int)
+    # Ensure we use exactly total_samples by adding remainder to last stage
+    remainder = total_samples - stage_samples.sum()
+    stage_samples[-1] += remainder
 
     results = []
-    for stage in stage_cfgs:
-        if remaining <= 0:
-            break
-        target_rows = min(samples_per_stage, remaining)
+    for stage_idx, stage in enumerate(stage_cfgs):
+        target_rows = int(stage_samples[stage_idx])
+        if target_rows == 0:
+            continue
+        
         data_path = dataset_root / stage["dataset"]
         dataset = ShardedArrowDataset(data_path)
         target_rows = min(target_rows, dataset.total_rows)
@@ -194,22 +207,29 @@ def main():
         max_batches = math.ceil(target_rows / eval_batch_size)
         loss, batches = evaluate_on_stage(params, model, loader, max_batches)
         if not math.isnan(loss):
-            results.append((stage["name"], loss, batches, int(stage["seq_len"])))
-        remaining -= target_rows
+            results.append((stage["name"], loss, batches, int(stage["seq_len"]), target_rows))
 
     if not results:
         print("No evaluation batches produced; check dataset paths and sample sizes.")
         return
 
     stage_losses = []
-    for name, loss, batches, seq_len in results:
+    total_samples_evaluated = 0
+    for name, loss, batches, seq_len, samples in results:
         ppl = math.exp(loss) if loss < 50 else float("inf")
         stage_losses.append(loss)
-        print(f"{name:20s} | seq={seq_len:<4d} batches={batches:<4d} loss={loss:.4f} ppl={ppl:.2f}")
+        total_samples_evaluated += samples
+        print(f"{name:20s} | seq={seq_len:<4d} samples={samples:<6d} batches={batches:<4d} loss={loss:.4f} ppl={ppl:.2f}")
 
     mean_loss = float(np.mean(stage_losses))
     overall_ppl = math.exp(mean_loss) if mean_loss < 50 else float("inf")
-    print(f"\nOverall mean loss={mean_loss:.4f} ppl={overall_ppl:.2f}")
+    print(f"\nOverall: {total_samples_evaluated} samples | mean loss={mean_loss:.4f} ppl={overall_ppl:.2f}")
+
+    if not args.no_write_metadata:
+        print(f"\n[metadata] Writing validation metrics to checkpoint...")
+        set_npz_metadata(ckpt_path, "val_loss", f"{mean_loss:.6f}")
+        set_npz_metadata(ckpt_path, "val_ppl", f"{overall_ppl:.4f}")
+        print(f"[metadata] Wrote val_loss={mean_loss:.6f}, val_ppl={overall_ppl:.4f} to checkpoint {ckpt_path}")
 
 
 if __name__ == "__main__":

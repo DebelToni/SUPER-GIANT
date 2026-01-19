@@ -26,6 +26,9 @@ META_KEYS = {
     "name": "Human-friendly checkpoint name.",
     "commit_hash": "Git commit hash where this checkpoint was created or validated.",
     "example_command": "Example command to run inference with this checkpoint.",
+    "val_loss": "Validation loss on held-out data.",
+    "val_ppl": "Validation perplexity on held-out data.",
+    "train_loss": "Training loss at checkpoint time.",
 }
 
 
@@ -151,7 +154,7 @@ def _step_from_name(fname: str) -> int:
     return int(match.group(1)) if match else -1
 
 
-def save(params, step: int, ckpt_dir: str = "checkpoints") -> str:
+def save(params, step: int, ckpt_dir: str = "checkpoints", train_loss: float | None = None) -> str:
     """
     Save *params* to  <ckpt_dir>/step_XXXXXXX.npz  (7-digit zero-padded counter).
     Returns the file path so callers can log it.
@@ -160,12 +163,15 @@ def save(params, step: int, ckpt_dir: str = "checkpoints") -> str:
     path = os.path.join(ckpt_dir, f"step_{step:07d}.npz")
     tmp_path = path + ".tmp"
     # Write to temp file then atomically rename to avoid partial checkpoints.
-    save_npz(params, tmp_path)
+    metadata = {}
+    if train_loss is not None:
+        metadata["train_loss"] = f"{train_loss:.6f}"
+    save_npz(params, tmp_path, metadata=metadata)
     try:
         os.replace(tmp_path, path)
     except FileNotFoundError:
         # Fallback: write directly if temp was removed mid-save (e.g., preemption)
-        save_npz(params, path)
+        save_npz(params, path, metadata=metadata)
     return path
 
 

@@ -101,9 +101,9 @@ stages:
         shuffle_seed: 12330
         text_field: "text"
 
-  stackedu_80m:
-    description: "Stack-Edu — educational code (0.08B tokens)"
-    output_dir: "stackedu_80m"
+  starcoder_python_edu_80m:
+    description: "StarCoderData Python-Edu (filtered) — code text (0.08B tokens)"
+    output_dir: "starcoder_python_edu_80m"
     sequence_length: 2048
     target_tokens: 80000000
     min_tokens: 128
@@ -121,14 +121,13 @@ stages:
     seed_offset: 40
     sources:
       - type: huggingface
-        dataset_name: "HuggingFaceTB/stack-edu"
-        dataset_config: "Python"
+        dataset_name: "jon-tow/starcoderdata-python-edu"
         split: "train"
         streaming: true
         shuffle_streaming: true
         shuffle_buffer_size: 20000
         shuffle_seed: 12340
-        text_fields: ["content", "text", "code", "body"]
+        text_field: "content"
 
   ultrachat_rehearsal_20m:
     description: "UltraChat SFT rehearsal — preserve assistant style (0.02B tokens)"

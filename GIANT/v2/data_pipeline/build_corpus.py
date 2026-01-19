@@ -1118,6 +1118,10 @@ def main() -> None:
         stage=args.stage,
         dry_run=args.dry_run,
     )
+    # Force exit to prevent hanging from HuggingFace datasets background threads
+    # When streaming datasets are stopped early, background threads may not cleanup properly
+    LOGGER.info("Pipeline complete, forcing clean exit")
+    os._exit(0)
 
 
 if __name__ == "__main__":

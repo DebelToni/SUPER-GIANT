@@ -282,6 +282,7 @@ class StageDataLoader:
         targets = np.concatenate([batch_tokens[:, 1:], pad_col], axis=1)
         eff_lengths = np.clip(batch_lengths, 1, seq_len)
         valid_target_len = np.maximum(eff_lengths - 1, 0)
+        valid_target_len = np.maximum(valid_target_len, 1)
         positions = self._positions
         length_mask = (positions < valid_target_len[:, None]).astype(np.float32)
         if batch_loss_mask is not None:

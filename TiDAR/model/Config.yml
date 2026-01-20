@@ -7,7 +7,7 @@ model:
   rope_dim: 64
   context_length: 2048
   dropout_rate: 0.0
-  use_remat: false
+  use_remat: true
   param_dtype: float32
   compute_dtype: bfloat16
 
@@ -34,8 +34,8 @@ optimizer:
     # - embedding
 
 training:
-  batch_size: 8
-  gradient_accumulation: 2
+  batch_size: 2
+  gradient_accumulation: 4
   max_epochs: 1
   seed: 0
   log_every: 200
@@ -43,7 +43,7 @@ training:
   mini_checkpoint_every: 100
   mini_max_to_keep: 2
   label_smoothing: 0.05
-  scan_chunk: 4
+  scan_chunk: 1
 
 stages:
   - name: fw_edu_1200m

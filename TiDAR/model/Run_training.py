@@ -464,31 +464,78 @@ def main() -> None:
     base_rng = jax.random.PRNGKey(seed)
     cfg_chunk = int(getattr(cfg.training, "scan_chunk", 1))
     chunk_size = max(1, int(args.scan_chunk)) if args.scan_chunk is not None else max(1, cfg_chunk)
+    grad_accum = max(1, int(getattr(cfg.training, "gradient_accumulation", 1)))
+
+    def _init_accum_grads(pytree):
+        return jax.tree_util.tree_map(jnp.zeros_like, pytree)
 
     def _stack_batches(batches):
         return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *batches)
 
     @jax.jit
-    def _run_chunk(params, opt_state, batch_chunk, start_step):
-        def body(carry, batch):
-            params, opt_state, step = carry
-            dropout_rng = jax.random.fold_in(base_rng, step)
-            params, opt_state, loss, ntp_loss, diff_loss = train_step(
-                params,
-                opt_state,
-                batch,
-                model=model,
-                optimizer=optimizer,
-                dropout_rng=dropout_rng,
-            )
-            return (params, opt_state, step + 1), (loss, ntp_loss, diff_loss)
+    def _run_chunk(params, opt_state, batch_chunk, start_step, accum_grads, accum_count):
+        grad_scale = jnp.asarray(1.0 / grad_accum, dtype=jnp.float32)
 
-        (params, opt_state, _), losses = jax.lax.scan(
-            body, (params, opt_state, start_step), batch_chunk
+        def body(carry, batch):
+            params, opt_state, step, accum_grads, accum_count = carry
+            dropout_rng = jax.random.fold_in(base_rng, step)
+
+            def loss_fn(p):
+                logits = model.apply(
+                    {"params": p},
+                    batch["input_ids"],
+                    rngs={"dropout": dropout_rng},
+                    deterministic=False,
+                    attn_bias=batch["attn_bias"],
+                    position_ids=batch["position_ids"],
+                )
+                labels = batch["labels"]
+                mask_ntp = batch["loss_mask_ntp"]
+                mask_diff = batch["loss_mask_diff"]
+                active = (mask_ntp + mask_diff) > 0
+                labels_safe = jnp.where(active, labels, 0)
+                ce = optax.softmax_cross_entropy_with_integer_labels(logits, labels_safe)
+                ntp_loss = (ce * mask_ntp).sum() / jnp.maximum(mask_ntp.sum(), 1.0)
+                diff_loss = (ce * mask_diff).sum() / jnp.maximum(mask_diff.sum(), 1.0)
+                return ntp_loss + diff_loss, (ntp_loss, diff_loss)
+
+            (loss, (ntp_loss, diff_loss)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+            accum_grads = jax.tree_util.tree_map(lambda a, g: a + g, accum_grads, grads)
+            accum_count = accum_count + 1
+
+            def apply_updates(args):
+                params, opt_state, accum_grads = args
+                grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
+                updates, opt_state = optimizer.update(grads, opt_state, params)
+                params = optax.apply_updates(params, updates)
+                accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+                return params, opt_state, accum_grads
+
+            should_update = accum_count == grad_accum
+            params, opt_state, accum_grads = jax.lax.cond(
+                should_update,
+                apply_updates,
+                lambda args: args,
+                (params, opt_state, accum_grads),
+            )
+            accum_count = jnp.where(should_update, 0, accum_count)
+            return (params, opt_state, step + 1, accum_grads, accum_count), (loss, ntp_loss, diff_loss)
+
+        (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
+            body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
         )
-        return params, opt_state, losses
+        return params, opt_state, accum_grads, accum_count, losses
+
+    @jax.jit
+    def _apply_accum(params, opt_state, accum_grads, denom):
+        grads = jax.tree_util.tree_map(lambda g: g / denom, accum_grads)
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        return params, opt_state
 
     start = time.time()
+    accum_grads = _init_accum_grads(params)
+    accum_count = jnp.asarray(0, dtype=jnp.int32)
     for stage_idx in range(current_stage_idx, len(stage_runtimes)):
         runtime = stage_runtimes[stage_idx]
         stage_steps_target = runtime.total_steps
@@ -535,7 +582,9 @@ def main() -> None:
                 prepared_batches.append({k: jnp.asarray(v) for k, v in train_batch.items()})
 
             chunk = _stack_batches(prepared_batches)
-            params, opt_state, losses = _run_chunk(params, opt_state, chunk, global_step)
+            params, opt_state, accum_grads, accum_count, losses = _run_chunk(
+                params, opt_state, chunk, global_step, accum_grads, accum_count
+            )
             losses = np.asarray(jax.device_get(losses))
             if losses.ndim == 1:
                 losses = losses[:, None]
@@ -590,18 +639,36 @@ def main() -> None:
                 print(f"💾 checkpoint → {ckpt_file}")
 
             if _stop_requested:
+                accum_count_host = int(jax.device_get(accum_count))
+                if accum_count_host > 0:
+                    denom = jnp.asarray(accum_count_host, dtype=jnp.float32)
+                    params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
+                    accum_grads = _init_accum_grads(params)
+                    accum_count = jnp.asarray(0, dtype=jnp.int32)
                 mini_ckpt_mgr.wait_until_finished(timeout=4.0)
                 print("[signal] Stop requested; exiting after current chunk.")
                 pbar.close()
                 return
 
         pbar.close()
+        accum_count_host = int(jax.device_get(accum_count))
+        if accum_count_host > 0:
+            denom = jnp.asarray(accum_count_host, dtype=jnp.float32)
+            params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
+            accum_grads = _init_accum_grads(params)
+            accum_count = jnp.asarray(0, dtype=jnp.int32)
         if last_loss is not None:
             print(f"✓ Stage {runtime.config.name} completed (last loss {last_loss:.4f})")
         else:
             print(f"✓ Stage {runtime.config.name} completed (no batches emitted)")
         stage_step_total = 0
 
+    accum_count_host = int(jax.device_get(accum_count))
+    if accum_count_host > 0:
+        denom = jnp.asarray(accum_count_host, dtype=jnp.float32)
+        params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
+        accum_grads = _init_accum_grads(params)
+        accum_count = jnp.asarray(0, dtype=jnp.int32)
     final_ckpt = save_ckpt(params, global_step, checkpoint_dir, train_loss=last_loss)
     if last_loss is not None:
         print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {final_ckpt}")

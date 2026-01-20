@@ -262,7 +262,7 @@ def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientT
             mask=mask,
         ),
     )
-    return optimizer
+    return optax.apply_if_finite(optimizer, max_consecutive_errors=5)
 
 
 def dataloader_state_path(cfg: OmegaConf, step: int) -> Path:

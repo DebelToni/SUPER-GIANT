@@ -67,6 +67,7 @@ class NativeJaxSelfAttention(nn.Module):
 
     num_heads: int
     qkv_features: int
+    context_length: int = MODEL_CFG.context_length
     dropout_rate: float = 0.0
     num_kv: int = 1
     dtype: jnp.dtype = COMPUTE_DTYPE
@@ -99,7 +100,7 @@ class NativeJaxSelfAttention(nn.Module):
         draft_len = 0
         if TIDAR_CFG is not None and hasattr(TIDAR_CFG, "draft_length"):
             draft_len = int(TIDAR_CFG.draft_length)
-        rope_len = int(MODEL_CFG.context_length) + (2 * draft_len)
+        rope_len = int(self.context_length) + (2 * draft_len)
         self._rope_sin, self._rope_cos = _build_rope_cache(
             rope_len, self.rotary_dim, self.dtype
         )
@@ -174,14 +175,14 @@ class NativeJaxSelfAttention(nn.Module):
                 "cache",
                 "k",
                 jnp.zeros,
-                (b, self.num_kv, MODEL_CFG.context_length, head_dim),
+                (b, self.num_kv, self.context_length, head_dim),
                 self.dtype,
             )
             cached_v = self.variable(
                 "cache",
                 "v",
                 jnp.zeros,
-                (b, self.num_kv, MODEL_CFG.context_length, head_dim),
+                (b, self.num_kv, self.context_length, head_dim),
                 self.dtype,
             )
 
@@ -283,6 +284,7 @@ class TinyTransformerBlock(nn.Module):
     d_model: int
     n_heads: int
     d_ff: int
+    context_length: int = MODEL_CFG.context_length
     dropout_rate: float = 0.1
     dtype: jnp.dtype = COMPUTE_DTYPE
 
@@ -308,6 +310,7 @@ class TinyTransformerBlock(nn.Module):
                 num_heads=module.n_heads,
                 num_kv=MODEL_CFG.num_kv_heads,
                 qkv_features=module.d_model,
+                context_length=module.context_length,
                 dropout_rate=module.dropout_rate,
                 dtype=module.dtype,
             )(

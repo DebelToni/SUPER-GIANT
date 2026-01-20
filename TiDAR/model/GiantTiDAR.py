@@ -69,6 +69,7 @@ class TiDAR(nn.Module):
                     d_model=self.d_model,
                     n_heads=self.n_heads,
                     d_ff=self.d_ff,
+                    context_length=self.context_length,
                     dropout_rate=self.dropout_rate,
                     dtype=COMPUTE_DTYPE,
             )(

@@ -34,7 +34,7 @@ optimizer:
     - embedding
 
 training:
-  batch_size: 2
+  batch_size: 1
   gradient_accumulation: 1
   max_epochs: 1
   seed: 0
@@ -46,9 +46,37 @@ training:
   scan_chunk: 4
 
 stages:
-  - name: tidar_smoke
-    dataset: tidar_smoke
-    seq_len: 16
+  - name: fw_edu_1200m
+    dataset: fw_edu_1200m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 0.6667
+    shuffle: true
+    fraction: 1.0
+  - name: cosmopedia_v2_300m
+    dataset: cosmopedia_v2_300m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 0.8333
+    shuffle: true
+    fraction: 1.0
+  - name: openwebmath_200m
+    dataset: openwebmath_200m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 0.9444
+    shuffle: true
+    fraction: 1.0
+  - name: starcoder_python_edu_80m
+    dataset: starcoder_python_edu_80m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 0.9889
+    shuffle: true
+    fraction: 1.0
+  - name: ultrachat_rehearsal_20m
+    dataset: ultrachat_rehearsal_20m
+    seq_len: 2048
     epochs: 1
     end_ratio: 1.0
     shuffle: true

@@ -15,8 +15,8 @@ paths:
   hf_cache_root: "/proj/giant-data/hf_cache"
 
 training_defaults:
-  progressive_sequence_lengths: [256]
-  lr_milestones: [1.0]
+  progressive_sequence_lengths: [2048]
+  lr_milestones: [0.6667, 0.8333, 0.9444, 0.9889, 1.0]
   warmup_steps: 200
   grad_accumulation: 1
   global_seed: 0

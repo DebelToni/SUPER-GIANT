@@ -585,9 +585,13 @@ def main() -> None:
             params, opt_state, accum_grads, accum_count, losses = _run_chunk(
                 params, opt_state, chunk, global_step, accum_grads, accum_count
             )
-            losses = np.asarray(jax.device_get(losses))
-            if losses.ndim == 1:
-                losses = losses[:, None]
+            losses_host = jax.device_get(losses)
+            if isinstance(losses_host, tuple):
+                losses = np.stack(losses_host, axis=1)
+            else:
+                losses = np.asarray(losses_host)
+                if losses.ndim == 1:
+                    losses = losses[:, None]
             chunk_len = losses.shape[0]
             if chunk_len == 0:
                 break

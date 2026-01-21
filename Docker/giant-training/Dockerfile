@@ -87,6 +87,12 @@ REPO_URL="https://github.com/DebelToni/SUPER-GIANT"
 
 mkdir -p "$DATA_DIR"
 
+SYNC_MARKER="${DATA_DIR}/.r2_sync_done"
+if [[ ! -f "$SYNC_MARKER" ]]; then
+  s5cmd --endpoint-url "$R2_ENDPOINT" sync --size-only "s3://giant-data/*" "$DATA_DIR/"
+  touch "$SYNC_MARKER"
+fi
+
 if [[ ! -d "$REPO_DIR/.git" ]]; then
   # Fresh clone (also handles "dir missing" or "dir exists but not a git repo")
   rm -rf "$REPO_DIR" 2>/dev/null || true

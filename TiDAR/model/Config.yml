@@ -86,3 +86,6 @@ qa_finetune: {}
 
 tokenizer:
   name: "HuggingFaceTB/cosmo2-tokenizer"
+#export XLA_PYTHON_CLIENT_PREALLOCATE=false
+#export XLA_PYTHON_CLIENT_PREALLOCATE=true
+#export XLA_PYTHON_CLIENT_MEM_FRACTION=1.0

@@ -144,21 +144,12 @@ def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
     return stage_cfgs
 
 
-def validate_milestones(stage_cfgs: List[StageConfig], cfg: OmegaConf) -> None:
-    milestones = list(cfg.training_defaults.lr_milestones)
+def validate_milestones(stage_cfgs: List[StageConfig]) -> None:
     expected = [stage.end_ratio for stage in stage_cfgs]
     if not expected or expected[-1] != 1.0:
         raise ValueError("Stage configuration must end with end_ratio == 1.0")
     if sorted(expected) != expected:
         raise ValueError("Stage end_ratio values must be non-decreasing")
-    if milestones and milestones[-1] != 1.0:
-        milestones.append(1.0)
-    if milestones and len(milestones) != len(stage_cfgs):
-        print("Warning: lr_milestones count does not match number of stages; proceeding regardless.")
-    else:
-        for m, e in zip(milestones, expected):
-            if abs(m - e) > 1e-3:
-                print(f"Warning: lr milestone {m} differs from stage end_ratio {e}")
 
 
 def build_stage_runtimes(
@@ -368,12 +359,18 @@ def main() -> None:
     _apply_compute_dtype_override(cfg)
 
     stage_cfgs = parse_stage_configs(cfg)
-    validate_milestones(stage_cfgs, cfg)
+    validate_milestones(stage_cfgs)
 
     base_root = Path(cfg.paths.data_root)
     dataset_root = Path(cfg.paths.processed_data_root)
     batch_size = int(cfg.training.batch_size)
-    seed = int(cfg.training.seed)
+    global_seed = cfg.get("global_seed")
+    if global_seed is not None:
+        np.random.seed(int(global_seed))
+    seed = getattr(cfg.training, "seed", None)
+    if seed is None:
+        seed = global_seed if global_seed is not None else 0
+    seed = int(seed)
 
     checkpoint_root = Path(args.checkpoint_dir or cfg.paths.get("checkpoint_root", "checkpoints"))
     if not checkpoint_root.is_absolute():

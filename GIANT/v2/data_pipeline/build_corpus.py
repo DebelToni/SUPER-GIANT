@@ -65,15 +65,6 @@ class PathsCfg:
 
 
 @dataclass
-class TrainingDefaultsCfg:
-    progressive_sequence_lengths: Optional[List[int]] = None
-    lr_milestones: Optional[List[float]] = None
-    warmup_steps: int = 0
-    grad_accumulation: int = 1
-    global_seed: int = 0
-
-
-@dataclass
 class OutputsCfg:
     processed_root: str = "dataset_artifacts"
     rows_per_shard: int = 65536
@@ -146,7 +137,7 @@ class StageCfg:
 class TopConfig:
     tokenizer: TokenizerCfg
     paths: PathsCfg
-    training_defaults: TrainingDefaultsCfg
+    global_seed: Optional[int]
     outputs: OutputsCfg
     scheduling: SchedulingCfg
     stages: List[StageCfg]
@@ -1025,7 +1016,9 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
 
     tok = TokenizerCfg(**(global_cfg.get("tokenizer") or {}))
     paths = PathsCfg(**(global_cfg.get("paths") or {}))
-    train_defaults = TrainingDefaultsCfg(**(global_cfg.get("training_defaults") or {}))
+    global_seed = global_cfg.get("global_seed")
+    if global_seed is not None:
+        global_seed = int(global_seed)
     outputs = OutputsCfg(**(corpus_cfg.get("outputs") or {}))
     scheduling = SchedulingCfg(**(corpus_cfg.get("scheduling") or {}))
     stages = _parse_stages(corpus_cfg, outputs)
@@ -1055,7 +1048,7 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
     return TopConfig(
         tokenizer=tok,
         paths=paths,
-        training_defaults=train_defaults,
+        global_seed=global_seed,
         outputs=outputs,
         scheduling=scheduling,
         stages=stages,
@@ -1094,7 +1087,8 @@ def run_pipeline(
         top_cfg.outputs.processed_root = resolved
 
     tokenizer = load_tokenizer(top_cfg.tokenizer)
-    np.random.seed(top_cfg.training_defaults.global_seed or top_cfg.scheduling.seed)
+    seed = top_cfg.global_seed if top_cfg.global_seed is not None else top_cfg.scheduling.seed
+    np.random.seed(int(seed))
 
     stage_lookup = {stage_cfg.name: stage_cfg for stage_cfg in top_cfg.stages}
     if stage != "all":

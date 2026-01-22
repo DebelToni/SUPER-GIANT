@@ -204,21 +204,12 @@ def build_stage_runtimes(
     return runtimes
 
 
-def validate_milestones(stage_cfgs: List[StageConfig], cfg: OmegaConf) -> None:
-    milestones = list(cfg.training_defaults.lr_milestones)
+def validate_milestones(stage_cfgs: List[StageConfig]) -> None:
     expected = [stage.end_ratio for stage in stage_cfgs]
     if not expected or expected[-1] != 1.0:
         raise ValueError("Stage configuration must end with end_ratio == 1.0")
     if sorted(expected) != expected:
         raise ValueError("Stage end_ratio values must be non-decreasing")
-    if milestones and milestones[-1] != 1.0:
-        milestones.append(1.0)
-    if milestones and len(milestones) != len(stage_cfgs):
-        print("⚠ lr_milestones count does not match number of stages; proceeding regardless.")
-    else:
-        for m, e in zip(milestones, expected):
-            if abs(m - e) > 1e-3:
-                print("⚠ lr milestone", m, "differs from stage end_ratio", e)
 
 
 def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientTransformation:
@@ -327,10 +318,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_configs()
+    global_seed = cfg.get("global_seed")
+    if global_seed is not None:
+        np.random.seed(int(global_seed))
     tokenizer = load_tokenizer(cfg)
 
     stage_cfgs = parse_stage_configs(cfg)
-    validate_milestones(stage_cfgs, cfg)
+    validate_milestones(stage_cfgs)
 
     base_root = Path(cfg.paths.data_root)
 
@@ -338,7 +332,10 @@ def main() -> None:
     if not dataset_root.is_absolute():
         dataset_root = (base_root / dataset_root).resolve()
     batch_size = int(cfg.training.batch_size)
-    seed = int(cfg.training.seed)
+    seed = getattr(cfg.training, "seed", None)
+    if seed is None:
+        seed = global_seed if global_seed is not None else 0
+    seed = int(seed)
 
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else (
         tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0

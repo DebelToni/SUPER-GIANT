@@ -1,3 +1,5 @@
+global_seed: 0
+
 tokenizer:
   name: "clowman/Llama-3.2-3B-Instruct-AWQ-Int4"
   cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
@@ -12,16 +14,5 @@ paths:
   logs_root: "logs"
   hf_cache_root: "/proj/giant-data/hf_cache"
 
-training_defaults:
-  progressive_sequence_lengths: [256, 512, 1024]
-  lr_milestones: [0.1, 0.4, 1.0]
-  warmup_steps: 1000
-  grad_accumulation: 2
-  global_seed: 0
-
-io:
-  shard_size_tokens: 2048
-  validation_fraction: 0.01
-  min_sequence_tokens: 128
 # export XLA_PYTHON_CLIENT_PREALLOCATE=true
 # export XLA_PYTHON_CLIENT_MEM_FRACTION=1.0

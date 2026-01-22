@@ -3,8 +3,8 @@ name: Build & push giant-training image
 on:
   push:
     paths:
-      - "Docker/giant-training/**"
-      - "Docker/giant-training-S3/**"
+      - "CICD/Docker/giant-training/**"
+      - "CICD/Docker/giant-training-S3/**"
       - ".github/workflows/Build_image.yml"
 
 permissions:
@@ -19,14 +19,14 @@ jobs:
         include:
           - image_name: giant-training
             image_repo: giant-training
-            context: ./Docker/giant-training
-            dockerfile: ./Docker/giant-training/Dockerfile
+            context: ./CICD/Docker/giant-training
+            dockerfile: ./CICD/Docker/giant-training/Dockerfile
             tag1: latest
             tag2: ${{ github.sha }}
           - image_name: giant-training-S3
             image_repo: giant-training
-            context: ./Docker/giant-training-S3
-            dockerfile: ./Docker/giant-training-S3/Dockerfile
+            context: ./CICD/Docker/giant-training-S3
+            dockerfile: ./CICD/Docker/giant-training-S3/Dockerfile
             tag1: S3
             tag2: S3-${{ github.sha }}
 

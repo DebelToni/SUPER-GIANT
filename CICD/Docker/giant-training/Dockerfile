@@ -89,7 +89,7 @@ mkdir -p "$DATA_DIR"
 
 SYNC_MARKER="${DATA_DIR}/.r2_sync_done"
 if [[ ! -f "$SYNC_MARKER" ]]; then
-  s5cmd --endpoint-url "$R2_ENDPOINT" sync --size-only "s3://giant-data/*" "$DATA_DIR/"
+  s5cmd sync --size-only "s3://giant-data/*" "$DATA_DIR/"
   touch "$SYNC_MARKER"
 fi
 

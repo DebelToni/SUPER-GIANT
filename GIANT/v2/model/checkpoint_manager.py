@@ -161,7 +161,7 @@ def save(params, step: int, ckpt_dir: str = "checkpoints", train_loss: float | N
     """
     os.makedirs(ckpt_dir, exist_ok=True)
     path = os.path.join(ckpt_dir, f"step_{step:07d}.npz")
-    tmp_path = path + ".tmp"
+    tmp_path = path + ".tmp.npz"
     # Write to temp file then atomically rename to avoid partial checkpoints.
     metadata = {}
     if train_loss is not None:

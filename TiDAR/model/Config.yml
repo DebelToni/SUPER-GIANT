@@ -7,7 +7,7 @@ model:
   rope_dim: 64
   context_length: 2048
   dropout_rate: 0.0
-  use_remat: true
+  use_remat: false
   param_dtype: float32
   compute_dtype: bfloat16
 
@@ -34,48 +34,48 @@ optimizer:
     # - embedding
 
 training:
-  batch_size: 2
+  batch_size: 8
   gradient_accumulation: 4
   max_epochs: 1
   seed: 0
-  log_every: 200
-  checkpoint_every: 1000
+  log_every: 500
+  checkpoint_every: 20000
   mini_checkpoint_every: 100
   mini_max_to_keep: 2
   label_smoothing: 0.05
   scan_chunk: 1
 
 stages:
-  - name: fw_edu_1200m
-    dataset: fw_edu_1200m
+  - name: fw_edu_667m
+    dataset: fw_edu_667m
     seq_len: 2048
     epochs: 1
-    end_ratio: 0.6667
+    end_ratio: 0.6670
     shuffle: true
     fraction: 1.0
-  - name: cosmopedia_v2_300m
-    dataset: cosmopedia_v2_300m
+  - name: cosmopedia_v2_167m
+    dataset: cosmopedia_v2_167m
     seq_len: 2048
     epochs: 1
-    end_ratio: 0.8333
+    end_ratio: 0.8340
     shuffle: true
     fraction: 1.0
-  - name: openwebmath_200m
-    dataset: openwebmath_200m
+  - name: openwebmath_111m
+    dataset: openwebmath_111m
     seq_len: 2048
     epochs: 1
-    end_ratio: 0.9444
+    end_ratio: 0.9450
     shuffle: true
     fraction: 1.0
-  - name: starcoder_python_edu_80m
-    dataset: starcoder_python_edu_80m
+  - name: starcoder_python_edu_44m
+    dataset: starcoder_python_edu_44m
     seq_len: 2048
     epochs: 1
-    end_ratio: 0.9889
+    end_ratio: 0.9890
     shuffle: true
     fraction: 1.0
-  - name: ultrachat_rehearsal_20m
-    dataset: ultrachat_rehearsal_20m
+  - name: ultrachat_rehearsal_11m
+    dataset: ultrachat_rehearsal_11m
     seq_len: 2048
     epochs: 1
     end_ratio: 1.0

@@ -109,6 +109,10 @@ else
   # git -C "$REPO_DIR" clean -fd
 fi
 
+if [[ -f "$REPO_DIR/pyproject.toml" || -f "$REPO_DIR/setup.py" ]]; then
+  /opt/venv/bin/pip install -e "$REPO_DIR"
+fi
+
 
 mkdir -p "$TS_STATE_DIR" /var/run/tailscale
 

@@ -145,6 +145,10 @@ else
   git -C "$REPO_DIR" pull --rebase --autostash
 fi
 
+if [[ -f "$REPO_DIR/pyproject.toml" || -f "$REPO_DIR/setup.py" ]]; then
+  /opt/venv/bin/pip install -e "$REPO_DIR"
+fi
+
 # 1) Tailscale: prefer kernel TUN if available; else userspace + SOCKS5
 if [[ -n "${TS_AUTHKEY:-}" ]]; then
   if [[ -e /dev/net/tun ]]; then

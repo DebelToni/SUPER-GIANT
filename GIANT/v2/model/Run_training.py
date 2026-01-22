@@ -545,7 +545,8 @@ def main() -> None:
             desc=f"stage:{runtime.config.name}",
             initial=completed_in_stage,
             leave=True,
-            dynamic_ncols=True,
+            dynamic_ncols=False,
+            ncols=120,
         )
         last_loss = None
 

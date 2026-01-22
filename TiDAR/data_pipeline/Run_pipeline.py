@@ -14,6 +14,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--global_config", type=str, default=None)
     parser.add_argument("--stage", type=str, default="all")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--dataset_dir",
+        type=str,
+        default=None,
+        help="Override outputs.processed_root (relative to paths.data_root unless absolute).",
+    )
     return parser.parse_args()
 
 
@@ -39,6 +45,7 @@ def main() -> None:
         global_config_path=global_config_path,
         stage=args.stage,
         dry_run=args.dry_run,
+        dataset_dir=args.dataset_dir,
     )
     
     # Force exit to prevent hanging from HuggingFace datasets background threads

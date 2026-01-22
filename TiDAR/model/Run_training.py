@@ -301,6 +301,11 @@ def parse_args() -> argparse.Namespace:
     cli.add_argument("--init_checkpoint", default=None)
     cli.add_argument("--max_steps", type=int, default=None)
     cli.add_argument(
+        "--dataset_dir",
+        default=None,
+        help="Override dataset root dir (relative to data_root unless absolute).",
+    )
+    cli.add_argument(
         "--scan_chunk",
         type=int,
         default=None,
@@ -318,7 +323,12 @@ def main() -> None:
     validate_milestones(stage_cfgs, cfg)
 
     base_root = Path(cfg.paths.data_root)
-    dataset_root = Path(cfg.paths.processed_data_root)
+    dataset_root_value = (
+        args.dataset_dir
+        or getattr(cfg.training, "dataset_dir", None)
+        or cfg.paths.processed_data_root
+    )
+    dataset_root = Path(str(dataset_root_value))
     if not dataset_root.is_absolute():
         dataset_root = (base_root / dataset_root).resolve()
 
@@ -551,7 +561,8 @@ def main() -> None:
             desc=f"stage:{runtime.config.name}",
             initial=completed_in_stage,
             leave=True,
-            dynamic_ncols=True,
+            dynamic_ncols=False,
+            ncols=120,
         )
         last_loss = None
 

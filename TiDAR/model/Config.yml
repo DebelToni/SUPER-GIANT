@@ -38,6 +38,7 @@ training:
   gradient_accumulation: 4
   max_epochs: 1
   seed: 0
+  dataset_dir: "dataset_artifacts"
   log_every: 500
   checkpoint_every: 20000
   mini_checkpoint_every: 100

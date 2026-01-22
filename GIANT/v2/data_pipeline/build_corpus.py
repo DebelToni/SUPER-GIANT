@@ -1068,6 +1068,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default=None, help="Path to Config.yml (optional)")
     parser.add_argument("--stage", type=str, default="all", help="Stage name or 'all'")
     parser.add_argument("--dry-run", action="store_true", help="Tokenize without writing shards")
+    parser.add_argument(
+        "--dataset_dir",
+        type=str,
+        default=None,
+        help="Override outputs.processed_root (relative to paths.data_root unless absolute).",
+    )
     return parser.parse_args()
 
 
@@ -1077,10 +1083,15 @@ def run_pipeline(
     global_config_path: Optional[str] = None,
     stage: str = "all",
     dry_run: bool = False,
+    dataset_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     top_cfg = load_combined_config(config_path, global_cfg_path=global_config_path)
     if dry_run:
         top_cfg.dry_run = True
+    if dataset_dir:
+        base_prefix = top_cfg.paths.data_root or ""
+        resolved = _resolve_path(base_prefix, dataset_dir) or dataset_dir
+        top_cfg.outputs.processed_root = resolved
 
     tokenizer = load_tokenizer(top_cfg.tokenizer)
     np.random.seed(top_cfg.training_defaults.global_seed or top_cfg.scheduling.seed)
@@ -1117,6 +1128,7 @@ def main() -> None:
         config_path=args.config,
         stage=args.stage,
         dry_run=args.dry_run,
+        dataset_dir=args.dataset_dir,
     )
     # Force exit to prevent hanging from HuggingFace datasets background threads
     # When streaming datasets are stopped early, background threads may not cleanup properly

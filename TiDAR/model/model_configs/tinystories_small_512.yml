@@ -57,4 +57,4 @@ stages:
 qa_finetune: {}
 
 tokenizer:
-  name: "gpt2"
+  name: "HuggingFaceTB/cosmo2-tokenizer"

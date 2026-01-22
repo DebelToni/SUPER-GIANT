@@ -374,6 +374,7 @@ def main() -> None:
     if not checkpoint_path.is_absolute():
         checkpoint_path = (base_root / checkpoint_path).resolve()
     checkpoint_dir = str(checkpoint_path)
+    cfg.paths.dataloader_state_root = str(checkpoint_path / "dataloader_state")
     checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
 
     training_cfg = cfg.training

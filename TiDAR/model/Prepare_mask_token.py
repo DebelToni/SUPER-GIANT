@@ -14,12 +14,26 @@ from GIANT.v2.model.checkpoint_manager import latest as latest_ckpt
 from GIANT.v2.model.checkpoint_manager import load_npz, save_npz
 
 
-def load_configs() -> OmegaConf:
+def _resolve_config_path(value: str | None, default: Path) -> Path:
+    if value is None:
+        return default
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = (Path.cwd() / candidate).resolve()
+    return candidate
+
+
+def load_configs(
+    model_config_path: str | None = None,
+    global_config_path: str | None = None,
+) -> OmegaConf:
     model_dir = Path(__file__).resolve().parent
     project_root = model_dir.parent
+    resolved_model_cfg = _resolve_config_path(model_config_path, model_dir / "Config.yml")
+    resolved_global_cfg = _resolve_config_path(global_config_path, project_root / "Global_Config.yml")
     cfg = OmegaConf.merge(
-        OmegaConf.load(project_root / "Global_Config.yml"),
-        OmegaConf.load(model_dir / "Config.yml"),
+        OmegaConf.load(resolved_global_cfg),
+        OmegaConf.load(resolved_model_cfg),
     )
 
     base_prefix_str = cfg.paths.get("data_root", "") if "paths" in cfg else ""
@@ -181,6 +195,8 @@ def resolve_checkpoint_path(cfg: OmegaConf, checkpoint: Optional[str], checkpoin
 
 def parse_args() -> argparse.Namespace:
     cli = argparse.ArgumentParser("Prepare TiDAR tokenizer + checkpoint")
+    cli.add_argument("--config", type=str, default=None)
+    cli.add_argument("--global_config", type=str, default=None)
     cli.add_argument(
         "--checkpoint",
         default="latest",
@@ -208,7 +224,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    cfg = load_configs()
+    cfg = load_configs(args.config, args.global_config)
     tokenizer = load_tokenizer(cfg)
 
     base_token = getattr(cfg.tokenizer, "mask_token_override", None) or "[MASK]"

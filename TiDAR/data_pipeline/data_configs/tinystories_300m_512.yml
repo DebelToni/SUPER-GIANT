@@ -1,0 +1,39 @@
+# TinyStories-only config (~0.3B clean tokens)
+# Goal: small-model TiDAR validation run on easy data.
+
+outputs:
+  processed_root: "dataset_artifacts-TINY"
+  rows_per_shard: 8192
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 123
+  write_batch_size: 256
+  dry_run_preview_rows: 200
+
+stages:
+  tinystories_300m_512:
+    description: "TinyStories train split (0.3B tokens)"
+    output_dir: "tinystories_300m_512"
+    sequence_length: 512
+    target_tokens: 300000000
+    min_tokens: 32
+    pack_sequences: true
+    add_eos: true
+    emit_final_partial: false
+    long_document_strategy: random_window
+    random_windows_per_document: 1
+    max_windows_per_document: 4
+    drop_remainder_windows: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    deduplicate: false
+    seed_offset: 70
+    sources:
+      - type: huggingface
+        dataset_name: "roneneldan/TinyStories"
+        split: "train"
+        streaming: false
+        text_field: "text"

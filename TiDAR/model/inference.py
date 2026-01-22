@@ -49,12 +49,26 @@ from GIANT.v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
 # Config / IO
 # =============================================================================
 
-def load_configs() -> OmegaConf:
+def _resolve_config_path(value: str | None, default: Path) -> Path:
+    if value is None:
+        return default
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = (Path.cwd() / candidate).resolve()
+    return candidate
+
+
+def load_configs(
+    model_config_path: str | None = None,
+    global_config_path: str | None = None,
+) -> OmegaConf:
     model_dir = Path(__file__).resolve().parent
     project_root = model_dir.parent
+    resolved_model_cfg = _resolve_config_path(model_config_path, model_dir / "Config.yml")
+    resolved_global_cfg = _resolve_config_path(global_config_path, project_root / "Global_Config.yml")
     cfg = OmegaConf.merge(
-        OmegaConf.load(project_root / "Global_Config.yml"),
-        OmegaConf.load(model_dir / "Config.yml"),
+        OmegaConf.load(resolved_global_cfg),
+        OmegaConf.load(resolved_model_cfg),
     )
     
     base_prefix_str = cfg.paths.get("data_root", "") if "paths" in cfg else ""
@@ -455,6 +469,8 @@ def make_anchor_tidar_generate_fn(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("Anchor-TiDAR inference")
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--global_config", type=str, default=None)
     parser.add_argument("--checkpoint", type=str, default="latest")
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--prompt", type=str, default="Once upon a time")
@@ -472,7 +488,7 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
-    cfg = load_configs()
+    cfg = load_configs(args.config, args.global_config)
     
     jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
     

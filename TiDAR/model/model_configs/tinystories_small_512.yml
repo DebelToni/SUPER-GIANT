@@ -1,0 +1,60 @@
+model:
+  embedding_size: 384
+  num_heads: 6
+  num_kv_heads: 3
+  num_layers: 12
+  feed_forward_size: 1024
+  rope_dim: 64
+  context_length: 512
+  dropout_rate: 0.0
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tidar:
+  draft_length: 8
+  attn_bias_value: -1.0e10
+
+inference:
+  stop_on_eos: true
+  max_decode_steps: 128
+  temperature: 1.0
+  top_k: 0
+  draft_length: 8
+
+optimizer:
+  base_learning_rate: 3.0e-4
+  min_learning_rate: 3.0e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_clip_norm: 0.5
+  weight_decay_exclusions:
+    - bias
+    - scale
+
+training:
+  batch_size: 16
+  gradient_accumulation: 4
+  max_epochs: 1
+  seed: 0
+  dataset_dir: "dataset_artifacts"
+  log_every: 200
+  checkpoint_every: 5000
+  mini_checkpoint_every: 100
+  mini_max_to_keep: 2
+  label_smoothing: 0.05
+  scan_chunk: 1
+
+stages:
+  - name: tinystories_300m_512
+    dataset: tinystories_300m_512
+    seq_len: 512
+    epochs: 1
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 1.0
+
+qa_finetune: {}
+
+tokenizer:
+  name: "gpt2"

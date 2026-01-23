@@ -179,15 +179,20 @@ def latest(ckpt_dir: str = "checkpoints") -> Optional[str]:
     """Return path to the numerically latest checkpoint or *None*."""
     if not os.path.isdir(ckpt_dir):
         return None
-    files = [
-        f
-        for f in glob.glob(os.path.join(ckpt_dir, "step_*.npz"))
-        if _CKPT_RE.search(os.path.basename(f))
-    ]
-    if not files:
-        return None
-    files = sorted(files, key=_step_from_name)
-    return files[-1]
+    search_dirs = [ckpt_dir]
+    params_dir = os.path.join(ckpt_dir, "params")
+    if os.path.isdir(params_dir):
+        search_dirs.append(params_dir)
+    for search_dir in search_dirs:
+        files = [
+            f
+            for f in glob.glob(os.path.join(search_dir, "step_*.npz"))
+            if _CKPT_RE.search(os.path.basename(f))
+        ]
+        if files:
+            files = sorted(files, key=_step_from_name)
+            return files[-1]
+    return None
 
 
 def load(path: str):

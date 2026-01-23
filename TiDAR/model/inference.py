@@ -16,10 +16,14 @@ Algorithm (K=draft_len):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
 
 import jax
 import jax.numpy as jnp
@@ -108,6 +112,10 @@ def load_configs(
     return cfg
 
 
+def resolve_params_dir(root: Path) -> Path:
+    return root if root.name == "params" else root / "params"
+
+
 def resolve_checkpoint_path(cfg, checkpoint: Optional[str], checkpoint_dir: Optional[str]) -> Path:
     base_root = Path(cfg.paths.data_root)
     ckpt_dir = Path(checkpoint_dir or cfg.paths.checkpoints_root)
@@ -119,17 +127,19 @@ def resolve_checkpoint_path(cfg, checkpoint: Optional[str], checkpoint_dir: Opti
         if not path.is_absolute():
             path = (base_root / path).resolve()
         if path.is_dir():
-            latest = latest_ckpt(str(path))
+            params_dir = resolve_params_dir(path)
+            latest = latest_ckpt(str(params_dir))
             if latest is None:
-                raise FileNotFoundError(f"No checkpoints found under {path}")
+                raise FileNotFoundError(f"No checkpoints found under {params_dir}")
             return Path(latest)
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint '{path}' does not exist.")
         return path
     
-    latest = latest_ckpt(str(ckpt_dir))
+    params_dir = resolve_params_dir(ckpt_dir)
+    latest = latest_ckpt(str(params_dir))
     if latest is None:
-        raise FileNotFoundError(f"No checkpoints found under {ckpt_dir}")
+        raise FileNotFoundError(f"No checkpoints found under {params_dir}")
     return Path(latest)
 
 

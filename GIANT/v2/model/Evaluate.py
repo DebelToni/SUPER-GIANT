@@ -84,18 +84,29 @@ def parse_stage_configs(cfg: OmegaConf) -> List[Dict]:
     return OmegaConf.to_container(cfg.stages, resolve=True)
 
 
+def resolve_params_dir(root: Path) -> Path:
+    return root if root.name == "params" else root / "params"
+
+
 def resolve_checkpoint(path_arg: str | None, cfg, base_root: Path) -> Tuple[str, int]:
     if path_arg and path_arg != "latest":
         p = Path(path_arg)
         if not p.is_absolute():
             p = (base_root / p).resolve()
+        if p.is_dir():
+            params_dir = resolve_params_dir(p)
+            latest = latest_ckpt(str(params_dir))
+            if latest is None:
+                raise FileNotFoundError(f"No checkpoints found under {params_dir}")
+            return latest, -1
         return str(p), -1
     ckpt_dir = Path(cfg.evaluate.checkpoint_dir or "checkpoints")
     if not ckpt_dir.is_absolute():
         ckpt_dir = (base_root / ckpt_dir).resolve()
-    latest = latest_ckpt(str(ckpt_dir))
+    params_dir = resolve_params_dir(ckpt_dir)
+    latest = latest_ckpt(str(params_dir))
     if latest is None:
-        raise FileNotFoundError(f"No checkpoints found under {ckpt_dir}")
+        raise FileNotFoundError(f"No checkpoints found under {params_dir}")
     return latest, -1
 
 

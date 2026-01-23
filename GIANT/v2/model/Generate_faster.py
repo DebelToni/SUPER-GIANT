@@ -63,6 +63,10 @@ def resolve_with_data_root(base: Path, value: str) -> Path:
     return path if path.is_absolute() else (base / path).resolve()
 
 
+def resolve_params_dir(root: Path) -> Path:
+    return root if root.name == "params" else root / "params"
+
+
 def resolve_checkpoint_path(cfg: OmegaConf, checkpoint: Optional[str], checkpoint_dir: str) -> Path:
     base_root = Path(cfg.paths.data_root)
     if checkpoint and checkpoint.lower() != "latest":
@@ -70,18 +74,20 @@ def resolve_checkpoint_path(cfg: OmegaConf, checkpoint: Optional[str], checkpoin
         if not path.is_absolute():
             path = resolve_with_data_root(base_root, checkpoint)
         if path.is_dir():
-            latest = latest_ckpt(str(path))
+            params_dir = resolve_params_dir(path)
+            latest = latest_ckpt(str(params_dir))
             if latest is None:
-                raise FileNotFoundError(f"No checkpoints found under {path}")
+                raise FileNotFoundError(f"No checkpoints found under {params_dir}")
             return Path(latest)
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint '{path}' does not exist.")
         return path
 
     ckpt_dir = resolve_with_data_root(base_root, checkpoint_dir)
-    latest = latest_ckpt(str(ckpt_dir))
+    params_dir = resolve_params_dir(ckpt_dir)
+    latest = latest_ckpt(str(params_dir))
     if latest is None:
-        raise FileNotFoundError(f"No checkpoints found under {ckpt_dir}")
+        raise FileNotFoundError(f"No checkpoints found under {params_dir}")
     return Path(latest)
 
 

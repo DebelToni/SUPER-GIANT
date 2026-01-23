@@ -1,8 +1,12 @@
 # - Initializes params/nonparam state (incl. 'cache')
 # - Prefills a prompt into KV-cache
 # - Decodes with a single JIT-compiled lax.scan loop
+import os
 from functools import partial
 from typing import Any, Dict, Optional, Tuple
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
 
 import jax
 import jax.numpy as jnp

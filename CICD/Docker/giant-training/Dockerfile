@@ -52,6 +52,7 @@ RUN printf '%s\n' \
       >> /etc/environment
 RUN printf '%s\n' 'source /opt/venv/bin/activate || true' > /etc/profile.d/activate-venv.sh
 RUN printf '%s\n' 'set -o vi' > /etc/profile.d/vi-mode.sh
+RUN printf '%s\n' 'set -g mode-keys vi' > /etc/tmux.conf
 
 # s5cmd from builder (static binary)
 COPY --from=s5cmd-builder /go/bin/s5cmd /usr/local/bin/s5cmd

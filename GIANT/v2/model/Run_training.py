@@ -7,6 +7,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -250,7 +254,8 @@ def save_training_state(
     cfg: OmegaConf,
     params,
     opt_state,
-    checkpoint_dir: str,
+    params_dir: str,
+    training_states_dir: str,
     global_step: int,
     stage_idx: int,
     completed_in_stage: int,
@@ -259,11 +264,12 @@ def save_training_state(
     train_loss: float | None = None,
 ):
     """Persist params, optimizer, and dataloader progress atomically."""
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    ckpt_file = save_ckpt(params, global_step, checkpoint_dir, train_loss=train_loss)
+    os.makedirs(params_dir, exist_ok=True)
+    os.makedirs(training_states_dir, exist_ok=True)
+    ckpt_file = save_ckpt(params, global_step, params_dir, train_loss=train_loss)
     if train_loss is not None:
         print(f"[metadata] Wrote train_loss={train_loss:.6f} to checkpoint {ckpt_file}")
-    save_opt_state(opt_state, global_step, checkpoint_dir)
+    save_opt_state(opt_state, global_step, training_states_dir)
     stage_states[runtime.config.name] = runtime.loader.state_dict()
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),
@@ -370,17 +376,22 @@ def main() -> None:
     opt_state = optimizer.init(params)
     global_step = 0
 
-    checkpoint_path = Path(args.checkpoint_dir)
-    if not checkpoint_path.is_absolute():
-        checkpoint_path = (base_root / checkpoint_path).resolve()
-    checkpoint_dir = str(checkpoint_path)
-    cfg.paths.dataloader_state_root = str(checkpoint_path / "dataloader_state")
+    checkpoint_root = Path(args.checkpoint_dir)
+    if not checkpoint_root.is_absolute():
+        checkpoint_root = (base_root / checkpoint_root).resolve()
+    if checkpoint_root.name in {"params", "training_states"}:
+        checkpoint_root = checkpoint_root.parent
+    params_dir = checkpoint_root / "params"
+    training_states_dir = checkpoint_root / "training_states"
+    cfg.paths.dataloader_state_root = str(training_states_dir / "dataloader_state")
+    params_dir_str = str(params_dir)
+    training_states_dir_str = str(training_states_dir)
     checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
 
     training_cfg = cfg.training
     mini_every = int(getattr(training_cfg, "mini_checkpoint_every", max(1, checkpoint_every // 10)))
     mini_max_to_keep = int(getattr(training_cfg, "mini_max_to_keep", 3))
-    mini_ckpt_dir = Path(checkpoint_dir) / "mini"
+    mini_ckpt_dir = training_states_dir / "mini"
     mini_ckpt_mgr = AsyncMiniCheckpointManager(
         ckpt_dir=mini_ckpt_dir,
         max_to_keep=mini_max_to_keep,
@@ -423,7 +434,7 @@ def main() -> None:
 
     if resume_request and not resumed_from_mini:
         if resume_request == "latest_full":
-            ckpt_path = latest_ckpt(checkpoint_dir)
+            ckpt_path = latest_ckpt(params_dir_str)
             if ckpt_path is None:
                 raise FileNotFoundError("No checkpoints available to resume from.")
         else:
@@ -432,12 +443,11 @@ def main() -> None:
         if isinstance(params, dict):
             params = flax_core.freeze(params)
         opt_state = optimizer.init(params)
-        resume_dir = str(Path(ckpt_path).parent)
-        opt_bytes = load_opt_state(global_step, resume_dir)
+        opt_bytes = load_opt_state(global_step, training_states_dir_str)
         if opt_bytes is not None:
             try:
                 opt_state = serialization.from_bytes(opt_state, opt_bytes)
-                print(f"▶ Resumed optimizer state from {resume_dir}")
+                print(f"▶ Resumed optimizer state from {training_states_dir_str}")
             except Exception as exc:
                 print(f"⚠ Failed to restore optimizer state ({exc}); reinitializing.")
         else:
@@ -603,7 +613,8 @@ def main() -> None:
                     cfg=cfg,
                     params=params,
                     opt_state=opt_state,
-                    checkpoint_dir=checkpoint_dir,
+                    params_dir=params_dir_str,
+                    training_states_dir=training_states_dir_str,
                     global_step=global_step,
                     stage_idx=stage_idx,
                     completed_in_stage=completed_in_stage,
@@ -647,10 +658,10 @@ def main() -> None:
         params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
         accum_grads = _init_accum_grads(params)
         accum_count = jnp.asarray(0, dtype=jnp.int32)
-    final_ckpt = save_ckpt(params, global_step, checkpoint_dir, train_loss=last_loss)
+    final_ckpt = save_ckpt(params, global_step, params_dir_str, train_loss=last_loss)
     if last_loss is not None:
         print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {final_ckpt}")
-    save_opt_state(opt_state, global_step, checkpoint_dir)
+    save_opt_state(opt_state, global_step, training_states_dir_str)
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),
         {

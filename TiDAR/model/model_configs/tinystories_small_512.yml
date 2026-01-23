@@ -12,7 +12,7 @@ model:
   compute_dtype: bfloat16
 
 tidar:
-  draft_length: 8
+  draft_length: 3
   attn_bias_value: -1.0e10
 
 inference:
@@ -20,10 +20,10 @@ inference:
   max_decode_steps: 128
   temperature: 1.0
   top_k: 0
-  draft_length: 8
+  draft_length: 3
 
 optimizer:
-  base_learning_rate: 3.0e-4
+  base_learning_rate: 2.0e-4
   min_learning_rate: 3.0e-5
   warmup_steps: 500
   weight_decay: 0.01
@@ -33,8 +33,8 @@ optimizer:
     - scale
 
 training:
-  batch_size: 16
-  gradient_accumulation: 4
+  batch_size: 48
+  gradient_accumulation: 1
   max_epochs: 1
   seed: 0
   dataset_dir: "dataset_artifacts-TINY"

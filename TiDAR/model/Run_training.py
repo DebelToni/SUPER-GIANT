@@ -435,6 +435,9 @@ def main() -> None:
     training_cfg = cfg.training
     mini_every = int(getattr(training_cfg, "mini_checkpoint_every", max(1, checkpoint_every // 10)))
     mini_max_to_keep = int(getattr(training_cfg, "mini_max_to_keep", 3))
+    log_every = int(getattr(training_cfg, "log_every", 1))
+    accept_top_k = 64
+    accept_max_positions = 256
     mini_ckpt_dir = training_states_dir / "mini"
     mini_ckpt_mgr = AsyncMiniCheckpointManager(
         ckpt_dir=mini_ckpt_dir,
@@ -551,6 +554,7 @@ def main() -> None:
         def body(carry, batch):
             params, opt_state, step, accum_grads, accum_count = carry
             dropout_rng = jax.random.fold_in(base_rng, step)
+            compute_accept = (step + 1) % log_every == 0
 
             def loss_fn(p):
                 logits = model.apply(
@@ -590,22 +594,46 @@ def main() -> None:
                     agreement_loss = jnp.array(0.0)
                     total_loss = tidar_loss
 
-                # Theoretical acceptance rate on the last batch row.
-                # Align AR logits (predict token t at position t-1) with Diff logits (predict token t).
-                S = logits.shape[1] // 2
-                if S <= 1:
-                    accept_rate = jnp.array(0.0, dtype=jnp.float32)
-                else:
+                def accept_rate_fn(_):
+                    # Theoretical acceptance rate on the last batch row.
+                    # Align AR logits (predict token t at position t-1) with Diff logits (predict token t).
+                    S = logits.shape[1] // 2
+                    if S <= 1:
+                        return jnp.array(0.0, dtype=jnp.float32)
+                    max_positions = min(accept_max_positions, S - 1)
                     ar_logits_last = logits[-1, : S - 1]
                     diff_logits_last = logits[-1, S + 1 :]
                     ar_mask = mask_ntp[-1, : S - 1]
                     diff_mask = mask_diff[-1, S + 1 :]
-                    joint_mask = ar_mask * diff_mask
-                    p_ar_full = jax.nn.softmax(ar_logits_last, axis=-1)
-                    p_diff_full = jax.nn.softmax(diff_logits_last, axis=-1)
-                    accept_per_pos = jnp.minimum(p_ar_full, p_diff_full).sum(axis=-1)
-                    denom = jnp.maximum(joint_mask.sum(), 1.0)
-                    accept_rate = (accept_per_pos * joint_mask).sum() / denom
+                    joint_mask = (ar_mask * diff_mask) > 0
+
+                    pos_idx = jnp.nonzero(joint_mask, size=max_positions, fill_value=0)[0]
+                    valid_count = jnp.minimum(joint_mask.sum().astype(jnp.int32), max_positions)
+                    pos_mask = (jnp.arange(max_positions) < valid_count).astype(jnp.float32)
+
+                    ar_logits_pos = ar_logits_last[pos_idx]
+                    diff_logits_pos = diff_logits_last[pos_idx]
+
+                    ar_top_vals, ar_top_idx = jax.lax.top_k(ar_logits_pos, accept_top_k)
+                    diff_top_vals, _ = jax.lax.top_k(diff_logits_pos, accept_top_k)
+
+                    ar_log_norm = jax.nn.logsumexp(ar_top_vals, axis=-1, keepdims=True)
+                    diff_log_norm = jax.nn.logsumexp(diff_top_vals, axis=-1, keepdims=True)
+
+                    p_ar = jnp.exp(ar_top_vals - ar_log_norm)
+                    diff_logits_for_ar = jnp.take_along_axis(diff_logits_pos, ar_top_idx, axis=-1)
+                    p_diff = jnp.exp(diff_logits_for_ar - diff_log_norm)
+
+                    accept_per_pos = jnp.minimum(p_ar, p_diff).sum(axis=-1)
+                    denom = jnp.maximum(valid_count.astype(jnp.float32), 1.0)
+                    return (accept_per_pos * pos_mask).sum() / denom
+
+                accept_rate = jax.lax.cond(
+                    compute_accept,
+                    accept_rate_fn,
+                    lambda _: jnp.array(0.0, dtype=jnp.float32),
+                    operand=None,
+                )
 
                 return total_loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)
 
@@ -748,7 +776,7 @@ def main() -> None:
                 accept_val = losses[offset, 4] if losses.shape[1] > 4 else 0.0
                 last_loss = float(loss_val)
                 step_val = chunk_start + offset
-                if step_val % cfg.training.log_every == 0:
+                if step_val % log_every == 0:
                     elapsed = time.time() - start
                     log_msg = (
                         f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "

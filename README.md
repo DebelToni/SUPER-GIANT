@@ -48,4 +48,6 @@ docker run --pull always -d --gpus all \
 bonanc/giant-training:latest
 
 docker exec -it giant-training bash
+
+For a full rundown of `TS_*`/`SYNC_*` flags, tailnet configuration, and S3 sync behavior, see [CICD/Docker/README.md](CICD/Docker/README.md).
 ```

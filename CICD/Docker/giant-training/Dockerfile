@@ -88,9 +88,51 @@ REPO_URL="https://github.com/DebelToni/SUPER-GIANT"
 
 mkdir -p "$DATA_DIR"
 
-SYNC_MARKER="${DATA_DIR}/.r2_sync_done"
+# ---- R2/S3 sync (selective via SYNC_DIRS, or full sync if unset) -------------
+BUCKET="${SYNC_BUCKET:-giant-data}"
+SYNC_DIRS="${SYNC_DIRS:-}"
+FORCE_SYNC="${FORCE_SYNC:-0}"
+
+# Marker depends on SYNC_DIRS so changing the list triggers a new sync automatically.
+if [[ -z "$SYNC_DIRS" ]]; then
+  _sync_id="all"
+else
+  _sync_id="$(printf '%s' "$SYNC_DIRS" | sha256sum | awk '{print $1}')"
+fi
+SYNC_MARKER="${DATA_DIR}/.r2_sync_done_${_sync_id}"
+
+if [[ "$FORCE_SYNC" == "1" || "$FORCE_SYNC" == "true" ]]; then
+  rm -f "$SYNC_MARKER"
+fi
+
 if [[ ! -f "$SYNC_MARKER" ]]; then
-  s5cmd sync --size-only "s3://giant-data/*" "$DATA_DIR/"
+  if [[ -z "$SYNC_DIRS" ]]; then
+    # No SYNC_DIRS => clone/sync everything (original behavior)
+    s5cmd sync --size-only "s3://${BUCKET}/*" "${DATA_DIR}/"
+  else
+    # SYNC_DIRS example:
+    #   SYNC_DIRS="Dir/Dir/,Dir/Other_Dir/,Dir/Dir/File,Dir/Other_Dir/Other_File"
+    # Convention:
+    #   - entries ending with "/" are treated as prefixes (directories)
+    #   - everything else is treated as a single object (file)
+    IFS=',' read -r -a _items <<<"$SYNC_DIRS"
+
+    for _raw in "${_items[@]}"; do
+      _p="$(echo "${_raw}" | xargs)"
+      [[ -z "$_p" ]] && continue
+      _p="${_p#/}"
+
+      if [[ "$_p" == */ ]]; then
+        mkdir -p "${DATA_DIR}/${_p}"
+        s5cmd sync --size-only "s3://${BUCKET}/${_p}" "${DATA_DIR}/${_p}"
+      else
+        _dst_dir="${DATA_DIR}/$(dirname "$_p")"
+        mkdir -p "$_dst_dir"
+        s5cmd cp --size-only "s3://${BUCKET}/${_p}" "${_dst_dir}/"
+      fi
+    done
+  fi
+
   touch "$SYNC_MARKER"
 fi
 

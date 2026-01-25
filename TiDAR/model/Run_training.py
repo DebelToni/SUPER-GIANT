@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
 from TiDAR.model.GiantTiDAR import TiDAR
-from TiDAR.model.Training_step import train_step
+from TiDAR.model.Training_step import loss_and_grad
 from TiDAR.model.tidar_utils import build_train_batch
 from TiDAR.model.tokenizer_utils import (
     ensure_tidar_mask_token,
@@ -556,90 +556,17 @@ def main() -> None:
             dropout_rng = jax.random.fold_in(base_rng, step)
             compute_accept = (step + 1) % log_every == 0
 
-            def loss_fn(p):
-                logits = model.apply(
-                    {"params": p},
-                    batch["input_ids"],
-                    rngs={"dropout": dropout_rng},
-                    deterministic=False,
-                    attn_bias=batch["attn_bias"],
-                    position_ids=batch["position_ids"],
-                )
-                labels = batch["labels"]
-                mask_ntp = batch["loss_mask_ntp"]
-                mask_diff = batch["loss_mask_diff"]
-                active = (mask_ntp + mask_diff) > 0
-                labels_safe = jnp.where(active, labels, 0)
-                ce = optax.softmax_cross_entropy_with_integer_labels(logits, labels_safe)
-                ntp_loss = (ce * mask_ntp).sum() / jnp.maximum(mask_ntp.sum(), 1.0)
-                diff_loss = (ce * mask_diff).sum() / jnp.maximum(mask_diff.sum(), 1.0)
-
-                # Combined TiDAR loss with alpha weighting
-                tidar_loss = (loss_alpha * ntp_loss + diff_loss) / (1.0 + loss_alpha)
-
-                # Agreement loss: KL(stopgrad(p_AR) || p_Diff)
-                if loss_agreement_lambda > 0.0:
-                    S = logits.shape[1] // 2
-                    ar_logits = logits[:, :S]
-                    diff_logits = logits[:, S:]
-                    log_p_ar = jax.nn.log_softmax(ar_logits, axis=-1)
-                    p_ar = jax.nn.softmax(jax.lax.stop_gradient(ar_logits), axis=-1)
-                    log_p_ar_sg = jax.lax.stop_gradient(log_p_ar)
-                    log_p_diff = jax.nn.log_softmax(diff_logits, axis=-1)
-                    kl_per_pos = (p_ar * (log_p_ar_sg - log_p_diff)).sum(axis=-1)
-                    diff_mask_for_kl = mask_diff[:, S:]
-                    agreement_loss = (kl_per_pos * diff_mask_for_kl).sum() / jnp.maximum(diff_mask_for_kl.sum(), 1.0)
-                    total_loss = tidar_loss + loss_agreement_lambda * agreement_loss
-                else:
-                    agreement_loss = jnp.array(0.0)
-                    total_loss = tidar_loss
-
-                def accept_rate_fn(_):
-                    # Theoretical acceptance rate on the last batch row.
-                    # Align AR logits (predict token t at position t-1) with Diff logits (predict token t).
-                    S = logits.shape[1] // 2
-                    if S <= 1:
-                        return jnp.array(0.0, dtype=jnp.float32)
-                    max_positions = min(accept_max_positions, S - 1)
-                    ar_logits_last = logits[-1, : S - 1]
-                    diff_logits_last = logits[-1, S + 1 :]
-                    ar_mask = mask_ntp[-1, : S - 1]
-                    diff_mask = mask_diff[-1, S + 1 :]
-                    joint_mask = (ar_mask * diff_mask) > 0
-
-                    pos_idx = jnp.nonzero(joint_mask, size=max_positions, fill_value=0)[0]
-                    valid_count = jnp.minimum(joint_mask.sum().astype(jnp.int32), max_positions)
-                    pos_mask = (jnp.arange(max_positions) < valid_count).astype(jnp.float32)
-
-                    ar_logits_pos = ar_logits_last[pos_idx]
-                    diff_logits_pos = diff_logits_last[pos_idx]
-
-                    ar_top_vals, ar_top_idx = jax.lax.top_k(ar_logits_pos, accept_top_k)
-                    diff_top_vals, _ = jax.lax.top_k(diff_logits_pos, accept_top_k)
-
-                    ar_log_norm = jax.nn.logsumexp(ar_top_vals, axis=-1, keepdims=True)
-                    diff_log_norm = jax.nn.logsumexp(diff_top_vals, axis=-1, keepdims=True)
-
-                    p_ar = jnp.exp(ar_top_vals - ar_log_norm)
-                    diff_logits_for_ar = jnp.take_along_axis(diff_logits_pos, ar_top_idx, axis=-1)
-                    p_diff = jnp.exp(diff_logits_for_ar - diff_log_norm)
-
-                    accept_per_pos = jnp.minimum(p_ar, p_diff).sum(axis=-1)
-                    denom = jnp.maximum(valid_count.astype(jnp.float32), 1.0)
-                    return (accept_per_pos * pos_mask).sum() / denom
-
-                accept_rate = jax.lax.cond(
-                    compute_accept,
-                    accept_rate_fn,
-                    lambda _: jnp.array(0.0, dtype=jnp.float32),
-                    operand=None,
-                )
-
-                return total_loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)
-
-            (loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)), grads = jax.value_and_grad(
-                loss_fn, has_aux=True
-            )(params)
+            (loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)), grads = loss_and_grad(
+                params,
+                batch,
+                model=model,
+                dropout_rng=dropout_rng,
+                loss_alpha=loss_alpha,
+                agreement_lambda=loss_agreement_lambda,
+                compute_accept=compute_accept,
+                accept_top_k=accept_top_k,
+                accept_max_positions=accept_max_positions,
+            )
             
             # Skip gradient accumulation if NaN/Inf detected
             is_finite = jnp.isfinite(loss)

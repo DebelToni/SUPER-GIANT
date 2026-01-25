@@ -19,7 +19,7 @@ from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
 from GIANT.v2.model.GiantGPT import GiantGPT
-from GIANT.v2.model.Training_step import train_step
+from GIANT.v2.model.Training_step import loss_and_grad
 from GIANT.v2.model.arrow_data_loader import (
     ShardedArrowDataset,
     StageDataLoader,
@@ -493,21 +493,12 @@ def main() -> None:
             params, opt_state, step, accum_grads, accum_count = carry
             dropout_rng = jax.random.fold_in(base_rng, step)
 
-            def loss_fn(p):
-                logits = model.apply(
-                    {"params": p},
-                    batch["input"],
-                    rngs={"dropout": dropout_rng},
-                    deterministic=False,
-                )
-                loss = optax.softmax_cross_entropy_with_integer_labels(
-                    logits, batch["target"]
-                )
-                mask_sum = batch["mask"].sum()
-                denom = jnp.maximum(mask_sum, 1.0)
-                return (loss * batch["mask"]).sum() / denom
-
-            loss, grads = jax.value_and_grad(loss_fn)(params)
+            loss, grads = loss_and_grad(
+                params,
+                batch,
+                model=model,
+                dropout_rng=dropout_rng,
+            )
             
             # Skip gradient accumulation if NaN/Inf detected
             is_finite = jnp.isfinite(loss)

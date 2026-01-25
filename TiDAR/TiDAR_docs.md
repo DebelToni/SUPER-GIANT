@@ -56,6 +56,8 @@ L_total(theta) = L_tidar(theta) + lambda * KL(stopgrad(p_AR) || p_Diff)
 - `lambda` controls how hard Diff is pushed to agree with AR (config: `training.loss.agreement_lambda`).
 - `stopgrad`/`detach` makes AR a fixed teacher so gradients update Diff only.
 - When `agreement_lambda == 0`, the agreement term is skipped entirely (fast path).
+ - Agreement is computed on aligned positions: AR positions 0..S-2 vs Diff positions S+1..2S-1
+   (both predict token t+1).
 
 Config example (in `Config.yml` or model config):
 ```yaml

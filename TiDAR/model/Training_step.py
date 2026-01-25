@@ -8,7 +8,144 @@ import jax.numpy as jnp
 import optax
 
 
-@partial(jax.jit, static_argnames=["model", "optimizer", "alpha", "agreement_lambda"])
+def _compute_accept_rate(
+    logits,
+    mask_ntp,
+    mask_diff,
+    *,
+    accept_top_k: int,
+    accept_max_positions: int,
+):
+    # Theoretical acceptance rate on the last batch row.
+    # Align AR logits (predict token t at position t-1) with Diff logits (predict token t).
+    S = logits.shape[1] // 2
+    if S <= 1:
+        return jnp.array(0.0, dtype=jnp.float32)
+    max_positions = min(accept_max_positions, S - 1)
+    ar_logits_last = logits[-1, : S - 1]
+    diff_logits_last = logits[-1, S + 1 :]
+    ar_mask = mask_ntp[-1, : S - 1]
+    diff_mask = mask_diff[-1, S + 1 :]
+    joint_mask = (ar_mask * diff_mask) > 0
+
+    pos_idx = jnp.nonzero(joint_mask, size=max_positions, fill_value=0)[0]
+    valid_count = jnp.minimum(joint_mask.sum().astype(jnp.int32), max_positions)
+    pos_mask = (jnp.arange(max_positions) < valid_count).astype(jnp.float32)
+
+    ar_logits_pos = ar_logits_last[pos_idx]
+    diff_logits_pos = diff_logits_last[pos_idx]
+
+    ar_top_vals, ar_top_idx = jax.lax.top_k(ar_logits_pos, accept_top_k)
+    diff_top_vals, _ = jax.lax.top_k(diff_logits_pos, accept_top_k)
+
+    ar_log_norm = jax.nn.logsumexp(ar_top_vals, axis=-1, keepdims=True)
+    diff_log_norm = jax.nn.logsumexp(diff_top_vals, axis=-1, keepdims=True)
+
+    p_ar = jnp.exp(ar_top_vals - ar_log_norm)
+    diff_logits_for_ar = jnp.take_along_axis(diff_logits_pos, ar_top_idx, axis=-1)
+    p_diff = jnp.exp(diff_logits_for_ar - diff_log_norm)
+
+    accept_per_pos = jnp.minimum(p_ar, p_diff).sum(axis=-1)
+    denom = jnp.maximum(valid_count.astype(jnp.float32), 1.0)
+    return (accept_per_pos * pos_mask).sum() / denom
+
+
+def loss_and_metrics(
+    params,
+    batch,
+    *,
+    model,
+    dropout_rng,
+    loss_alpha: float,
+    agreement_lambda: float,
+    compute_accept,
+    accept_top_k: int,
+    accept_max_positions: int,
+) -> Tuple:
+    logits = model.apply(
+        {"params": params},
+        batch["input_ids"],
+        rngs={"dropout": dropout_rng},
+        deterministic=False,
+        attn_bias=batch["attn_bias"],
+        position_ids=batch["position_ids"],
+    )
+    labels = batch["labels"]
+    mask_ntp = batch["loss_mask_ntp"]
+    mask_diff = batch["loss_mask_diff"]
+
+    active = (mask_ntp + mask_diff) > 0
+    labels_safe = jnp.where(active, labels, 0)
+    ce = optax.softmax_cross_entropy_with_integer_labels(logits, labels_safe)
+    ntp_loss = (ce * mask_ntp).sum() / jnp.maximum(mask_ntp.sum(), 1.0)
+    diff_loss = (ce * mask_diff).sum() / jnp.maximum(mask_diff.sum(), 1.0)
+    tidar_loss = (loss_alpha * ntp_loss + diff_loss) / (1.0 + loss_alpha)
+
+    if agreement_lambda > 0.0:
+        # Sequence layout: [clean (S) | diff (S)]
+        # Align AR (predict token t+1 at position t) with Diff (predict token t+1 at position t+1).
+        S = logits.shape[1] // 2
+        ar_logits = logits[:, : S - 1]
+        diff_logits = logits[:, S + 1 :]
+        log_p_ar = jax.nn.log_softmax(ar_logits, axis=-1)
+        p_ar = jax.nn.softmax(jax.lax.stop_gradient(ar_logits), axis=-1)
+        log_p_ar_sg = jax.lax.stop_gradient(log_p_ar)
+        log_p_diff = jax.nn.log_softmax(diff_logits, axis=-1)
+        kl_per_pos = (p_ar * (log_p_ar_sg - log_p_diff)).sum(axis=-1)
+        diff_mask_for_kl = mask_diff[:, S + 1 :]
+        agreement_loss = (kl_per_pos * diff_mask_for_kl).sum() / jnp.maximum(
+            diff_mask_for_kl.sum(), 1.0
+        )
+        total_loss = tidar_loss + agreement_lambda * agreement_loss
+    else:
+        agreement_loss = jnp.array(0.0)
+        total_loss = tidar_loss
+
+    accept_rate = jax.lax.cond(
+        compute_accept,
+        lambda _: _compute_accept_rate(
+            logits,
+            mask_ntp,
+            mask_diff,
+            accept_top_k=accept_top_k,
+            accept_max_positions=accept_max_positions,
+        ),
+        lambda _: jnp.array(0.0, dtype=jnp.float32),
+        operand=None,
+    )
+
+    return total_loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)
+
+
+def loss_and_grad(
+    params,
+    batch,
+    *,
+    model,
+    dropout_rng,
+    loss_alpha: float,
+    agreement_lambda: float,
+    compute_accept,
+    accept_top_k: int,
+    accept_max_positions: int,
+):
+    def loss_fn(p):
+        return loss_and_metrics(
+            p,
+            batch,
+            model=model,
+            dropout_rng=dropout_rng,
+            loss_alpha=loss_alpha,
+            agreement_lambda=agreement_lambda,
+            compute_accept=compute_accept,
+            accept_top_k=accept_top_k,
+            accept_max_positions=accept_max_positions,
+        )
+
+    return jax.value_and_grad(loss_fn, has_aux=True)(params)
+
+
+@partial(jax.jit, static_argnames=["model", "optimizer", "loss_alpha", "agreement_lambda", "accept_top_k", "accept_max_positions"])
 def train_step(
     params,
     opt_state,
@@ -17,95 +154,26 @@ def train_step(
     model,
     optimizer,
     dropout_rng,
-    alpha: float = 1.0,
+    loss_alpha: float = 1.0,
     agreement_lambda: float = 0.0,
-) -> Tuple:
-    """
-    Single training step with optional agreement loss.
-
-    Loss formulation:
-        L_tidar = (alpha * L_AR_CE + L_Diff_CE) / (1 + alpha)
-        L_total = L_tidar + agreement_lambda * KL(stopgrad(p_AR) || p_Diff)
-
-    Args:
-        params: Model parameters.
-        opt_state: Optimizer state.
-        batch: Dict with input_ids, labels, loss_mask_ntp, loss_mask_diff, attn_bias, position_ids.
-        model: Flax model.
-        optimizer: Optax optimizer.
-        dropout_rng: PRNG key for dropout.
-        alpha: Weight for AR loss relative to Diff loss. Default 1.0 (equal weight).
-        agreement_lambda: Coefficient for agreement KL loss. 0.0 disables it.
-
-    Returns:
-        Tuple of (new_params, new_opt_state, total_loss, ntp_loss, diff_loss, agreement_loss).
-        agreement_loss is 0.0 when agreement_lambda == 0.0.
-    """
-
-    def loss_fn(p):
-        logits = model.apply(
-            {"params": p},
-            batch["input_ids"],
-            rngs={"dropout": dropout_rng},
-            deterministic=False,
-            attn_bias=batch["attn_bias"],
-            position_ids=batch["position_ids"],
-        )
-        labels = batch["labels"]
-        mask_ntp = batch["loss_mask_ntp"]
-        mask_diff = batch["loss_mask_diff"]
-
-        # Avoid NaN in cross-entropy for masked positions
-        active = (mask_ntp + mask_diff) > 0
-        labels_safe = jnp.where(active, labels, 0)
-
-        # Per-token cross-entropy
-        ce = optax.softmax_cross_entropy_with_integer_labels(logits, labels_safe)
-
-        # Separate NTP (AR) and Diff losses
-        ntp_loss = (ce * mask_ntp).sum() / jnp.maximum(mask_ntp.sum(), 1.0)
-        diff_loss = (ce * mask_diff).sum() / jnp.maximum(mask_diff.sum(), 1.0)
-
-        # Combined TiDAR loss with alpha weighting
-        tidar_loss = (alpha * ntp_loss + diff_loss) / (1.0 + alpha)
-
-        # Agreement loss: KL(stopgrad(p_AR) || p_Diff)
-        # Only computed when agreement_lambda > 0
-        if agreement_lambda > 0.0:
-            # Sequence layout: [clean (S) | diff (S)]
-            S = logits.shape[1] // 2
-            ar_logits = logits[:, :S]    # clean/AR half
-            diff_logits = logits[:, S:]  # diffusion half
-
-            # Teacher: AR distribution (detached)
-            log_p_ar = jax.nn.log_softmax(ar_logits, axis=-1)
-            p_ar = jax.nn.softmax(jax.lax.stop_gradient(ar_logits), axis=-1)
-            log_p_ar_sg = jax.lax.stop_gradient(log_p_ar)
-
-            # Student: Diff distribution
-            log_p_diff = jax.nn.log_softmax(diff_logits, axis=-1)
-
-            # KL divergence per position: sum over vocab
-            # KL(p_ar || p_diff) = sum_v p_ar(v) * (log p_ar(v) - log p_diff(v))
-            kl_per_pos = (p_ar * (log_p_ar_sg - log_p_diff)).sum(axis=-1)  # [B, S]
-
-            # Mask: use diff mask for the second half (positions 0..S-1 in diff == positions S..2S-1 overall)
-            # mask_diff is [B, 2S], we want the second half
-            diff_mask_for_kl = mask_diff[:, S:]  # [B, S]
-
-            # Average KL over valid diff positions
-            agreement_loss = (kl_per_pos * diff_mask_for_kl).sum() / jnp.maximum(diff_mask_for_kl.sum(), 1.0)
-            total_loss = tidar_loss + agreement_lambda * agreement_loss
-        else:
-            agreement_loss = jnp.array(0.0)
-            total_loss = tidar_loss
-
-        return total_loss, (ntp_loss, diff_loss, agreement_loss)
-
-    (loss, (ntp_loss, diff_loss, agreement_loss)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+    compute_accept=False,
+    accept_top_k: int = 64,
+    accept_max_positions: int = 256,
+):
+    (loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)), grads = loss_and_grad(
+        params,
+        batch,
+        model=model,
+        dropout_rng=dropout_rng,
+        loss_alpha=loss_alpha,
+        agreement_lambda=agreement_lambda,
+        compute_accept=compute_accept,
+        accept_top_k=accept_top_k,
+        accept_max_positions=accept_max_positions,
+    )
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
-    return new_params, opt_state, loss, ntp_loss, diff_loss, agreement_loss
+    return new_params, opt_state, loss, ntp_loss, diff_loss, agreement_loss, accept_rate
 
 
-__all__ = ["train_step"]
+__all__ = ["loss_and_metrics", "loss_and_grad", "train_step"]

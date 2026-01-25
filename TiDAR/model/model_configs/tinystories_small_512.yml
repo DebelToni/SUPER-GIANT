@@ -44,6 +44,9 @@ training:
   mini_max_to_keep: 2
   label_smoothing: 0.05
   scan_chunk: 1
+  loss:
+    alpha: 1.0              # weight for AR loss: L_tidar = (alpha*L_AR + L_Diff)/(1+alpha)
+    agreement_lambda: 0.0   # KL(stopgrad(p_AR) || p_Diff) coefficient; 0 disables
 
 stages:
   - name: tinystories_300m_512

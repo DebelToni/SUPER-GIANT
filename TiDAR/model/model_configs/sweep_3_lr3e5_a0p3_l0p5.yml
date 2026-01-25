@@ -12,7 +12,7 @@ model:
   compute_dtype: bfloat16
 
 tidar:
-  draft_length: 8
+  draft_length: 5
   attn_bias_value: -1.0e10
 
 inference:
@@ -20,25 +20,24 @@ inference:
   max_decode_steps: 64
   temperature: 1.0
   top_k: 0
-  draft_length: 8
+  draft_length: 5
 
 optimizer:
-  base_learning_rate: 1.0e-4
-  min_learning_rate: 1.0e-5
-  warmup_steps: 2000
+  base_learning_rate: 3.0e-5
+  min_learning_rate: 3.0e-6
+  warmup_steps: 1200
   weight_decay: 0.01
   gradient_clip_norm: 0.5
   weight_decay_exclusions:
     - bias
     - scale
-    # - embedding
 
 training:
   batch_size: 8
   gradient_accumulation: 4
   max_epochs: 1
   seed: 0
-  dataset_dir: "dataset_artifacts"
+  dataset_dir: "Sweep/Data/sweep_3_lr3e5_a0p3_l0p5"
   log_every: 500
   checkpoint_every: 20000
   mini_checkpoint_every: 100
@@ -46,40 +45,43 @@ training:
   label_smoothing: 0.05
   scan_chunk: 1
   loss:
-    alpha: 1.0              # weight for AR loss: L_tidar = (alpha*L_AR + L_Diff)/(1+alpha)
-    agreement_lambda: 0.0   # KL(stopgrad(p_AR) || p_Diff) coefficient; 0 disables
+    alpha: 0.3
+    agreement_lambda: 0.5
+
+paths:
+  params_dir: "Sweep/Params/sweep_3_lr3e5_a0p3_l0p5_params"
 
 stages:
-  - name: fw_edu_667m
-    dataset: fw_edu_667m
+  - name: fw_edu_67m
+    dataset: fw_edu_67m
     seq_len: 2048
     epochs: 1
-    end_ratio: 0.6670
+    end_ratio: 0.67
     shuffle: true
     fraction: 1.0
-  - name: cosmopedia_v2_167m
-    dataset: cosmopedia_v2_167m
+  - name: cosmopedia_v2_17m
+    dataset: cosmopedia_v2_17m
     seq_len: 2048
     epochs: 1
-    end_ratio: 0.8340
+    end_ratio: 0.84
     shuffle: true
     fraction: 1.0
-  - name: openwebmath_111m
-    dataset: openwebmath_111m
+  - name: openwebmath_11m
+    dataset: openwebmath_11m
     seq_len: 2048
     epochs: 1
-    end_ratio: 0.9450
+    end_ratio: 0.95
     shuffle: true
     fraction: 1.0
-  - name: starcoder_python_edu_44m
-    dataset: starcoder_python_edu_44m
+  - name: starcoder_python_edu_4m
+    dataset: starcoder_python_edu_4m
     seq_len: 2048
     epochs: 1
-    end_ratio: 0.9890
+    end_ratio: 0.99
     shuffle: true
     fraction: 1.0
-  - name: ultrachat_rehearsal_11m
-    dataset: ultrachat_rehearsal_11m
+  - name: ultrachat_rehearsal_1m
+    dataset: ultrachat_rehearsal_1m
     seq_len: 2048
     epochs: 1
     end_ratio: 1.0
@@ -90,6 +92,3 @@ qa_finetune: {}
 
 tokenizer:
   name: "HuggingFaceTB/cosmo2-tokenizer"
-#export XLA_PYTHON_CLIENT_PREALLOCATE=false
-#export XLA_PYTHON_CLIENT_PREALLOCATE=true
-#export XLA_PYTHON_CLIENT_MEM_FRACTION=1.0

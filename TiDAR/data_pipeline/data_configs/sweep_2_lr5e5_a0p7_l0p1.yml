@@ -1,0 +1,162 @@
+# TiDAR/data_pipeline/Config.yml (sweep: 0.10B clean tokens)
+# Sweep 2: lr5e-5, alpha=0.7, lambda=0.1
+
+outputs:
+  processed_root: "Sweep/Data/sweep_2_lr5e5_a0p7_l0p1"
+  rows_per_shard: 8192
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 123
+  write_batch_size: 256
+  dry_run_preview_rows: 200
+
+stages:
+  fw_edu_67m:
+    description: "FineWeb-Edu (deduped) — main web/edu text (0.067B tokens)"
+    output_dir: "fw_edu_67m"
+    sequence_length: 2048
+    target_tokens: 67000000
+    min_tokens: 128
+    pack_sequences: true
+    add_eos: true
+    emit_final_partial: false
+    long_document_strategy: random_window
+    random_windows_per_document: 2
+    max_windows_per_document: 8
+    drop_remainder_windows: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    deduplicate: false
+    seed_offset: 10
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceTB/smollm-corpus"
+        dataset_config: "fineweb-edu-dedup"
+        split: "train"
+        streaming: true
+        shuffle_streaming: true
+        shuffle_buffer_size: 50000
+        shuffle_seed: 12310
+        text_field: "text"
+
+  cosmopedia_v2_17m:
+    description: "Cosmopedia v2 — structured synthetic knowledge (0.017B tokens)"
+    output_dir: "cosmopedia_v2_17m"
+    sequence_length: 2048
+    target_tokens: 17000000
+    min_tokens: 128
+    pack_sequences: true
+    add_eos: true
+    emit_final_partial: false
+    long_document_strategy: sequential
+    sequential_window_stride: 2048
+    max_windows_per_document: 16
+    drop_remainder_windows: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    deduplicate: false
+    seed_offset: 20
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceTB/smollm-corpus"
+        dataset_config: "cosmopedia-v2"
+        split: "train"
+        streaming: true
+        shuffle_streaming: true
+        shuffle_buffer_size: 20000
+        shuffle_seed: 12320
+        text_field: "text"
+
+  openwebmath_11m:
+    description: "OpenWebMath — math reasoning text (0.011B tokens)"
+    output_dir: "openwebmath_11m"
+    sequence_length: 2048
+    target_tokens: 11000000
+    min_tokens: 128
+    pack_sequences: true
+    add_eos: true
+    emit_final_partial: false
+    long_document_strategy: random_window
+    random_windows_per_document: 2
+    max_windows_per_document: 8
+    drop_remainder_windows: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    deduplicate: false
+    seed_offset: 30
+    sources:
+      - type: huggingface
+        dataset_name: "open-web-math/open-web-math"
+        split: "train"
+        streaming: true
+        shuffle_streaming: true
+        shuffle_buffer_size: 50000
+        shuffle_seed: 12330
+        text_field: "text"
+
+  starcoder_python_edu_4m:
+    description: "StarCoderData Python-Edu (filtered) — code text (0.004B tokens)"
+    output_dir: "starcoder_python_edu_4m"
+    sequence_length: 2048
+    target_tokens: 4000000
+    min_tokens: 128
+    pack_sequences: true
+    add_eos: true
+    emit_final_partial: false
+    long_document_strategy: random_window
+    random_windows_per_document: 1
+    max_windows_per_document: 4
+    drop_remainder_windows: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: false
+    deduplicate: false
+    seed_offset: 40
+    sources:
+      - type: huggingface
+        dataset_name: "jon-tow/starcoderdata-python-edu"
+        split: "train"
+        streaming: true
+        shuffle_streaming: true
+        shuffle_buffer_size: 20000
+        shuffle_seed: 12340
+        text_field: "content"
+
+  ultrachat_rehearsal_1m:
+    description: "UltraChat SFT rehearsal — preserve assistant style (0.001B tokens)"
+    output_dir: "ultrachat_rehearsal_1m"
+    sequence_length: 2048
+    target_tokens: 1000000
+    min_tokens: 64
+    pack_sequences: false
+    add_eos: false
+    emit_final_partial: false
+    long_document_strategy: random_window
+    random_windows_per_document: 1
+    max_windows_per_document: 2
+    drop_remainder_windows: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    deduplicate: false
+    rows_per_shard: 4096
+    seed_offset: 50
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceH4/ultrachat_200k"
+        split: "train_sft"
+        streaming: true
+        shuffle_streaming: true
+        shuffle_buffer_size: 20000
+        shuffle_seed: 12350
+        chat_messages_field: "messages"
+        chat_role_field: "role"
+        chat_content_field: "content"
+        chat_assistant_roles: ["assistant"]
+        chat_role_prefix: "### {role}\n"
+        chat_turn_suffix: "\n"

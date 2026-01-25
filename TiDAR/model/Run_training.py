@@ -4,6 +4,7 @@ import argparse
 import os
 import signal
 import time
+from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
@@ -77,6 +78,8 @@ class StageConfig:
     end_ratio: float
     shuffle: bool = True
     fraction: float = 1.0
+    loss_alpha: float | None = None
+    loss_agreement_lambda: float | None = None
 
 
 @dataclass
@@ -179,6 +182,13 @@ def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
     stages_raw = OmegaConf.to_container(cfg.stages, resolve=True)
     stage_cfgs = []
     for stage in stages_raw:
+        loss_cfg = stage.get("loss") or {}
+        loss_alpha = loss_cfg.get("alpha")
+        if loss_alpha is not None:
+            loss_alpha = float(loss_alpha)
+        loss_agreement_lambda = loss_cfg.get("agreement_lambda")
+        if loss_agreement_lambda is not None:
+            loss_agreement_lambda = float(loss_agreement_lambda)
         stage_cfgs.append(
             StageConfig(
                 name=stage["name"],
@@ -188,6 +198,8 @@ def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
                 end_ratio=float(stage["end_ratio"]),
                 shuffle=bool(stage.get("shuffle", True)),
                 fraction=float(stage.get("fraction", 1.0)),
+                loss_alpha=loss_alpha,
+                loss_agreement_lambda=loss_agreement_lambda,
             )
         )
     return stage_cfgs
@@ -500,14 +512,36 @@ def main() -> None:
     chunk_size = max(1, int(args.scan_chunk)) if args.scan_chunk is not None else max(1, cfg_chunk)
     grad_accum = max(1, int(getattr(cfg.training, "gradient_accumulation", 1)))
 
+    # Loss configuration defaults (stage overrides may apply)
+    loss_cfg = getattr(cfg.training, "loss", None)
+    if loss_cfg is not None:
+        default_loss_alpha = float(getattr(loss_cfg, "alpha", 1.0))
+        default_loss_agreement_lambda = float(getattr(loss_cfg, "agreement_lambda", 0.0))
+    else:
+        default_loss_alpha = 1.0
+        default_loss_agreement_lambda = 0.0
+    print(
+        f"[loss] default alpha={default_loss_alpha}, agreement_lambda={default_loss_agreement_lambda}"
+    )
+
     def _init_accum_grads(pytree):
         return jax.tree_util.tree_map(jnp.zeros_like, pytree)
 
     def _stack_batches(batches):
         return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *batches)
 
-    @jax.jit
-    def _run_chunk(params, opt_state, batch_chunk, start_step, accum_grads, accum_count):
+    @partial(jax.jit, static_argnames=("loss_alpha", "loss_agreement_lambda"))
+    def _run_chunk(
+        params,
+        opt_state,
+        batch_chunk,
+        start_step,
+        accum_grads,
+        accum_count,
+        *,
+        loss_alpha,
+        loss_agreement_lambda,
+    ):
         grad_scale = jnp.asarray(1.0 / grad_accum, dtype=jnp.float32)
 
         def body(carry, batch):
@@ -531,9 +565,49 @@ def main() -> None:
                 ce = optax.softmax_cross_entropy_with_integer_labels(logits, labels_safe)
                 ntp_loss = (ce * mask_ntp).sum() / jnp.maximum(mask_ntp.sum(), 1.0)
                 diff_loss = (ce * mask_diff).sum() / jnp.maximum(mask_diff.sum(), 1.0)
-                return ntp_loss + diff_loss, (ntp_loss, diff_loss)
 
-            (loss, (ntp_loss, diff_loss)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+                # Combined TiDAR loss with alpha weighting
+                tidar_loss = (loss_alpha * ntp_loss + diff_loss) / (1.0 + loss_alpha)
+
+                # Agreement loss: KL(stopgrad(p_AR) || p_Diff)
+                if loss_agreement_lambda > 0.0:
+                    S = logits.shape[1] // 2
+                    ar_logits = logits[:, :S]
+                    diff_logits = logits[:, S:]
+                    log_p_ar = jax.nn.log_softmax(ar_logits, axis=-1)
+                    p_ar = jax.nn.softmax(jax.lax.stop_gradient(ar_logits), axis=-1)
+                    log_p_ar_sg = jax.lax.stop_gradient(log_p_ar)
+                    log_p_diff = jax.nn.log_softmax(diff_logits, axis=-1)
+                    kl_per_pos = (p_ar * (log_p_ar_sg - log_p_diff)).sum(axis=-1)
+                    diff_mask_for_kl = mask_diff[:, S:]
+                    agreement_loss = (kl_per_pos * diff_mask_for_kl).sum() / jnp.maximum(diff_mask_for_kl.sum(), 1.0)
+                    total_loss = tidar_loss + loss_agreement_lambda * agreement_loss
+                else:
+                    agreement_loss = jnp.array(0.0)
+                    total_loss = tidar_loss
+
+                # Theoretical acceptance rate on the last batch row.
+                # Align AR logits (predict token t at position t-1) with Diff logits (predict token t).
+                S = logits.shape[1] // 2
+                if S <= 1:
+                    accept_rate = jnp.array(0.0, dtype=jnp.float32)
+                else:
+                    ar_logits_last = logits[-1, : S - 1]
+                    diff_logits_last = logits[-1, S + 1 :]
+                    ar_mask = mask_ntp[-1, : S - 1]
+                    diff_mask = mask_diff[-1, S + 1 :]
+                    joint_mask = ar_mask * diff_mask
+                    p_ar_full = jax.nn.softmax(ar_logits_last, axis=-1)
+                    p_diff_full = jax.nn.softmax(diff_logits_last, axis=-1)
+                    accept_per_pos = jnp.minimum(p_ar_full, p_diff_full).sum(axis=-1)
+                    denom = jnp.maximum(joint_mask.sum(), 1.0)
+                    accept_rate = (accept_per_pos * joint_mask).sum() / denom
+
+                return total_loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)
+
+            (loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)), grads = jax.value_and_grad(
+                loss_fn, has_aux=True
+            )(params)
             accum_grads = jax.tree_util.tree_map(lambda a, g: a + g, accum_grads, grads)
             accum_count = accum_count + 1
 
@@ -553,7 +627,13 @@ def main() -> None:
                 (params, opt_state, accum_grads),
             )
             accum_count = jnp.where(should_update, 0, accum_count)
-            return (params, opt_state, step + 1, accum_grads, accum_count), (loss, ntp_loss, diff_loss)
+            return (
+                params,
+                opt_state,
+                step + 1,
+                accum_grads,
+                accum_count,
+            ), (loss, ntp_loss, diff_loss, agreement_loss, accept_rate)
 
         (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
             body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
@@ -575,9 +655,22 @@ def main() -> None:
         stage_steps_target = runtime.total_steps
         completed_in_stage = stage_step_total if stage_idx == current_stage_idx else 0
 
+        stage_loss_alpha = (
+            runtime.config.loss_alpha if runtime.config.loss_alpha is not None else default_loss_alpha
+        )
+        stage_loss_agreement_lambda = (
+            runtime.config.loss_agreement_lambda
+            if runtime.config.loss_agreement_lambda is not None
+            else default_loss_agreement_lambda
+        )
+
         print(
             f"→ Stage {runtime.config.name}: seq_len={runtime.config.seq_len} epochs={runtime.config.epochs} "
             f"steps={stage_steps_target} (resume at {completed_in_stage})"
+        )
+        print(
+            f"[loss] stage={runtime.config.name} alpha={stage_loss_alpha}, "
+            f"agreement_lambda={stage_loss_agreement_lambda}"
         )
 
         pbar = tqdm(
@@ -618,7 +711,14 @@ def main() -> None:
 
             chunk = _stack_batches(prepared_batches)
             params, opt_state, accum_grads, accum_count, losses = _run_chunk(
-                params, opt_state, chunk, global_step, accum_grads, accum_count
+                params,
+                opt_state,
+                chunk,
+                global_step,
+                accum_grads,
+                accum_count,
+                loss_alpha=stage_loss_alpha,
+                loss_agreement_lambda=stage_loss_agreement_lambda,
             )
             losses_host = jax.device_get(losses)
             if isinstance(losses_host, tuple):
@@ -640,15 +740,21 @@ def main() -> None:
                 loss_val = losses[offset, 0]
                 ntp_val = losses[offset, 1] if losses.shape[1] > 1 else loss_val
                 diff_val = losses[offset, 2] if losses.shape[1] > 2 else loss_val
+                agree_val = losses[offset, 3] if losses.shape[1] > 3 else 0.0
+                accept_val = losses[offset, 4] if losses.shape[1] > 4 else 0.0
                 last_loss = float(loss_val)
                 step_val = chunk_start + offset
                 if step_val % cfg.training.log_every == 0:
                     elapsed = time.time() - start
-                    print(
+                    log_msg = (
                         f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
                         f"loss {float(loss_val):.4f} ntp {float(ntp_val):.4f} diff {float(diff_val):.4f} "
-                        f"({elapsed:.1f}s)"
+                        f"acc {float(accept_val):.3f}"
                     )
+                    if stage_loss_agreement_lambda > 0.0:
+                        log_msg += f" agree {float(agree_val):.4f}"
+                    log_msg += f" ({elapsed:.1f}s)"
+                    print(log_msg)
                     start = time.time()
 
             if mini_every and (global_step % mini_every == 0):

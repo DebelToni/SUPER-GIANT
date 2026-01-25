@@ -11,6 +11,7 @@ import numpy as np
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from omegaconf import OmegaConf
+from GIANT.v2.device_utils import select_default_device
 
 QWEN_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = QWEN_DIR.parent
@@ -113,26 +114,7 @@ def make_step_fn(model: QwenGPT, temperature: float, top_k: Optional[int]):
 
 
 def _select_device():
-    target = getattr(Config.model, "device", "auto")
-    if target == "cpu":
-        return jax.devices("cpu")[0]
-    if target == "gpu":
-        try:
-            gpus = jax.devices("gpu")
-            if gpus:
-                return gpus[0]
-        except RuntimeError:
-            pass
-        print("⚠ Requested GPU but none available; falling back to CPU.")
-        return jax.devices("cpu")[0]
-    # auto
-    try:
-        gpus = jax.devices("gpu")
-        if gpus:
-            return gpus[0]
-    except RuntimeError:
-        pass
-    return jax.devices("cpu")[0]
+    return select_default_device()
 
 
 def generate(

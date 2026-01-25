@@ -42,7 +42,7 @@ training:
   checkpoint_every: 5000
   mini_checkpoint_every: 100
   mini_max_to_keep: 2
-  label_smoothing: 0.05
+  # label_smoothing <- future implement
   scan_chunk: 1
   loss:
     alpha: 1.0              # weight for AR loss: L_tidar = (alpha*L_AR + L_Diff)/(1+alpha)

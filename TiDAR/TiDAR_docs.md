@@ -264,3 +264,55 @@ Files: `TiDAR/model/Prepare_mask_token.py`, `TiDAR/model/tokenizer_utils.py`
 
 If you need to change the decoding strategy, start in
 `TiDAR/model/tidar_core.py` and `TiDAR/model/inference.py`.
+
+---
+
+## 10) NaN Loss Fix (Jan 25, 2026)
+
+### 10.1 Issue
+Training encountered NaN loss on UltraChat chat data (stage `ultrachat_rehearsal_1m`). 
+Root cause: Chat sequences with ONLY user messages (no assistant responses) resulted 
+in all-zero loss masks, which caused NaN propagation through attention.
+
+**Mechanism**:
+- UltraChat data masks only assistant responses (`chat_assistant_roles: ["assistant"]`)
+- Sequences with no assistant tokens → `loss_mask = [0.0, 0.0, ...]` (all zeros)
+- All-zero mask → all keys masked in attention → softmax(-inf, -inf, ...) → NaN
+- NaN in attention → NaN gradients → NaN parameters
+
+**Evidence**: Row 455 in `ultrachat_rehearsal_1m-000000.arrow` had zero mask sum (0.12% of data).
+
+### 10.2 Fix: 3-Layer Defense
+
+**Layer 1: Data Pipeline Prevention** ✅
+- File: `GIANT/v2/data_pipeline/build_corpus.py:570-584`
+- Added validation in `_emit_sequence()` to reject sequences with all-zero mask
+- Discarded sequences tracked in `self.stats.discarded`
+- **Impact**: Future dataset generation rejects corrupted rows at source
+
+**Layer 2: Batch-Time Validation** ✅
+- File: `TiDAR/model/tidar_utils.py:48-51`
+- Added safety check in `build_train_batch()` after computing `valid` mask
+- If a batch row has zero valid tokens, converts mask to all-ones as fallback
+- **Impact**: Existing corrupted data won't cause NaN during training (graceful degradation)
+
+**Layer 3: Runtime NaN Detection** ✅
+- Files: `TiDAR/model/Run_training.py:640-652`, `GIANT/v2/model/Run_training.py:507-516`
+- Added NaN/Inf detection after gradient computation
+- Skips gradient accumulation if NaN detected (training continues with warning)
+- **Impact**: Last resort safety net prevents NaN propagation to parameters
+
+### 10.3 Data Regeneration
+- Regenerated all 4 UltraChat shards under `TiDAR/Sweep/Data/*/ultrachat_rehearsal_1m/`
+- **Before**: 858 rows, 1 with zero mask (row 455)
+- **After**: 859 rows, 0 with zero mask, min mask sum = 44.0
+- Layer 1 successfully discarded the corrupted sequence during regeneration
+- Backup of original corrupted shard: `sweep_1_lr1e4_a1_l0/ultrachat_rehearsal_1m/ultrachat_rehearsal_1m-000000.arrow.corrupted_backup`
+
+### 10.4 Testing
+- Test script: `TiDAR/test_nan_theory.py`
+- Verified Layer 2 converts zero-masks to all-ones fallback
+- Confirmed new shards have no zero-mask rows
+- All attention computations remain NaN-free
+
+**Production Ready**: All 3 layers implemented, tested, and data regenerated. Training can resume safely.

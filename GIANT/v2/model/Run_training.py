@@ -36,6 +36,7 @@ from GIANT.v2.model.checkpoint_manager import (
     set_npz_metadata,
 )
 from GIANT.v2.model.optimizer_utils import create_weight_decay_mask
+from GIANT.v2.device_utils import select_default_device
 from flax import core as flax_core
 from flax import serialization
 
@@ -60,7 +61,8 @@ signal.signal(signal.SIGTERM, _signal_handler)
 signal.signal(signal.SIGINT, _signal_handler)
 
 
-IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
+DEFAULT_DEVICE = select_default_device()
+IS_GPU = DEFAULT_DEVICE.platform == "gpu"
 
 
 @dataclass
@@ -282,7 +284,7 @@ def save_training_state(
     return ckpt_file
 
 
-def _prefetch_to_device(iterator, size: int = 2):
+def _prefetch_to_device(iterator, size: int = 2, *, device: jax.Device):
     """Simple host prefetcher to keep device fed."""
     if size <= 0:
         for batch in iterator:
@@ -293,7 +295,7 @@ def _prefetch_to_device(iterator, size: int = 2):
     buf = []
     try:
         for _ in range(size):
-            buf.append(jax.device_put(next(it)))
+            buf.append(jax.device_put(next(it), device))
     except StopIteration:
         buf.clear()
 
@@ -301,7 +303,7 @@ def _prefetch_to_device(iterator, size: int = 2):
         batch = buf.pop(0)
         yield batch
         try:
-            buf.append(jax.device_put(next(it)))
+            buf.append(jax.device_put(next(it), device))
         except StopIteration:
             buf.clear()
 
@@ -371,6 +373,7 @@ def main() -> None:
     from flax import core as flax_core
     if isinstance(params, dict):
         params = flax_core.freeze(params)
+    params = jax.device_put(params, DEFAULT_DEVICE)
 
     optimizer = build_optimizer(cfg, total_steps, params)
     opt_state = optimizer.init(params)
@@ -505,8 +508,16 @@ def main() -> None:
                 return (loss * batch["mask"]).sum() / denom
 
             loss, grads = jax.value_and_grad(loss_fn)(params)
-            accum_grads = jax.tree_util.tree_map(lambda a, g: a + g, accum_grads, grads)
-            accum_count = accum_count + 1
+            
+            # Skip gradient accumulation if NaN/Inf detected
+            is_finite = jnp.isfinite(loss)
+            accum_grads = jax.lax.cond(
+                is_finite,
+                lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                lambda ag, g: ag,  # Don't accumulate if NaN
+                accum_grads, grads
+            )
+            accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
 
             def apply_updates(args):
                 params, opt_state, accum_grads = args
@@ -563,7 +574,9 @@ def main() -> None:
         last_loss = None
 
         batch_iter = _prefetch_to_device(
-            runtime.loader, size=2 if IS_GPU else 0
+            runtime.loader,
+            size=2 if IS_GPU else 0,
+            device=DEFAULT_DEVICE,
         )
         while completed_in_stage < stage_steps_target:
             batch_list = []

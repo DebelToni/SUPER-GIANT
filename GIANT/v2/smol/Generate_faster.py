@@ -15,6 +15,7 @@ from transformers import AutoTokenizer
 from GIANT.v2.smol.GiantGPT import GiantGPT
 from GIANT.v2.smol.checkpoint_io import load_npz
 from GIANT.v2.smol.jit_inference import init_inference_state, make_prefill_and_decode_fns
+from GIANT.v2.device_utils import select_default_device
 
 
 def load_config() -> Dict[str, Any]:
@@ -149,6 +150,7 @@ def main():
     args = parse_args()
     cfg = load_config()
     jax.config.update("jax_default_matmul_precision", cfg["model"]["compute_dtype"])
+    device = select_default_device()
 
     temperature = 0.0 if args.greedy else max(args.temperature, 0.0)
     if args.steps <= 0:
@@ -209,10 +211,10 @@ def main():
         use_kv_cache=True,
     )
 
-    params = jax.device_put(params)
-    nonparam = jax.device_put(nonparam)
+    params = jax.device_put(params, device)
+    nonparam = jax.device_put(nonparam, device)
 
-    prompt = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)
+    prompt = jax.device_put(jnp.asarray(prompt_ids[None, :], dtype=jnp.int32), device)
     prefill_fn, decode_fn = make_prefill_and_decode_fns(model)
 
     compiled_prefill = prefill_fn.lower(params, nonparam, prompt).compile()

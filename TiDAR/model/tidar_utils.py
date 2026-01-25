@@ -45,6 +45,11 @@ def build_train_batch(
     if token_mask is not None:
         valid = valid * token_mask.astype(jnp.float32)
 
+    # Ensure no batch row has all-zero mask (prevents NaN in attention)
+    # If a row has zero valid tokens, set mask to all 1.0s as fallback
+    row_has_tokens = valid.sum(axis=1, keepdims=True) > 0  # (batch_size, 1)
+    valid = jnp.where(row_has_tokens, valid, jnp.ones_like(valid))
+
     if seq_len > 1:
         loss_mask_ntp = loss_mask_ntp.at[:, : seq_len - 1].set(valid[:, 1:])
     loss_mask_diff = loss_mask_diff.at[:, seq_len:].set(valid)

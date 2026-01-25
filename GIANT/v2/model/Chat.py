@@ -15,6 +15,7 @@ from transformers import AutoTokenizer
 from GIANT.v2.model.GiantGPT import GiantGPT
 from GIANT.v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
 from GIANT.v2.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
+from GIANT.v2.device_utils import select_default_device
 
 
 def load_configs() -> OmegaConf:
@@ -248,6 +249,7 @@ def main():
     args = parse_args()
     cfg = load_configs()
     jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
+    device = select_default_device()
 
     if args.steps <= 0:
         raise ValueError("steps must be > 0")
@@ -279,8 +281,8 @@ def main():
         use_kv_cache=True,
     )
 
-    params = jax.device_put(params)
-    base_state = jax.device_put(nonparam)
+    params = jax.device_put(params, device)
+    base_state = jax.device_put(nonparam, device)
 
     prefill_fn, decode_fn = make_prefill_and_decode_fns(model)
 

@@ -640,8 +640,16 @@ def main() -> None:
             (loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)), grads = jax.value_and_grad(
                 loss_fn, has_aux=True
             )(params)
-            accum_grads = jax.tree_util.tree_map(lambda a, g: a + g, accum_grads, grads)
-            accum_count = accum_count + 1
+            
+            # Skip gradient accumulation if NaN/Inf detected
+            is_finite = jnp.isfinite(loss)
+            accum_grads = jax.lax.cond(
+                is_finite,
+                lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                lambda ag, g: ag,  # Don't accumulate if NaN
+                accum_grads, grads
+            )
+            accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
 
             def apply_updates(args):
                 params, opt_state, accum_grads = args

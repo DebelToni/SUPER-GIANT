@@ -34,7 +34,7 @@ training:
   mini_checkpoint_every: 1000
   mini_max_to_keep: 1
   device: cpu
-  label_smoothing: 0.0
+  # label_smoothing <- future implement
   scan_chunk: 8
 
 stages:

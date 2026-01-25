@@ -576,6 +576,13 @@ class SequenceEmitter:
             seq = seq[: self.seq_len]
             if mask is not None:
                 mask = mask[: self.seq_len]
+        
+        # Skip sequences with no trainable tokens (all-zero mask)
+        # This prevents NaN loss from sequences with only masked tokens
+        if mask is not None and sum(mask) == 0:
+            self.stats.discarded += 1
+            return None
+        
         length = len(seq)
         if length < self.seq_len:
             seq = seq + [self.pad_id] * (self.seq_len - length)

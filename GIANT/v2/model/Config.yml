@@ -33,8 +33,7 @@ training:
   checkpoint_every: 20000
   mini_checkpoint_every: 1000
   mini_max_to_keep: 1
-  device: gpu ####
-  label_smoothing: 0.0
+  # label_smoothing <- future implement
   scan_chunk: 8
 
 stages:

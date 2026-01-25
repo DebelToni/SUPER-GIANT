@@ -599,6 +599,7 @@ def main() -> None:
                         f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
                         f"loss {loss_val:.4f} ppl {ppl:.2f} ({elapsed:.1f}s)"
                     )
+                    print()
                     print(log_msg)
                     log_file.write(log_msg + "\n")
                     log_file.flush()

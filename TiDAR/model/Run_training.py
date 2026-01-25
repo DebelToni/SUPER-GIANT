@@ -786,6 +786,7 @@ def main() -> None:
                     if stage_loss_agreement_lambda > 0.0:
                         log_msg += f" agree {float(agree_val):.4f}"
                     log_msg += f" ({elapsed:.1f}s)"
+                    print()
                     print(log_msg)
                     log_file.write(log_msg + "\n")
                     log_file.flush()

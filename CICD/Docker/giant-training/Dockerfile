@@ -124,7 +124,7 @@ if [[ ! -f "$SYNC_MARKER" ]]; then
 
       if [[ "$_p" == */ ]]; then
         mkdir -p "${DATA_DIR}/${_p}"
-        s5cmd sync --size-only "s3://${BUCKET}/${_p}" "${DATA_DIR}/${_p}"
+        s5cmd sync --size-only "s3://${BUCKET}/${_p}*" "${DATA_DIR}/${_p}"
       else
         _dst_dir="${DATA_DIR}/$(dirname "$_p")"
         mkdir -p "$_dst_dir"

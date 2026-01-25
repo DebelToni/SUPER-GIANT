@@ -1,0 +1,137 @@
+name: Build & push giant-training image
+
+on:
+  push:
+    paths:
+      - "CICD/Docker/giant-training/**"
+      - "CICD/Docker/giant-training-S3/**"
+      - ".github/workflows/Build_images.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            giant_training:
+              - "CICD/Docker/giant-training/**"
+            giant_training_s3:
+              - "CICD/Docker/giant-training-S3/**"
+            workflow:
+              - ".github/workflows/Build_images.yml"
+
+      - name: Build dynamic matrix
+        id: set-matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # If the workflow itself changed, rebuild both images
+          BUILD_GT="${{ steps.filter.outputs.giant_training }}"
+          BUILD_S3="${{ steps.filter.outputs.giant_training_s3 }}"
+          WF_CHANGED="${{ steps.filter.outputs.workflow }}"
+
+          if [ "$WF_CHANGED" = "true" ]; then
+            BUILD_GT="true"
+            BUILD_S3="true"
+          fi
+
+          include='[]'
+
+          if [ "$BUILD_GT" = "true" ]; then
+            include=$(jq -c --arg sha "$GITHUB_SHA" '
+              . + [{
+                image_name: "giant-training",
+                image_repo: "giant-training",
+                context: "./CICD/Docker/giant-training",
+                dockerfile: "./CICD/Docker/giant-training/Dockerfile",
+                tag1: "latest",
+                tag2: $sha
+              }]' <<< "$include")
+          fi
+
+          if [ "$BUILD_S3" = "true" ]; then
+            include=$(jq -c --arg sha "$GITHUB_SHA" '
+              . + [{
+                image_name: "giant-training-S3",
+                image_repo: "giant-training",
+                context: "./CICD/Docker/giant-training-S3",
+                dockerfile: "./CICD/Docker/giant-training-S3/Dockerfile",
+                tag1: "S3",
+                tag2: ("S3-" + $sha)
+              }]' <<< "$include")
+          fi
+
+          matrix=$(jq -c --argjson inc "$include" '{include: $inc}' <<< '{}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Selected matrix: $matrix"
+
+  build-and-push:
+    needs: detect
+    if: ${{ fromJSON(needs.detect.outputs.matrix).include[0] != null }}
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+
+    steps:
+      - name: Show disk usage before cleanup
+        run: df -h
+
+      - name: Free up disk space on GitHub runner
+        run: |
+          echo "=== Before cleanup ==="
+          df -h
+
+          sudo swapoff -a || true
+          sudo rm -f /swapfile || true
+
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /home/linuxbrew/.linuxbrew || true
+
+          sudo apt-get clean
+          sudo docker system prune -af || true
+          sudo docker builder prune -af || true
+
+          echo "=== After cleanup ==="
+          df -h
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image (${{ matrix.image_name }})
+        uses: docker/build-push-action@v4
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          pull: true
+          no-cache: true
+          platforms: linux/amd64
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image_repo }}:${{ matrix.tag1 }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image_repo }}:${{ matrix.tag2 }}

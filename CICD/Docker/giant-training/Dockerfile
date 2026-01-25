@@ -93,6 +93,11 @@ BUCKET="${SYNC_BUCKET:-giant-data}"
 SYNC_DIRS="${SYNC_DIRS:-}"
 FORCE_SYNC="${FORCE_SYNC:-0}"
 
+SYNC_DIRS="${SYNC_DIRS#\"}"
+SYNC_DIRS="${SYNC_DIRS%\"}"
+SYNC_DIRS="${SYNC_DIRS#\'}"
+SYNC_DIRS="${SYNC_DIRS%\'}"
+
 # Marker depends on SYNC_DIRS so changing the list triggers a new sync automatically.
 if [[ -z "$SYNC_DIRS" ]]; then
   _sync_id="all"
@@ -118,7 +123,13 @@ if [[ ! -f "$SYNC_MARKER" ]]; then
     IFS=',' read -r -a _items <<<"$SYNC_DIRS"
 
     for _raw in "${_items[@]}"; do
-      _p="$(echo "${_raw}" | xargs)"
+      _p="${_raw}"
+      _p="${_p#${_p%%[![:space:]]*}}"
+      _p="${_p%${_p##*[![:space:]]}}"
+      _p="${_p//\\\"/}"
+      _p="${_p//\\\'/}"
+      _p="${_p//\"/}"
+      _p="${_p//\'/}"
       [[ -z "$_p" ]] && continue
       _p="${_p#/}"
 

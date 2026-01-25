@@ -33,7 +33,7 @@ optimizer:
     - scale
 
 training:
-  batch_size: 8
+  batch_size: 12
   gradient_accumulation: 4
   max_epochs: 1
   seed: 0

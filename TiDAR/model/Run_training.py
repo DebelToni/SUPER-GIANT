@@ -428,6 +428,10 @@ def main() -> None:
     training_states_dir_str = str(training_states_dir)
     checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
 
+    params_dir.mkdir(parents=True, exist_ok=True)
+    log_path = params_dir / "logs.txt"
+    log_file = open(log_path, "a", encoding="utf-8")
+
     training_cfg = cfg.training
     mini_every = int(getattr(training_cfg, "mini_checkpoint_every", max(1, checkpoint_every // 10)))
     mini_max_to_keep = int(getattr(training_cfg, "mini_max_to_keep", 3))
@@ -755,6 +759,8 @@ def main() -> None:
                         log_msg += f" agree {float(agree_val):.4f}"
                     log_msg += f" ({elapsed:.1f}s)"
                     print(log_msg)
+                    log_file.write(log_msg + "\n")
+                    log_file.flush()
                     start = time.time()
 
             if mini_every and (global_step % mini_every == 0):
@@ -783,17 +789,19 @@ def main() -> None:
                 )
                 print(f"💾 checkpoint → {ckpt_file}")
 
-            if _stop_requested:
-                accum_count_host = int(jax.device_get(accum_count))
-                if accum_count_host > 0:
-                    denom = jnp.asarray(accum_count_host, dtype=jnp.float32)
-                    params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
-                    accum_grads = _init_accum_grads(params)
-                    accum_count = jnp.asarray(0, dtype=jnp.int32)
-                mini_ckpt_mgr.wait_until_finished(timeout=4.0)
-                print("[signal] Stop requested; exiting after current chunk.")
-                pbar.close()
-                return
+                if _stop_requested:
+                    accum_count_host = int(jax.device_get(accum_count))
+                    if accum_count_host > 0:
+                        denom = jnp.asarray(accum_count_host, dtype=jnp.float32)
+                        params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
+                        accum_grads = _init_accum_grads(params)
+                        accum_count = jnp.asarray(0, dtype=jnp.int32)
+                    mini_ckpt_mgr.wait_until_finished(timeout=4.0)
+                    log_file.flush()
+                    log_file.close()
+                    print("[signal] Stop requested; exiting after current chunk.")
+                    pbar.close()
+                    return
 
         pbar.close()
         accum_count_host = int(jax.device_get(accum_count))
@@ -827,6 +835,8 @@ def main() -> None:
         },
     )
     mini_ckpt_mgr.wait_until_finished(timeout=10.0)
+    log_file.flush()
+    log_file.close()
     print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
 
 

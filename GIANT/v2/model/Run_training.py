@@ -388,6 +388,10 @@ def main() -> None:
     training_states_dir_str = str(training_states_dir)
     checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
 
+    params_dir.mkdir(parents=True, exist_ok=True)
+    log_path = params_dir / "logs.txt"
+    log_file = open(log_path, "a", encoding="utf-8")
+
     training_cfg = cfg.training
     mini_every = int(getattr(training_cfg, "mini_checkpoint_every", max(1, checkpoint_every // 10)))
     mini_max_to_keep = int(getattr(training_cfg, "mini_max_to_keep", 3))
@@ -591,10 +595,13 @@ def main() -> None:
                 if step_val % cfg.training.log_every == 0:
                     elapsed = time.time() - start
                     ppl = float(np.exp(loss_val)) if loss_val < 20 else float("inf")
-                    print(
+                    log_msg = (
                         f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
                         f"loss {loss_val:.4f} ppl {ppl:.2f} ({elapsed:.1f}s)"
                     )
+                    print(log_msg)
+                    log_file.write(log_msg + "\n")
+                    log_file.flush()
                     start = time.time()
 
             if mini_every and (global_step % mini_every == 0):
@@ -632,6 +639,8 @@ def main() -> None:
                     accum_grads = _init_accum_grads(params)
                     accum_count = jnp.asarray(0, dtype=jnp.int32)
                 mini_ckpt_mgr.wait_until_finished(timeout=4.0)
+                log_file.flush()
+                log_file.close()
                 print("[signal] Stop requested; exiting after current chunk.")
                 pbar.close()
                 return
@@ -671,6 +680,8 @@ def main() -> None:
         },
     )
     mini_ckpt_mgr.wait_until_finished(timeout=10.0)
+    log_file.flush()
+    log_file.close()
     print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
     print("→ Use this checkpoint as --init_checkpoint for the QA finetune stage.")
 

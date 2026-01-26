@@ -1,0 +1,94 @@
+model:
+  embedding_size: 576
+  num_heads: 9
+  num_kv_heads: 3
+  num_layers: 30
+  feed_forward_size: 1536
+  rope_dim: 64
+  context_length: 2048
+  dropout_rate: 0.0
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tidar:
+  draft_length: 2
+  attn_bias_value: -1.0e10
+
+inference:
+  stop_on_eos: true
+  max_decode_steps: 64
+  temperature: 1.0
+  top_k: 0
+  draft_length: 2
+
+optimizer:
+  base_learning_rate: 3.0e-5
+  min_learning_rate: 3.0e-6
+  warmup_steps: 1200
+  weight_decay: 0.01
+  gradient_clip_norm: 0.5
+  weight_decay_exclusions:
+    - bias
+    - scale
+
+training:
+  batch_size: 4
+  gradient_accumulation: 4
+  max_epochs: 1
+  seed: 0
+  dataset_dir: "Sweep/Data/sweep_5_300m_ctxmix"
+  log_every: 500
+  checkpoint_every: 20000
+  mini_checkpoint_every: 100
+  mini_max_to_keep: 2
+  scan_chunk: 1
+  loss:
+    alpha: 0.2
+    agreement_lambda: 0.8
+    agreement_temperature: 2.0
+
+paths:
+  params_dir: "Sweep/Params/sweep_5_lr3e5_a0p2_l0p8_t2_ctxmix_params"
+
+stages:
+  - name: fw_edu_150m_ctx2048
+    dataset: fw_edu_150m_ctx2048
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 0.57
+    shuffle: true
+    fraction: 1.0
+  - name: cosmopedia_v2_60m_ctx1536
+    dataset: cosmopedia_v2_60m_ctx1536
+    seq_len: 1536
+    epochs: 1
+    end_ratio: 0.79
+    shuffle: true
+    fraction: 1.0
+  - name: openwebmath_30m_ctx1024
+    dataset: openwebmath_30m_ctx1024
+    seq_len: 1024
+    epochs: 1
+    end_ratio: 0.91
+    shuffle: true
+    fraction: 1.0
+  - name: starcoder_python_edu_20m_ctx1024
+    dataset: starcoder_python_edu_20m_ctx1024
+    seq_len: 1024
+    epochs: 1
+    end_ratio: 0.98
+    shuffle: true
+    fraction: 1.0
+  - name: ultrachat_rehearsal_5m_ctx1024
+    dataset: ultrachat_rehearsal_5m_ctx1024
+    seq_len: 1024
+    epochs: 1
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 1.0
+
+qa_finetune: {}
+
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"

@@ -58,6 +58,7 @@ def loss_and_metrics(
     dropout_rng,
     loss_alpha: float,
     agreement_lambda: float,
+    agreement_temperature: float,
     compute_accept,
     accept_top_k: int,
     accept_max_positions: int,
@@ -88,10 +89,14 @@ def loss_and_metrics(
         S = logits.shape[1] // 2
         ar_logits = logits[:, : S - 1]
         diff_logits = logits[:, S + 1 :]
-        log_p_ar = jax.nn.log_softmax(ar_logits, axis=-1)
-        p_ar = jax.nn.softmax(jax.lax.stop_gradient(ar_logits), axis=-1)
+        temperature = jnp.asarray(agreement_temperature, dtype=jnp.float32)
+        temperature = jnp.maximum(temperature, 1e-6)
+        ar_logits_scaled = ar_logits / temperature
+        diff_logits_scaled = diff_logits / temperature
+        log_p_ar = jax.nn.log_softmax(ar_logits_scaled, axis=-1)
+        p_ar = jax.nn.softmax(jax.lax.stop_gradient(ar_logits_scaled), axis=-1)
         log_p_ar_sg = jax.lax.stop_gradient(log_p_ar)
-        log_p_diff = jax.nn.log_softmax(diff_logits, axis=-1)
+        log_p_diff = jax.nn.log_softmax(diff_logits_scaled, axis=-1)
         kl_terms = log_p_ar_sg - log_p_diff
         kl_per_pos = jnp.sum(jnp.where(p_ar > 0, p_ar * kl_terms, 0.0), axis=-1)
         diff_mask_for_kl = mask_diff[:, S + 1 :]
@@ -126,6 +131,7 @@ def loss_and_grad(
     dropout_rng,
     loss_alpha: float,
     agreement_lambda: float,
+    agreement_temperature: float,
     compute_accept,
     accept_top_k: int,
     accept_max_positions: int,
@@ -138,6 +144,7 @@ def loss_and_grad(
             dropout_rng=dropout_rng,
             loss_alpha=loss_alpha,
             agreement_lambda=agreement_lambda,
+            agreement_temperature=agreement_temperature,
             compute_accept=compute_accept,
             accept_top_k=accept_top_k,
             accept_max_positions=accept_max_positions,
@@ -146,7 +153,18 @@ def loss_and_grad(
     return jax.value_and_grad(loss_fn, has_aux=True)(params)
 
 
-@partial(jax.jit, static_argnames=["model", "optimizer", "loss_alpha", "agreement_lambda", "accept_top_k", "accept_max_positions"])
+@partial(
+    jax.jit,
+    static_argnames=[
+        "model",
+        "optimizer",
+        "loss_alpha",
+        "agreement_lambda",
+        "agreement_temperature",
+        "accept_top_k",
+        "accept_max_positions",
+    ],
+)
 def train_step(
     params,
     opt_state,
@@ -157,6 +175,7 @@ def train_step(
     dropout_rng,
     loss_alpha: float = 1.0,
     agreement_lambda: float = 0.0,
+    agreement_temperature: float = 1.0,
     compute_accept=False,
     accept_top_k: int = 64,
     accept_max_positions: int = 256,
@@ -168,6 +187,7 @@ def train_step(
         dropout_rng=dropout_rng,
         loss_alpha=loss_alpha,
         agreement_lambda=agreement_lambda,
+        agreement_temperature=agreement_temperature,
         compute_accept=compute_accept,
         accept_top_k=accept_top_k,
         accept_max_positions=accept_max_positions,

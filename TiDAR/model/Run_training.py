@@ -80,6 +80,7 @@ class StageConfig:
     fraction: float = 1.0
     loss_alpha: float | None = None
     loss_agreement_lambda: float | None = None
+    loss_agreement_temperature: float | None = None
 
 
 @dataclass
@@ -189,6 +190,9 @@ def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
         loss_agreement_lambda = loss_cfg.get("agreement_lambda")
         if loss_agreement_lambda is not None:
             loss_agreement_lambda = float(loss_agreement_lambda)
+        loss_agreement_temperature = loss_cfg.get("agreement_temperature")
+        if loss_agreement_temperature is not None:
+            loss_agreement_temperature = float(loss_agreement_temperature)
         stage_cfgs.append(
             StageConfig(
                 name=stage["name"],
@@ -200,6 +204,7 @@ def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
                 fraction=float(stage.get("fraction", 1.0)),
                 loss_alpha=loss_alpha,
                 loss_agreement_lambda=loss_agreement_lambda,
+                loss_agreement_temperature=loss_agreement_temperature,
             )
         )
     return stage_cfgs
@@ -524,11 +529,14 @@ def main() -> None:
     if loss_cfg is not None:
         default_loss_alpha = float(getattr(loss_cfg, "alpha", 1.0))
         default_loss_agreement_lambda = float(getattr(loss_cfg, "agreement_lambda", 0.0))
+        default_loss_agreement_temperature = float(getattr(loss_cfg, "agreement_temperature", 1.0))
     else:
         default_loss_alpha = 1.0
         default_loss_agreement_lambda = 0.0
+        default_loss_agreement_temperature = 1.0
     print(
-        f"[loss] default alpha={default_loss_alpha}, agreement_lambda={default_loss_agreement_lambda}"
+        f"[loss] default alpha={default_loss_alpha}, agreement_lambda={default_loss_agreement_lambda}, "
+        f"agreement_temperature={default_loss_agreement_temperature}"
     )
 
     def _init_accum_grads(pytree):
@@ -537,7 +545,7 @@ def main() -> None:
     def _stack_batches(batches):
         return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *batches)
 
-    @partial(jax.jit, static_argnames=("loss_alpha", "loss_agreement_lambda"))
+    @partial(jax.jit, static_argnames=("loss_alpha", "loss_agreement_lambda", "loss_agreement_temperature"))
     def _run_chunk(
         params,
         opt_state,
@@ -548,6 +556,7 @@ def main() -> None:
         *,
         loss_alpha,
         loss_agreement_lambda,
+        loss_agreement_temperature,
     ):
         grad_scale = jnp.asarray(1.0 / grad_accum, dtype=jnp.float32)
 
@@ -563,6 +572,7 @@ def main() -> None:
                 dropout_rng=dropout_rng,
                 loss_alpha=loss_alpha,
                 agreement_lambda=loss_agreement_lambda,
+                agreement_temperature=loss_agreement_temperature,
                 compute_accept=compute_accept,
                 accept_top_k=accept_top_k,
                 accept_max_positions=accept_max_positions,
@@ -635,6 +645,11 @@ def main() -> None:
             if runtime.config.loss_agreement_lambda is not None
             else default_loss_agreement_lambda
         )
+        stage_loss_agreement_temperature = (
+            runtime.config.loss_agreement_temperature
+            if runtime.config.loss_agreement_temperature is not None
+            else default_loss_agreement_temperature
+        )
 
         print(
             f"→ Stage {runtime.config.name}: seq_len={runtime.config.seq_len} epochs={runtime.config.epochs} "
@@ -642,7 +657,8 @@ def main() -> None:
         )
         print(
             f"[loss] stage={runtime.config.name} alpha={stage_loss_alpha}, "
-            f"agreement_lambda={stage_loss_agreement_lambda}"
+            f"agreement_lambda={stage_loss_agreement_lambda}, "
+            f"agreement_temperature={stage_loss_agreement_temperature}"
         )
 
         pbar = tqdm(
@@ -692,6 +708,7 @@ def main() -> None:
                 accum_count,
                 loss_alpha=stage_loss_alpha,
                 loss_agreement_lambda=stage_loss_agreement_lambda,
+                loss_agreement_temperature=stage_loss_agreement_temperature,
             )
             losses_host = jax.device_get(losses)
             if isinstance(losses_host, tuple):

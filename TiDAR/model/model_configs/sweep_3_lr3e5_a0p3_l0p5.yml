@@ -37,7 +37,7 @@ training:
   gradient_accumulation: 4
   max_epochs: 1
   seed: 0
-  dataset_dir: "Sweep/Data/sweep_3_lr3e5_a0p3_l0p5"
+  dataset_dir: "Sweep/Data"
   log_every: 500
   checkpoint_every: 20000
   mini_checkpoint_every: 100

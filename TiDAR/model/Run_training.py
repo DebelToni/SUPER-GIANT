@@ -569,7 +569,12 @@ def main() -> None:
             )
             
             # Skip gradient accumulation if NaN/Inf detected
-            is_finite = jnp.isfinite(loss)
+            grads_finite = jax.tree_util.tree_reduce(
+                lambda a, b: jnp.logical_and(a, b),
+                jax.tree_util.tree_map(lambda g: jnp.all(jnp.isfinite(g)), grads),
+                jnp.asarray(True),
+            )
+            is_finite = jnp.logical_and(jnp.isfinite(loss), grads_finite)
             accum_grads = jax.lax.cond(
                 is_finite,
                 lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
@@ -649,6 +654,7 @@ def main() -> None:
             ncols=120,
         )
         last_loss = None
+        non_finite_steps = 0
 
         batch_iter = _prefetch_to_device(runtime.loader, size=2 if IS_GPU else 0)
         while completed_in_stage < stage_steps_target:
@@ -704,22 +710,27 @@ def main() -> None:
             stage_states[runtime.config.name] = runtime.loader.state_dict()
 
             for offset in range(chunk_len):
-                loss_val = losses[offset, 0]
-                ntp_val = losses[offset, 1] if losses.shape[1] > 1 else loss_val
-                diff_val = losses[offset, 2] if losses.shape[1] > 2 else loss_val
-                agree_val = losses[offset, 3] if losses.shape[1] > 3 else 0.0
-                accept_val = losses[offset, 4] if losses.shape[1] > 4 else 0.0
-                last_loss = float(loss_val)
+                loss_val = float(losses[offset, 0])
+                if not np.isfinite(loss_val):
+                    non_finite_steps += 1
+                    step_val = chunk_start + offset
+                    print(f"[warn] non-finite loss at step {step_val} (stage {runtime.config.name}); skipping log")
+                    continue
+                ntp_val = float(losses[offset, 1]) if losses.shape[1] > 1 else loss_val
+                diff_val = float(losses[offset, 2]) if losses.shape[1] > 2 else loss_val
+                agree_val = float(losses[offset, 3]) if losses.shape[1] > 3 else 0.0
+                accept_val = float(losses[offset, 4]) if losses.shape[1] > 4 else 0.0
+                last_loss = loss_val
                 step_val = chunk_start + offset
                 if step_val % log_every == 0:
                     elapsed = time.time() - start
                     log_msg = (
                         f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
-                        f"loss {float(loss_val):.4f} ntp {float(ntp_val):.4f} diff {float(diff_val):.4f} "
-                        f"acc {float(accept_val):.3f}"
+                        f"loss {loss_val:.4f} ntp {ntp_val:.4f} diff {diff_val:.4f} "
+                        f"acc {accept_val:.3f}"
                     )
                     if stage_loss_agreement_lambda > 0.0:
-                        log_msg += f" agree {float(agree_val):.4f}"
+                        log_msg += f" agree {agree_val:.4f}"
                     log_msg += f" ({elapsed:.1f}s)"
                     print()
                     print(log_msg)
@@ -775,7 +786,8 @@ def main() -> None:
             accum_grads = _init_accum_grads(params)
             accum_count = jnp.asarray(0, dtype=jnp.int32)
         if last_loss is not None:
-            print(f"✓ Stage {runtime.config.name} completed (last loss {last_loss:.4f})")
+            warn_suffix = f"; {non_finite_steps} non-finite step(s) skipped" if non_finite_steps else ""
+            print(f"✓ Stage {runtime.config.name} completed (last loss {last_loss:.4f}){warn_suffix}")
         else:
             print(f"✓ Stage {runtime.config.name} completed (no batches emitted)")
         stage_step_total = 0

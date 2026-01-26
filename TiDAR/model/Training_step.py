@@ -77,6 +77,7 @@ def loss_and_metrics(
     active = (mask_ntp + mask_diff) > 0
     labels_safe = jnp.where(active, labels, 0)
     ce = optax.softmax_cross_entropy_with_integer_labels(logits, labels_safe)
+    ce = jnp.where(active, ce, 0.0)
     ntp_loss = (ce * mask_ntp).sum() / jnp.maximum(mask_ntp.sum(), 1.0)
     diff_loss = (ce * mask_diff).sum() / jnp.maximum(mask_diff.sum(), 1.0)
     tidar_loss = (loss_alpha * ntp_loss + diff_loss) / (1.0 + loss_alpha)
@@ -91,11 +92,11 @@ def loss_and_metrics(
         p_ar = jax.nn.softmax(jax.lax.stop_gradient(ar_logits), axis=-1)
         log_p_ar_sg = jax.lax.stop_gradient(log_p_ar)
         log_p_diff = jax.nn.log_softmax(diff_logits, axis=-1)
-        kl_per_pos = (p_ar * (log_p_ar_sg - log_p_diff)).sum(axis=-1)
+        kl_terms = log_p_ar_sg - log_p_diff
+        kl_per_pos = jnp.sum(jnp.where(p_ar > 0, p_ar * kl_terms, 0.0), axis=-1)
         diff_mask_for_kl = mask_diff[:, S + 1 :]
-        agreement_loss = (kl_per_pos * diff_mask_for_kl).sum() / jnp.maximum(
-            diff_mask_for_kl.sum(), 1.0
-        )
+        kl_per_pos = jnp.where(diff_mask_for_kl > 0, kl_per_pos, 0.0)
+        agreement_loss = kl_per_pos.sum() / jnp.maximum(diff_mask_for_kl.sum(), 1.0)
         total_loss = tidar_loss + agreement_lambda * agreement_loss
     else:
         agreement_loss = jnp.array(0.0)

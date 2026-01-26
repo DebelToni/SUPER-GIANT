@@ -318,3 +318,17 @@ in all-zero loss masks, which caused NaN propagation through attention.
 - All attention computations remain NaN-free
 
 **Production Ready**: All 3 layers implemented, tested, and data regenerated. Training can resume safely.
+
+### 10.5 Follow-up Stability Hardening (Jan 26, 2026)
+- Added masking of CE and agreement KL on inactive positions to avoid NaNs from masked logits:
+  - File: `TiDAR/model/Training_step.py`
+- Added gradient-finite check during accumulation to avoid NaN grads corrupting accumulators:
+  - File: `TiDAR/model/Run_training.py`
+- Added non-finite loss logging/skip to prevent NaN metadata in checkpoints:
+  - File: `TiDAR/model/Run_training.py`
+- Added shard inspection utility:
+  - File: `TiDAR/inspect_ultrachat_shard.py`
+
+Checkpoint sanity:
+- `step_0012100.npz` is finite (safe resume point)
+- `step_0012200.npz` and later contained NaNs (do not resume)

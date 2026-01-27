@@ -49,11 +49,12 @@ same positions (even if this hurts quality).
 
 ```
 L_tidar(theta) = (alpha * L_AR_CE + L_Diff_CE) / (1 + alpha)
-L_total(theta) = L_tidar(theta) + lambda * KL(stopgrad(p_AR) || p_Diff)
+L_total(theta) = L_tidar(theta) + lambda * KL(stopgrad(p_AR^T) || p_Diff^T)
 ```
 
 - `alpha` controls how much training focuses on AR vs Diff (config: `training.loss.alpha`).
 - `lambda` controls how hard Diff is pushed to agree with AR (config: `training.loss.agreement_lambda`).
+- `T` is the KL temperature (config: `training.loss.agreement_temperature`, default 1.0).
 - `stopgrad`/`detach` makes AR a fixed teacher so gradients update Diff only.
 - When `agreement_lambda == 0`, the agreement term is skipped entirely (fast path).
  - Agreement is computed on aligned positions: AR positions 0..S-2 vs Diff positions S+1..2S-1
@@ -64,7 +65,8 @@ Config example (in `Config.yml` or model config):
 training:
   loss:
     alpha: 1.0              # equal weight AR/Diff
-    agreement_lambda: 0.0   # disabled by default; try 0.05-0.4 for speed focus
+  agreement_lambda: 0.0   # disabled by default; try 0.05-0.4 for speed focus
+  agreement_temperature: 1.0
 ```
 
 Stage-level overrides (optional):
@@ -78,11 +80,16 @@ stages:
     loss:
       alpha: 0.5
       agreement_lambda: 0.2
+      agreement_temperature: 1.0
 ```
 
 When a stage defines its own `loss` subsection, those `alpha` and
 `agreement_lambda` values replace the global defaults just for that stage.
 If a field is omitted, it falls back to `training.loss.*`.
+
+Alignment note:
+- Agreement KL compares AR positions 0..S-2 to Diff positions S+1..2S-1
+  so both sides predict token t+1.
 
 
 Suggested hyperparameters (acceptance/speed focused):
@@ -164,6 +171,12 @@ Aligned positions are used for diffusion:
 - Diffusion on masked half (aligned): predict `x[t]` at `S+t`.
 - Loss uses two masks (`loss_mask_ntp`, `loss_mask_diff`) and sums the means:
   `loss = mean(ntp) + mean(diff)`.
+
+### 5.5 Training acceptance metric
+- The training loop logs a theoretical acceptance probability computed from AR/Diff logits.
+- It is a probability in [0, 1], computed on the last batch row and top-k truncated.
+- For draft length K, expected accepted tokens per decode iter (greedy) is:
+  `1 + (K - 1) * acc_prob`.
 
 ### 5.4 Training attention bias (block diffusion)
 Function: `build_tidar_train_bias` in `TiDAR/model/tidar_masks.py`
@@ -260,6 +273,8 @@ Files: `TiDAR/model/Prepare_mask_token.py`, `TiDAR/model/tokenizer_utils.py`
 ## 9) Practical notes for future work
 - Training uses block diffusion (non-overlapping blocks) as implemented in
   `build_tidar_train_bias`.
+- Training loss/metrics are centralized in `TiDAR/model/Training_step.py` and
+  used by `TiDAR/model/Run_training.py`.
 - Inference assumes fixed `draft_len` (templates cached by `lru_cache`).
 - `NativeJaxSelfAttention` supports both standard AR cache updates and
   structured TiDAR decode bias with prefix masking.

@@ -104,6 +104,11 @@
 #let sweep4-diff = ((125, 15.5048), (250, 12.0599), (375, 7.6726), (500, 6.6817), (625, 5.9947), (750, 5.6723), (875, 5.7975), (1000, 5.5024), (1125, 5.4819), (1250, 5.4275), (1375, 5.4588), (1500, 5.1954), (1625, 5.3288), (1750, 5.2838), (1875, 5.3797), (2000, 5.1652), (2125, 5.0180), (2250, 4.9770), (2375, 4.9086), (2500, 4.9378), (2625, 4.6146), (2750, 4.7911), (2875, 4.6710), (3000, 4.0648))
 #let sweep4-acc = ((125, 0.0180), (250, 0.0340), (375, 0.1800), (500, 0.1910), (625, 0.2530), (750, 0.2410), (875, 0.2740), (1000, 0.3010), (1125, 0.2920), (1250, 0.3220), (1375, 0.3210), (1500, 0.3100), (1625, 0.3140), (1750, 0.2920), (1875, 0.3050), (2000, 0.3390), (2125, 0.2710), (2250, 0.2620), (2375, 0.2750), (2500, 0.2700), (2625, 0.3290), (2750, 0.3270), (2875, 0.3300), (3000, 0.2710))
 
+#let sweep5-loss = ((500, 4.9435), (1000, 4.4115), (1500, 4.1325), (2000, 3.9033), (2500, 3.9391), (3000, 3.8798), (3500, 4.0319), (4000, 4.0403), (4500, 4.1278), (5000, 3.6843), (5500, 3.6571), (6000, 3.6410), (6500, 3.2304), (7000, 3.2042))
+#let sweep5-ntp = ((500, 2.6744), (1000, 2.7333), (1500, 2.7530), (2000, 2.5921), (2500, 2.6510), (3000, 2.4947), (3500, 2.8360), (4000, 2.8672), (4500, 2.8422), (5000, 2.5903), (5500, 2.5163), (6000, 2.4677), (6500, 1.8466), (7000, 1.8458))
+#let sweep5-diff = ((500, 4.6202), (1000, 4.1220), (1500, 3.8980), (2000, 3.6746), (2500, 3.7260), (3000, 3.6251), (3500, 3.8600), (4000, 3.8635), (4500, 3.9294), (5000, 3.5178), (5500, 3.4660), (6000, 3.4144), (6500, 2.8889), (7000, 2.8895))
+#let sweep5-acc = ((500, 0.2190), (1000, 0.5530), (1500, 0.5750), (2000, 0.6070), (2500, 0.4250), (3000, 0.4500), (3500, 0.6300), (4000, 0.6190), (4500, 0.6120), (5000, 0.6430), (5500, 0.6400), (6000, 0.6310), (6500, 0.6230), (7000, 0.7650))
+
 #let sweep1-series = (
   (label: "Total", color: color-total, data: sweep1-loss),
   (label: "NTP", color: color-ntp, data: sweep1-ntp),
@@ -128,8 +133,14 @@
   (label: "Diff", color: color-diff, data: sweep4-diff),
   (label: "Acc", color: color-acc, data: sweep4-acc),
 )
+#let sweep5-series = (
+  (label: "Total", color: color-total, data: sweep5-loss),
+  (label: "NTP", color: color-ntp, data: sweep5-ntp),
+  (label: "Diff", color: color-diff, data: sweep5-diff),
+  (label: "Acc", color: color-acc, data: sweep5-acc),
+)
 
-= TiDAR Sweep 4 - smollm-135m loss trends
+= TiDAR Sweep 4-5 - smollm-135m loss trends
 
 == Setup
 
@@ -142,6 +153,7 @@ $L_(text("total")) = frac(alpha * L_(text("AR")) + L_(text("Diff")), 1 + alpha) 
 - Sweep 2: lr=5e-5, alpha=0.7, lambda=0.1, warmup=1,500, batch=8
 - Sweep 3: lr=3e-5, alpha=0.3, lambda=0.5, warmup=1,200, batch=8 (aggressive agreement)
 - Sweep 4: lr=1e-5, alpha=0.5, lambda=0.2, warmup=800, batch=32 (4x batch)
+- Sweep 5: lr=3e-5, alpha=0.2, lambda=0.8, KL temp=2.0, draft_len=2, ctx-mix (<=300M tokens)
 
 == Metric legend
 #metric-legend
@@ -174,8 +186,32 @@ $L_(text("total")) = frac(0.5 * L_(text("AR")) + L_(text("Diff")), 1.5) + 0.2 * 
 
 #multi-line-chart(sweep4-series, border: rgb(120, 210, 120))
 
+== Sweep 5 - Aggressive diffusion with KL temperature
+Mixed-context dataset with higher lambda and temperature-scaled KL. Draft length reduced to 2.
+
+$L_(text("total")) = frac(0.2 * L_(text("AR")) + L_(text("Diff")), 1.2) + 0.8 * text("KL")(p_(text("AR")) || p_(text("Diff")))$
+
+#multi-line-chart(sweep5-series, border: rgb(140, 160, 255))
+
+== Greedy inference acceptance (local checkpoints)
+Greedy decoding, temperature=0, top_k=0, stop_on_eos=false, prompt: "In a distant future, a curious robot loved math and".
+Approx acceptance probability: $(text("avg_accept/iter") - 1) / (K - 1)$.
+
+#table(
+  columns: (1.1fr, 1fr, 0.7fr, 1fr, 1fr),
+  [Sweep], [Checkpoint], [K], [Avg accept/iter], [Approx acc prob],
+  [Sweep 1], [step_0012298], [5], [4.85], [0.96],
+  [Sweep 2], [step_0012200], [5], [4.85], [0.96],
+  [Sweep 3], [step_0012200], [5], [4.85], [0.96],
+  [Sweep 4], [step_0003000], [5], [1.19], [0.05],
+  [Sweep 5], [step_0013903], [2], [1.21], [0.21],
+)
+
+Note: Sweeps 1-3 greedy outputs were largely empty/special tokens in this prompt, even though acceptance was high.
+
 == Takeaways
 - Sweep 1 reaches the lowest total loss, but acceptance stays moderate; it is a strong baseline for quality.
 - Sweep 2 balances loss and acceptance with a mild lambda, making it a likely candidate for higher acceptance without heavy degradation.
 - Sweep 3 emphasizes agreement too aggressively, producing higher total loss and lower acceptance gains.
 - Sweep 4 shows the most stable curve under large batches, so it is a good throughput-focused option.
+- Sweep 5 shows the highest training-time acceptance on the mixed-context run, but greedy inference acceptance still trails the best-case runs.

@@ -1,4 +1,4 @@
-# Anchor-TiDAR Code Notes (implementation-focused)
+# Anchor-TiDAR Implementation Notes
 
 This file documents the **current code paths** for Anchor-TiDAR inference and
 validation. It intentionally focuses on how the code is wired (functions,
@@ -11,7 +11,9 @@ shapes, masking, cache semantics) rather than re‑explaining TiDAR theory.
   - Sampling utilities (top‑k, temperature, rejection sampling).
   - KV cache helpers.
 - `TiDAR/model/inference.py`
-  - Main Anchor‑TiDAR decode loop and CLI.
+  - Main Anchor-TiDAR decode loop and CLI.
+- `TiDAR/model/Training_step.py`
+  - Shared training loss and acceptance metric logic.
 - `TiDAR/model/distributional_invariance_test.py`
   - Non‑greedy distributional invariance test vs pure AR baseline.
 
@@ -62,7 +64,7 @@ Important behavior:
   acceptance ratio `min(1, p/q)` with `p` and `q` derived from temperature/top‑k
   logits.
 
-## `inference.py` (Anchor‑TiDAR decode loop)
+## `inference.py` (Anchor-TiDAR decode loop)
 
 ### High‑level flow
 
@@ -118,6 +120,22 @@ Example (large N):
   --output_json /proj/giant-data/TiDAR/distributional_invariance/hello_t0p7_k50_n2000.json
 ```
 
+## Acceptance stats (greedy)
+
+When `--verbose` is enabled in `TiDAR/model/inference.py`, the stats include:
+
+- `avg_accept_per_iter`: average accepted tokens per decode iteration.
+
+Interpretation for draft length K (anchor is always accepted):
+
+```
+expected_accept_tokens = 1 + (K - 1) * acc_prob
+acc_prob ~= (avg_accept_per_iter - 1) / (K - 1)
+```
+
+This is a greedy decode measurement and is not the same as the training-time
+acceptance estimate, which is top-k truncated and computed on a single batch row.
+
 ## Quick CLI sanity checks
 
 - Greedy equivalence:
@@ -130,7 +148,7 @@ Example (large N):
   --temperature 0.0
 ```
 
-- Non‑greedy invariance (small N):
+- Non-greedy invariance (small N):
 ```
 /Users/antonhristov/v/SG/bin/python TiDAR/model/distributional_invariance_test.py \
   --checkpoint /proj/giant-data/TiDAR/smol/smollm-135m.npz \

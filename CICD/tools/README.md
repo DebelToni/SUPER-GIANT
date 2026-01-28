@@ -3,14 +3,17 @@
 S3 shell wrapper around `s5cmd` with a friendly interactive mode, tab completion,
 and a cold-path CLI for one-off commands.
 
-[If you are interested for what I use this tool so much, check out the main README of the repo!](../README.md)
-Consider leaving a star if you find it useful :)
+<br>
+
+If you are interested for what I use this tool so much, [check out the main README of the repo!](../README.md)
+
+Consider leaving a star ⭐️ if you find it useful :)
 
 <br>
 
 ## Requirements
 
-- `python3`
+- `python3` <- no libs!
 - `s5cmd` in your PATH
 - AWS credentials available via the standard AWS credential chain
   (env vars, AWS_PROFILE, ~/.aws, etc.)
@@ -49,7 +52,10 @@ alias s3="python3 /absolute/path/to/CICD/tools/s3.py --bucket giant-data"
 ## Default bucket
 
 By default, the bucket comes from `S3_BUCKET`. If it's not set, it falls back to
-`s3://giant-data`.
+`s3://giant-data`. 
+
+Change it to your default bucket name!
+
 If you want a different default on first use, pass `--bucket`:
 
 ```bash
@@ -130,4 +136,19 @@ Switch to local mode to use relative local paths:
 s3://giant-data/> local
 local:/Users/me/project> cp ../data/ s3://giant-data/TiDAR/
 local:/Users/me/project> s3
+```
+
+Pipe the output into any cli:
+
+```bash
+~/Documents❯ s3 cat /path/to/logs.json | jq
+```
+```json
+{
+  "tinystories_300m_512": {
+    "path": "/datasets/tinystories/config",
+    "sequence_length": 512,
+    "target_tokens": 300000000
+  }
+}
 ```

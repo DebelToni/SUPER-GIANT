@@ -7,16 +7,19 @@ import shutil
 import subprocess
 import sys
 import readline
-from collections import deque
+import time
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import PurePosixPath
+from functools import lru_cache
+from pathlib import Path, PurePosixPath
 from typing import Iterable, List, Optional, Tuple
 
 
-REQUIRED_ENV = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "S3_ENDPOINT_URL"]
 DEFAULT_BUCKET_URI = "s3://giant-data"
 DIR_MARKER = ".s3dir"
+TAB_CACHE_TTL_SECONDS = 1.0
+TAB_CACHE_MAX_ENTRIES = 512
 LS_FILE_RE = re.compile(
     r"^(?P<date>\d{4}/\d{2}/\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+(?P<size>\d+)\s+(?P<key>.+)$"
 )
@@ -29,10 +32,29 @@ def die(message: str, code: int = 1) -> None:
 
 
 def check_env() -> str:
-    missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
-    if missing:
-        die("Missing required env vars: " + ", ".join(missing))
-    endpoint = os.environ.get("S3_ENDPOINT_URL", "")
+    endpoint = (os.environ.get("S3_ENDPOINT_URL", "") or "").strip()
+    endpoint = endpoint.rstrip("/")
+
+    cred_hints: List[str] = []
+    if os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY"):
+        cred_hints.append("AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY")
+    if os.environ.get("AWS_PROFILE"):
+        cred_hints.append("AWS_PROFILE")
+    aws_creds = os.path.expanduser("~/.aws/credentials")
+    aws_cfg = os.path.expanduser("~/.aws/config")
+    if os.path.exists(aws_creds) or os.path.exists(aws_cfg):
+        cred_hints.append("~/.aws/{config,credentials}")
+    if os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE"):
+        cred_hints.append("AWS_WEB_IDENTITY_TOKEN_FILE")
+    if os.environ.get("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") or os.environ.get(
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI"
+    ):
+        cred_hints.append("container credentials")
+    if not cred_hints:
+        sys.stderr.write(
+            "Note: no explicit AWS credential hints found in env or ~/.aws; "
+            "relying on the default AWS credential provider chain.\n"
+        )
     return endpoint
 
 
@@ -102,6 +124,16 @@ def run_s5cmd_passthrough(args: List[str], endpoint: str) -> None:
         die("s5cmd failed")
 
 
+# --- ANSI color helpers (only enabled in interactive shell mode) ---
+ANSI_RESET = "\x1b[0m"
+ANSI_BOLD = "\x1b[1m"
+ANSI_BLUE = "\x1b[34m"
+ANSI_GREEN = "\x1b[32m"
+ANSI_CYAN = "\x1b[36m"
+ANSI_YELLOW = "\x1b[33m"
+ANSI_MAGENTA = "\x1b[35m"
+
+
 def open_s5cmd_stream(args: List[str], endpoint: str) -> subprocess.Popen:
     cmd = s5cmd_base(endpoint) + args
     return subprocess.Popen(
@@ -117,6 +149,10 @@ class ShellState:
     bucket: str
     endpoint: str
     cwd: PurePosixPath
+    cache: "DirCache"
+    interactive: bool
+    local_cwd: Path
+    mode: str
 
 
 @dataclass
@@ -126,6 +162,40 @@ class LsEntry:
     size: Optional[int]
     mtime: Optional[datetime]
     is_dir: bool
+
+
+@dataclass
+class _DirCacheValue:
+    at_monotonic: float
+    entries: List[LsEntry]
+
+
+class DirCache:
+    def __init__(self, ttl_seconds: float, max_entries: int) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
+        self._data: "OrderedDict[tuple[str, str], _DirCacheValue]" = OrderedDict()
+
+    def get(self, bucket: str, prefix: PurePosixPath) -> Optional[List[LsEntry]]:
+        key = (bucket, prefix.as_posix())
+        item = self._data.get(key)
+        if item is None:
+            return None
+        if (time.monotonic() - item.at_monotonic) > self.ttl_seconds:
+            self._data.pop(key, None)
+            return None
+        self._data.move_to_end(key)
+        return item.entries
+
+    def put(self, bucket: str, prefix: PurePosixPath, entries: List[LsEntry]) -> None:
+        key = (bucket, prefix.as_posix())
+        self._data[key] = _DirCacheValue(at_monotonic=time.monotonic(), entries=entries)
+        self._data.move_to_end(key)
+        while len(self._data) > self.max_entries:
+            self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        self._data.clear()
 
 
 @dataclass
@@ -170,6 +240,13 @@ def resolve_prefix(state: ShellState, raw: str) -> PurePosixPath:
     if raw.startswith("/"):
         return normalize_posix(PurePosixPath("/") / raw.lstrip("/"))
     return normalize_posix(state.cwd / raw)
+
+
+def resolve_local_path(state: ShellState, raw: str) -> str:
+    expanded = os.path.expanduser(raw)
+    if os.path.isabs(expanded):
+        return os.path.abspath(expanded)
+    return os.path.abspath(os.path.join(state.local_cwd.as_posix(), expanded))
 
 
 def parse_ls_args(args: List[str]) -> Tuple[int, str]:
@@ -220,6 +297,8 @@ def parse_ls_output(output: str, base: PurePosixPath) -> List[LsEntry]:
         dir_match = LS_DIR_RE.match(line)
         if dir_match:
             name = dir_match.group("key").rstrip("/")
+            if name == DIR_MARKER:
+                continue
             entries.append(
                 LsEntry(
                     name=name,
@@ -234,6 +313,8 @@ def parse_ls_output(output: str, base: PurePosixPath) -> List[LsEntry]:
         if not file_match:
             continue
         name = file_match.group("key")
+        if name == DIR_MARKER:
+            continue
         mtime = datetime.strptime(
             f"{file_match.group('date')} {file_match.group('time')}",
             "%Y/%m/%d %H:%M:%S",
@@ -257,11 +338,18 @@ def list_dir(state: ShellState, prefix: PurePosixPath) -> List[LsEntry]:
 
 
 def list_dir_quiet(state: ShellState, prefix: PurePosixPath) -> List[LsEntry]:
+    cached = state.cache.get(state.bucket, prefix)
+    if cached is not None:
+        return cached
     uri = s3_uri_for_prefix(state, prefix)
     output = run_s5cmd(["ls", uri], state.endpoint, allow_missing=True)
     if not output.strip():
-        return []
-    return parse_ls_output(output, prefix)
+        entries: List[LsEntry] = []
+        state.cache.put(state.bucket, prefix, entries)
+        return entries
+    entries = parse_ls_output(output, prefix)
+    state.cache.put(state.bucket, prefix, entries)
+    return entries
 
 
 def list_dir_quiet_bucket(
@@ -373,7 +461,53 @@ def flatten_nodes(nodes: List[TreeNode]) -> Iterable[LsEntry]:
         yield from flatten_nodes(node.children)
 
 
-def format_entries(entries: List[LsEntry], prefix_map: Optional[dict] = None) -> List[str]:
+def _supports_color(state: ShellState) -> bool:
+    if not state.interactive:
+        return False
+    if not sys.stdout.isatty():
+        return False
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    term = (os.environ.get("TERM", "") or "").lower()
+    if term in ("dumb", ""):
+        return False
+    return True
+
+
+@lru_cache(maxsize=512)
+def _ext_style(ext: str) -> str:
+    ext = ext.lower()
+    if ext in (".py", ".sh", ".bash", ".zsh", ".fish", ".ps1"):
+        return ANSI_GREEN
+    if ext in (".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"):
+        return ANSI_YELLOW
+    if ext in (".txt", ".md", ".rst", ".log"):
+        return ANSI_CYAN
+    if ext in (".parquet", ".arrow", ".feather", ".csv", ".tsv"):
+        return ANSI_MAGENTA
+    if ext in (".zip", ".tar", ".gz", ".bz2", ".xz", ".zst"):
+        return ANSI_YELLOW
+    return ""
+
+
+def _colorize_name(entry: LsEntry, name: str, enable: bool) -> str:
+    if not enable:
+        return name
+    if entry.is_dir:
+        return f"{ANSI_BLUE}{ANSI_BOLD}{name}{ANSI_RESET}"
+    ext = PurePosixPath(entry.name).suffix
+    style = _ext_style(ext)
+    if style:
+        return f"{style}{name}{ANSI_RESET}"
+    return name
+
+
+def format_entries(
+    entries: List[LsEntry],
+    prefix_map: Optional[dict] = None,
+    *,
+    colorize: bool = False,
+) -> List[str]:
     now = datetime.now(timezone.utc)
     size_width = max((len(human_size(entry.size)) for entry in entries), default=1)
     age_width = max((len(human_age(entry.mtime, now)) for entry in entries), default=1)
@@ -382,16 +516,17 @@ def format_entries(entries: List[LsEntry], prefix_map: Optional[dict] = None) ->
         size_str = human_size(entry.size)
         age_str = human_age(entry.mtime, now)
         name = entry.name + ("/" if entry.is_dir else "")
+        name_disp = _colorize_name(entry, name, colorize)
         prefix = ""
         if prefix_map is not None:
             prefix = prefix_map.get(entry.key.as_posix(), "")
         lines.append(
-            f"{size_str:>{size_width}} {age_str:>{age_width}} {prefix}{name}".rstrip()
+            f"{size_str:>{size_width}} {age_str:>{age_width}} {prefix}{name_disp}".rstrip()
         )
     return lines
 
 
-def render_tree(nodes: List[TreeNode]) -> List[str]:
+def render_tree(nodes: List[TreeNode], *, colorize: bool = False) -> List[str]:
     prefix_map: dict = {}
 
     def walk(children: List[TreeNode], prefix: str) -> None:
@@ -405,19 +540,90 @@ def render_tree(nodes: List[TreeNode]) -> List[str]:
 
     walk(nodes, "")
     entries = list(flatten_nodes(nodes))
-    return format_entries(entries, prefix_map=prefix_map)
+    return format_entries(entries, prefix_map=prefix_map, colorize=colorize)
 
 
 def cmd_ls(state: ShellState, args: List[str]) -> None:
     depth, raw_path = parse_ls_args(args)
     prefix = resolve_prefix(state, raw_path)
+    colorize = _supports_color(state)
     if depth == 1:
         entries = sort_entries(list_dir(state, prefix))
-        for line in format_entries(entries):
+        for line in format_entries(entries, colorize=colorize):
             print(line)
         return
     nodes = build_tree(state, prefix, depth)
-    for line in render_tree(nodes):
+    for line in render_tree(nodes, colorize=colorize):
+        print(line)
+
+
+def list_local_entries(path: str) -> List[LsEntry]:
+    if os.path.isdir(path):
+        entries: List[LsEntry] = []
+        base = Path(path)
+        for entry in os.scandir(path):
+            try:
+                stat = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            is_dir = entry.is_dir(follow_symlinks=False)
+            size = None if is_dir else stat.st_size
+            key = PurePosixPath(base.as_posix()) / entry.name
+            entries.append(
+                LsEntry(
+                    name=entry.name,
+                    key=key,
+                    size=size,
+                    mtime=mtime,
+                    is_dir=is_dir,
+                )
+            )
+        return entries
+    if os.path.exists(path):
+        stat = os.stat(path)
+        mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        base = Path(path)
+        return [
+            LsEntry(
+                name=base.name,
+                key=PurePosixPath(base.as_posix()),
+                size=stat.st_size,
+                mtime=mtime,
+                is_dir=False,
+            )
+        ]
+    die(f"ls: {path} not found")
+    return []
+
+
+def build_local_tree(path: str, depth: int) -> List[TreeNode]:
+    entries = list_local_entries(path)
+    nodes: List[TreeNode] = []
+    for entry in entries:
+        children: List[TreeNode] = []
+        if entry.is_dir and depth > 1:
+            child_path = os.path.join(path, entry.name)
+            children = build_local_tree(child_path, depth - 1)
+            latest = max_mtime(children)
+            if latest and (entry.mtime is None or latest > entry.mtime):
+                entry.mtime = latest
+        nodes.append(TreeNode(entry=entry, children=children))
+    return sort_nodes(nodes)
+
+
+def cmd_ls_local(state: ShellState, args: List[str]) -> None:
+    depth, raw_path = parse_ls_args(args)
+    target = raw_path or "."
+    abs_path = resolve_local_path(state, target)
+    colorize = _supports_color(state)
+    if depth == 1:
+        entries = sort_entries(list_local_entries(abs_path))
+        for line in format_entries(entries, colorize=colorize):
+            print(line)
+        return
+    nodes = build_local_tree(abs_path, depth)
+    for line in render_tree(nodes, colorize=colorize):
         print(line)
 
 
@@ -552,11 +758,14 @@ def resolve_s3_target(state: ShellState, raw: str) -> Tuple[str, PurePosixPath]:
 def classify_path(state: ShellState, raw: str) -> Tuple[str, str]:
     if raw.startswith("s3://"):
         return "s3", raw
+    if state.mode == "local":
+        return "local", resolve_local_path(state, raw)
     if raw in (".", ".."):
-        return "local", raw
+        return "local", resolve_local_path(state, raw)
     if raw.startswith(("/", "./", "../", "~")):
-        return "local", os.path.expanduser(raw)
-    if os.path.exists(raw):
+        return "local", resolve_local_path(state, raw)
+    local_candidate = resolve_local_path(state, raw)
+    if os.path.exists(local_candidate):
         die(
             "Ambiguous path: use ./ or / for local paths, or s3:// for S3 paths"
         )
@@ -614,6 +823,9 @@ def cmd_cp(state: ShellState, args: List[str]) -> None:
     if src_type == "local" and dst_type == "local":
         die("cp requires at least one S3 path")
 
+    if dst_type == "s3" and dst_raw.endswith("/") and not dst.endswith("/"):
+        dst += "/"
+
     if src_type == "local":
         if os.path.isdir(src):
             src = src.rstrip(os.sep) + os.sep
@@ -629,6 +841,35 @@ def cmd_cp(state: ShellState, args: List[str]) -> None:
                 os.makedirs(dst, exist_ok=True)
 
     run_s5cmd(["cp", *options, src, dst], state.endpoint)
+    state.cache.clear()
+
+
+def cmd_mv(state: ShellState, args: List[str]) -> None:
+    options, src_raw, dst_raw = parse_cp_args(args)
+    src_type, src = classify_path(state, src_raw)
+    dst_type, dst = classify_path(state, dst_raw)
+    if src_type == "local" and dst_type == "local":
+        die("mv requires at least one S3 path")
+
+    if dst_type == "s3" and dst_raw.endswith("/") and not dst.endswith("/"):
+        dst += "/"
+
+    if src_type == "local":
+        if os.path.isdir(src):
+            src = src.rstrip(os.sep) + os.sep
+            if dst_type == "s3" and not dst.endswith("/"):
+                dst += "/"
+    else:
+        is_prefix = src_raw.endswith("/") or s3_prefix_has_children(state, src)
+        if is_prefix:
+            src = src.rstrip("/") + "/*"
+            if dst_type == "s3" and not dst.endswith("/"):
+                dst += "/"
+            if dst_type == "local":
+                os.makedirs(dst, exist_ok=True)
+
+    run_s5cmd(["mv", *options, src, dst], state.endpoint)
+    state.cache.clear()
 
 
 def parse_sync_args(args: List[str]) -> Tuple[bool, List[str], str, str]:
@@ -671,34 +912,45 @@ def cmd_sync(state: ShellState, args: List[str]) -> None:
         options = ["--size-only", *options]
 
     run_s5cmd(["sync", *options, src, dst], state.endpoint)
+    state.cache.clear()
 
 
 def print_help() -> None:
     print(
-        "Commands: ls, du, rm, mkdir, cat, head, tail, cp, sync, cd, pwd, help, exit, quit"
+        "Commands: ls, du, rm, mkdir, cat, head, tail, cp, mv, sync, cd, pwd, local, s3, clear, help, exit, quit"
     )
 
 
-def complete_local_paths(text: str) -> List[str]:
+def complete_local_paths(text: str, base_cwd: Path) -> List[str]:
     expanded = os.path.expanduser(text)
-    base = expanded
+    is_abs = os.path.isabs(expanded)
+    abs_path = expanded if is_abs else os.path.join(base_cwd.as_posix(), expanded)
+    base = abs_path
     prefix = ""
-    if os.path.isdir(expanded):
-        base = expanded
+    display_base = text
+    if os.path.isdir(abs_path):
+        base = abs_path
+        prefix = ""
+        display_base = text
     else:
-        base = os.path.dirname(expanded) or "."
+        base = os.path.dirname(abs_path) or base_cwd.as_posix()
         prefix = os.path.basename(expanded)
+        display_base = os.path.dirname(text)
     try:
         entries = os.listdir(base)
     except OSError:
         return []
-    results = []
+    results: List[str] = []
     for entry in entries:
         if prefix and not entry.startswith(prefix):
             continue
         full = os.path.join(base, entry)
         suffix = "/" if os.path.isdir(full) else ""
-        display = os.path.join(os.path.dirname(text), entry) if os.path.dirname(text) else entry
+        if display_base:
+            joiner = "" if display_base.endswith("/") else "/"
+            display = f"{display_base}{joiner}{entry}"
+        else:
+            display = entry
         results.append(display + suffix)
     return sorted(results)
 
@@ -760,9 +1012,13 @@ def make_completer(state: ShellState):
         "head",
         "tail",
         "cp",
+        "mv",
         "sync",
         "cd",
         "pwd",
+        "local",
+        "s3",
+        "clear",
         "help",
         "exit",
         "quit",
@@ -776,21 +1032,47 @@ def make_completer(state: ShellState):
             tokens = shlex.split(before)
         except ValueError:
             tokens = before.split()
+        token_prefix = ""
+        if before and not before[-1].isspace():
+            if tokens:
+                token_prefix = tokens[-1]
+            else:
+                token_prefix = before
+        full_token = token_prefix + text
+
+        def strip_prefix(matches: List[str]) -> List[str]:
+            if not token_prefix:
+                return matches
+            stripped: List[str] = []
+            for match in matches:
+                if match.startswith(token_prefix):
+                    stripped.append(match[len(token_prefix) :])
+                else:
+                    stripped.append(match)
+            return stripped
+
         options: List[str] = []
         if begidx == 0 or not tokens:
             options = [cmd for cmd in commands if cmd.startswith(text)]
         else:
             cmd = tokens[0]
-            local_hint = text in (".", "..") or text.startswith(("/", "./", "../", "~"))
-            if cmd in ("cp", "sync"):
-                if text.startswith("s3://"):
-                    options = complete_s3_paths(state, text)
-                elif local_hint:
-                    options = complete_local_paths(text)
+            local_hint = full_token in (".", "..") or full_token.startswith(
+                ("/", "./", "../", "~")
+            )
+            if cmd in ("cp", "mv", "sync"):
+                if full_token.startswith("s3://"):
+                    options = complete_s3_paths(state, full_token)
+                elif state.mode == "local" or local_hint:
+                    options = complete_local_paths(full_token, state.local_cwd)
                 else:
-                    options = complete_s3_paths(state, text)
+                    options = complete_s3_paths(state, full_token)
+                options = strip_prefix(options)
             elif cmd in ("cd", "ls", "du", "rm", "mkdir", "cat", "head", "tail"):
-                options = complete_s3_paths(state, text)
+                if state.mode == "local":
+                    options = complete_local_paths(full_token, state.local_cwd)
+                else:
+                    options = complete_s3_paths(state, full_token)
+                options = strip_prefix(options)
         if idx < len(options):
             return options[idx]
         return None
@@ -802,9 +1084,15 @@ def shell_loop(state: ShellState) -> None:
     setup_readline()
     readline.set_completer(make_completer(state))
     while True:
-        prompt = f"s3://{state.bucket}{state.cwd.as_posix()}> "
+        if state.mode == "local":
+            prompt = f"local:{state.local_cwd}> "
+        else:
+            prompt = f"s3://{state.bucket}{state.cwd.as_posix()}> "
         try:
             line = input(prompt)
+        except KeyboardInterrupt:
+            print()
+            break
         except EOFError:
             print()
             break
@@ -824,29 +1112,68 @@ def shell_loop(state: ShellState) -> None:
             print_help()
             continue
         if cmd == "pwd":
-            print(state.cwd.as_posix())
+            if state.mode == "local":
+                print(state.local_cwd)
+            else:
+                print(state.cwd.as_posix())
+            continue
+        if cmd == "local":
+            if cmd_args:
+                die("local takes no arguments")
+            state.mode = "local"
+            continue
+        if cmd == "s3":
+            if cmd_args:
+                die("s3 takes no arguments")
+            state.mode = "s3"
+            continue
+        if cmd == "clear":
+            cmd_clear(cmd_args)
             continue
         if cmd == "cd":
             target = cmd_args[0] if cmd_args else "/"
-            state.cwd = resolve_prefix(state, target)
+            if state.mode == "local":
+                new_path = resolve_local_path(state, target)
+                if not os.path.isdir(new_path):
+                    die(f"cd: {new_path} not a directory")
+                state.local_cwd = Path(new_path)
+            else:
+                state.cwd = resolve_prefix(state, target)
             continue
         try:
             if cmd == "ls":
-                cmd_ls(state, cmd_args)
+                if state.mode == "local":
+                    cmd_ls_local(state, cmd_args)
+                else:
+                    cmd_ls(state, cmd_args)
             elif cmd == "du":
+                if state.mode == "local":
+                    die("du only works in s3 mode; use 's3' to switch")
                 cmd_du(state, cmd_args)
             elif cmd == "rm":
+                if state.mode == "local":
+                    die("rm only works in s3 mode; use 's3' to switch")
                 cmd_rm(state, cmd_args)
             elif cmd == "mkdir":
+                if state.mode == "local":
+                    die("mkdir only works in s3 mode; use 's3' to switch")
                 cmd_mkdir(state, cmd_args)
             elif cmd == "cat":
+                if state.mode == "local":
+                    die("cat only works in s3 mode; use 's3' to switch")
                 cmd_cat(state, cmd_args)
             elif cmd == "head":
+                if state.mode == "local":
+                    die("head only works in s3 mode; use 's3' to switch")
                 cmd_head(state, cmd_args)
             elif cmd == "tail":
+                if state.mode == "local":
+                    die("tail only works in s3 mode; use 's3' to switch")
                 cmd_tail(state, cmd_args)
             elif cmd == "cp":
                 cmd_cp(state, cmd_args)
+            elif cmd == "mv":
+                cmd_mv(state, cmd_args)
             elif cmd == "sync":
                 cmd_sync(state, cmd_args)
             else:
@@ -857,7 +1184,7 @@ def shell_loop(state: ShellState) -> None:
 
 def setup_readline() -> None:
     doc = readline.__doc__ or ""
-    readline.set_completer_delims(" \t\n")
+    readline.set_completer_delims(" \t\n/")
     if "libedit" in doc:
         readline.parse_and_bind("bind ^I rl_complete")
         readline.parse_and_bind('bind "\\e[Z" rl_complete')
@@ -882,6 +1209,14 @@ def cmd_mkdir(state: ShellState, args: List[str]) -> None:
         marker_key = key.rstrip("/") + "/" + DIR_MARKER
         uri = build_s3_uri(bucket, marker_key)
         run_s5cmd_input(["pipe", uri], state.endpoint, data=b"")
+        state.cache.clear()
+
+
+def cmd_clear(args: List[str]) -> None:
+    if args:
+        die("clear takes no arguments")
+    sys.stdout.write("\033[H\033[J")
+    sys.stdout.flush()
 
 
 def cmd_cat(state: ShellState, args: List[str]) -> None:
@@ -937,22 +1272,54 @@ def cmd_tail(state: ShellState, args: List[str]) -> None:
 
 
 def cmd_rm(state: ShellState, args: List[str]) -> None:
-    _, targets = parse_rm_args(args)
+    recursive, targets = parse_rm_args(args)
     if not targets:
         die("rm requires at least one path")
     for raw in targets:
-        is_dir = raw.endswith("/")
-        base_uri = resolve_s3_uri(state, raw)
-        if not is_dir:
-            prefix_uri = base_uri.rstrip("/") + "/"
-            output = run_s5cmd(["ls", prefix_uri], state.endpoint, allow_missing=True)
-            if output.strip():
-                is_dir = True
-        if is_dir:
-            contents_uri = base_uri.rstrip("/") + "/" + "*"
+        explicit_prefix = raw.endswith("/")
+        base_uri = resolve_s3_uri(state, raw).rstrip("/")
+
+        if explicit_prefix:
+            if not recursive:
+                sys.stderr.write(
+                    f"rm: refusing to delete prefix '{raw}' without -r (use: rm -r {raw})\n"
+                )
+                continue
+            contents_uri = base_uri + "/*"
             run_s5cmd(["rm", contents_uri], state.endpoint, allow_missing=True)
-        else:
+            state.cache.clear()
+            continue
+
+        file_probe = run_s5cmd(["ls", base_uri], state.endpoint, allow_missing=True)
+        file_exists = bool(file_probe.strip())
+
+        prefix_uri = base_uri + "/"
+        prefix_probe = run_s5cmd(["ls", prefix_uri], state.endpoint, allow_missing=True)
+        prefix_has_children = bool(prefix_probe.strip())
+
+        if file_exists:
+            if recursive and prefix_has_children:
+                sys.stderr.write(
+                    f"rm: note: '{raw}' also has children as a prefix; "
+                    f"to delete recursively use: rm -r {raw}/\n"
+                )
             run_s5cmd(["rm", base_uri], state.endpoint)
+            state.cache.clear()
+            continue
+
+        if prefix_has_children:
+            if not recursive:
+                sys.stderr.write(
+                    f"rm: refusing to delete prefix '{raw}/' without -r (use: rm -r {raw}/)\n"
+                )
+                continue
+            contents_uri = base_uri + "/*"
+            run_s5cmd(["rm", contents_uri], state.endpoint, allow_missing=True)
+            state.cache.clear()
+            continue
+
+        run_s5cmd(["rm", base_uri], state.endpoint)
+        state.cache.clear()
 
 
 def main() -> None:
@@ -960,11 +1327,21 @@ def main() -> None:
     endpoint = check_env()
     args, rest = parse_args()
     bucket = normalize_bucket(args.bucket)
-    state = ShellState(bucket=bucket, endpoint=endpoint, cwd=PurePosixPath("/"))
+    cache = DirCache(ttl_seconds=TAB_CACHE_TTL_SECONDS, max_entries=TAB_CACHE_MAX_ENTRIES)
+    state = ShellState(
+        bucket=bucket,
+        endpoint=endpoint,
+        cwd=PurePosixPath("/"),
+        cache=cache,
+        interactive=False,
+        local_cwd=Path.cwd(),
+        mode="s3",
+    )
 
     command = rest[0] if rest else None
     command_args = rest[1:] if len(rest) > 1 else []
     if command:
+        state.interactive = False
         if command == "ls":
             cmd_ls(state, command_args)
             return
@@ -986,14 +1363,21 @@ def main() -> None:
         if command == "tail":
             cmd_tail(state, command_args)
             return
+        if command == "clear":
+            cmd_clear(command_args)
+            return
         if command == "cp":
             cmd_cp(state, command_args)
+            return
+        if command == "mv":
+            cmd_mv(state, command_args)
             return
         if command == "sync":
             cmd_sync(state, command_args)
             return
         die(f"Unknown command: {command}")
 
+    state.interactive = True
     shell_loop(state)
 
 

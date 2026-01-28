@@ -15,20 +15,57 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Iterable, List, Optional, Tuple
 
-
-DEFAULT_BUCKET_URI = "s3://giant-data"
+# SET YOUR FAVORITE DEFAULT BUCKET HERE
+DEFAULT_BUCKET_ENV = "S3_BUCKET"
+DEFAULT_BUCKET_FALLBACK = "giant-data"
 DIR_MARKER = ".s3dir"
 TAB_CACHE_TTL_SECONDS = 1.0
 TAB_CACHE_MAX_ENTRIES = 512
+HELP_HEADER = "Amazing, fast S3 shell wrapper on top of s5cmd (no Python deps)."
+HELP_BODY = """Commands:
+  ls [path]            list objects (use -R/--tree or --depth)
+  du [path]            show disk usage in S3
+  rm [-r] path          remove object or prefix (S3 only)
+  mkdir [-p] path       create prefix marker (S3 only)
+  cat path              print object contents (S3 only)
+  head [-n N] path       first N lines (S3 only)
+  tail [-n N] path       last N lines (S3 only)
+  cp src dst            copy between local/S3
+  mv src dst            move between local/S3 or S3/S3
+  sync [--true-sync]     sync between local/S3
+  cd [path]             change directory (local or S3 mode)
+  pwd                   print current directory
+  local                 switch to local filesystem mode
+  s3                    switch to S3 mode
+  clear                 clear the screen
+  help                  show this help
+  exit | quit | ctrl+c    exit the shell
+
+Notes:
+  You can pass any s5cmd flags to cp/mv/sync/du as needed.
+"""
 LS_FILE_RE = re.compile(
     r"^(?P<date>\d{4}/\d{2}/\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+(?P<size>\d+)\s+(?P<key>.+)$"
 )
 LS_DIR_RE = re.compile(r"^\s*DIR\s+(?P<key>.+)$")
+_GLOB = re.compile(r"[\*\?\[]")
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_OSC = re.compile(r"\x1b\].*?\x07")
+_ESC = re.compile(r"\x1b.")
 
 
 def die(message: str, code: int = 1) -> None:
     sys.stderr.write(message.rstrip() + "\n")
     raise SystemExit(code)
+
+
+def safe_tty(s: str) -> str:
+    s = _OSC.sub("", s)
+    s = _ANSI.sub("", s)
+    s = _ESC.sub("", s)
+    s = _CTRL.sub("?", s)
+    return s
 
 
 def check_env() -> str:
@@ -66,6 +103,13 @@ def normalize_bucket(value: str) -> str:
     if not bucket:
         die("Bucket name cannot be empty")
     return bucket
+
+
+def default_bucket_from_env() -> Optional[str]:
+    value = os.environ.get(DEFAULT_BUCKET_ENV)
+    if value:
+        return value
+    return DEFAULT_BUCKET_FALLBACK
 
 
 def build_s3_uri(bucket: str, key: str) -> str:
@@ -210,11 +254,16 @@ def ensure_s5cmd() -> None:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> Tuple[argparse.Namespace, List[str]]:
-    parser = argparse.ArgumentParser(description="S3 shell using s5cmd")
+    parser = argparse.ArgumentParser(
+        description=HELP_HEADER,
+        epilog=HELP_BODY,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    default_bucket = default_bucket_from_env()
     parser.add_argument(
         "--bucket",
-        default=DEFAULT_BUCKET_URI,
-        help="Bucket name or s3:// URI (default: s3://giant-data)",
+        default=default_bucket,
+        help=f"Bucket name or s3:// URI (default: ${DEFAULT_BUCKET_ENV} or {DEFAULT_BUCKET_FALLBACK})",
     )
     return parser.parse_known_args(argv)
 
@@ -240,6 +289,28 @@ def resolve_prefix(state: ShellState, raw: str) -> PurePosixPath:
     if raw.startswith("/"):
         return normalize_posix(PurePosixPath("/") / raw.lstrip("/"))
     return normalize_posix(state.cwd / raw)
+
+
+def has_glob(path: str) -> bool:
+    return bool(_GLOB.search(path))
+
+
+def glob_base(key: str) -> str:
+    match = _GLOB.search(key)
+    if not match:
+        return key
+    prefix = key[: match.start()]
+    if "/" in prefix:
+        return prefix.rsplit("/", 1)[0]
+    return ""
+
+
+def build_s3_uri_from_raw(state: ShellState, raw: str) -> str:
+    if raw.startswith("s3://"):
+        return raw
+    prefix = resolve_prefix(state, raw)
+    key = prefix.as_posix().lstrip("/")
+    return build_s3_uri(state.bucket, key)
 
 
 def resolve_local_path(state: ShellState, raw: str) -> str:
@@ -515,7 +586,8 @@ def format_entries(
     for entry in entries:
         size_str = human_size(entry.size)
         age_str = human_age(entry.mtime, now)
-        name = entry.name + ("/" if entry.is_dir else "")
+        safe_name = safe_tty(entry.name)
+        name = safe_name + ("/" if entry.is_dir else "")
         name_disp = _colorize_name(entry, name, colorize)
         prefix = ""
         if prefix_map is not None:
@@ -547,6 +619,23 @@ def cmd_ls(state: ShellState, args: List[str]) -> None:
     depth, raw_path = parse_ls_args(args)
     prefix = resolve_prefix(state, raw_path)
     colorize = _supports_color(state)
+    if raw_path and has_glob(raw_path):
+        if depth != 1:
+            die("ls with wildcards does not support tree view")
+        uri = build_s3_uri_from_raw(state, raw_path)
+        output = run_s5cmd(["ls", uri], state.endpoint, allow_missing=True)
+        if not output.strip():
+            return
+        if raw_path.startswith("s3://"):
+            _, key = split_s3_uri(raw_path)
+        else:
+            key = resolve_prefix(state, raw_path).as_posix().lstrip("/")
+        base_key = glob_base(key)
+        base = PurePosixPath("/" + base_key) if base_key else PurePosixPath("/")
+        entries = sort_entries(parse_ls_output(output, base))
+        for line in format_entries(entries, colorize=colorize):
+            print(line)
+        return
     if depth == 1:
         entries = sort_entries(list_dir(state, prefix))
         for line in format_entries(entries, colorize=colorize):
@@ -916,9 +1005,8 @@ def cmd_sync(state: ShellState, args: List[str]) -> None:
 
 
 def print_help() -> None:
-    print(
-        "Commands: ls, du, rm, mkdir, cat, head, tail, cp, mv, sync, cd, pwd, local, s3, clear, help, exit, quit"
-    )
+    print(HELP_HEADER)
+    print(HELP_BODY.rstrip())
 
 
 def complete_local_paths(text: str, base_cwd: Path) -> List[str]:
@@ -1326,6 +1414,10 @@ def main() -> None:
     ensure_s5cmd()
     endpoint = check_env()
     args, rest = parse_args()
+    if not args.bucket:
+        die(
+            "No default bucket set. Provide --bucket or set S3_BUCKET/AWS_S3_BUCKET/AWS_BUCKET."
+        )
     bucket = normalize_bucket(args.bucket)
     cache = DirCache(ttl_seconds=TAB_CACHE_TTL_SECONDS, max_entries=TAB_CACHE_MAX_ENTRIES)
     state = ShellState(

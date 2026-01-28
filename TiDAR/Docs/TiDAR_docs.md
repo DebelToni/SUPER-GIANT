@@ -411,3 +411,10 @@ in all-zero loss masks, which caused NaN propagation through attention.
 Checkpoint sanity:
 - `step_0012100.npz` is finite (safe resume point)
 - `step_0012200.npz` and later contained NaNs (do not resume)
+
+---
+
+## 11) Sweep data relocation (Jan 28, 2026)
+- Moved sweep 1-4 datasets under `TiDAR/Sweep/Data/sweeps_1-4/`.
+- Flattened `TiDAR/Sweep/Data/sweep_5_300m_ctxmix/` by removing the nested duplicate folder level.
+- Updated sweeps 1-4 configs to use `training.dataset_dir: "Sweep/Data/sweeps_1-4"`.

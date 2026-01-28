@@ -563,7 +563,7 @@ def main() -> None:
         def body(carry, batch):
             params, opt_state, step, accum_grads, accum_count = carry
             dropout_rng = jax.random.fold_in(base_rng, step)
-            compute_accept = (step + 1) % log_every == 0
+            compute_accept = jnp.logical_or(step == 0, (step + 1) % log_every == 0)
 
             (loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)), grads = loss_and_grad(
                 params,
@@ -739,7 +739,7 @@ def main() -> None:
                 accept_val = float(losses[offset, 4]) if losses.shape[1] > 4 else 0.0
                 last_loss = loss_val
                 step_val = chunk_start + offset
-                if step_val % log_every == 0:
+                if step_val == 1 or step_val % log_every == 0:
                     elapsed = time.time() - start
                     log_msg = (
                         f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
@@ -754,6 +754,7 @@ def main() -> None:
                     log_file.write(log_msg + "\n")
                     log_file.flush()
                     start = time.time()
+
 
             if mini_every and (global_step % mini_every == 0):
                 mini_state = {

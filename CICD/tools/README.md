@@ -3,11 +3,14 @@
 S3 shell wrapper around `s5cmd` with a friendly interactive mode, tab completion,
 and a cold-path CLI for one-off commands.
 
-<br>
 
 If you are interested for what I use this tool so much, [check out the main README of the repo!](../README.md)
 
 Consider leaving a star ⭐️ if you find it useful :)
+
+https://github.com/user-attachments/assets/22945a6b-fa02-4353-bc29-4f63006e70a5
+
+
 
 <br>
 

@@ -40,9 +40,8 @@ from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embed
 from TiDAR.model.tidar_core import (
     build_decode_bias_template,
     build_decode_position_template,
-    build_prefill_draft_bias_template,
     init_kv_cache,
-    prefill_prompt,
+    prefill_prompt_with_draft,
     sample_tokens,
     anchor_rejection_sample,
 )
@@ -214,40 +213,21 @@ def make_anchor_tidar_generate_fn(
     Build JIT-compiled Anchor-TiDAR generation function.
     
     Returns function with signature:
-        generate(params, cache_vars, out_ids, prefix_len, max_steps, prev_logit, rng_key)
+        generate(params, cache_vars, out_ids, prefix_len, max_steps, prev_logit, rng_key, initial_draft_logits)
         -> (out_ids, final_prefix_len, generated_count, stats_dict)
     """
     q_len = draft_len + draft_len * draft_len
     
     # Pre-build templates
     decode_bias = jax.device_put(build_decode_bias_template(cache_len, draft_len, bias_value))
-    prefill_bias = jax.device_put(build_prefill_draft_bias_template(cache_len, draft_len))
     position_template = jax.device_put(build_decode_position_template(draft_len))
     
     # Pre-build mask token arrays
     predraft_masks = jnp.full((draft_len * draft_len,), mask_id, dtype=jnp.int32)
     predraft_masks = jax.device_put(predraft_masks)
     
-    initial_draft_masks = jnp.full((draft_len,), mask_id, dtype=jnp.int32)
-    initial_draft_masks = jax.device_put(initial_draft_masks)
-    
     idx_k = jax.device_put(jnp.arange(draft_len, dtype=jnp.int32))
     idx_kp1 = jax.device_put(jnp.arange(draft_len + 1, dtype=jnp.int32))
-    
-    def initial_draft_apply(params, cache_vars, mask_tokens, pos_ids, prefix_len):
-        """Forward pass for initial K mask tokens to get first draft."""
-        logits = model.apply(
-            {"params": params, "cache": cache_vars},
-            mask_tokens[None, :],  # [1, K]
-            deterministic=True,
-            use_kv_cache=True,
-            write_to_cache=False,
-            prefix_len=prefix_len,
-            attn_bias=prefill_bias,
-            position_ids=pos_ids[None, :],
-            kv_cache_len=cache_len,
-        )
-        return logits[0]  # [K, V]
     
     def decode_apply(params, cache_vars, step_tokens, pos_ids, prefix_len):
         """Forward pass for decode step."""
@@ -288,6 +268,7 @@ def make_anchor_tidar_generate_fn(
         max_steps: jnp.ndarray,        # scalar int32
         prev_logit: jnp.ndarray,       # [V] logit for first anchor
         rng_key: jax.Array,
+        initial_draft_logits: jnp.ndarray,  # [K, V] logits for initial draft
     ):
         """
         Main Anchor-TiDAR generation loop.
@@ -322,11 +303,7 @@ def make_anchor_tidar_generate_fn(
             done = done | (anchor == eos_id)
         
         # === Step 3: Get initial draft via K mask tokens ===
-        init_pos_ids = prefix_len + jnp.arange(draft_len, dtype=jnp.int32)
-        init_logits = initial_draft_apply(
-            params, cache_vars, initial_draft_masks, init_pos_ids, prefix_len
-        )  # [K, V]
-        
+        init_logits = initial_draft_logits  # [K, V]
         rng_key, init_draft = sample_tokens(rng_key, init_logits, temperature, top_k)
         init_draft = init_draft.astype(jnp.int32)  # [K]
         
@@ -581,9 +558,16 @@ def main():
     cache_vars = jax.device_put(cache_vars)
     
     # Prefill prompt
-    print("Prefilling prompt...")
-    cache_vars, prefix_len, prev_logit = prefill_prompt(
-        model, params, cache_vars, jnp.asarray(prompt_ids), kv_cache_len=cache_len
+    print("Prefilling prompt + initial draft...")
+    cache_vars, prefix_len, prev_logit, initial_draft_logits = prefill_prompt_with_draft(
+        model,
+        params,
+        cache_vars,
+        jnp.asarray(prompt_ids),
+        draft_len=draft_len,
+        mask_id=int(mask_id),
+        kv_cache_len=cache_len,
+        bias_value=bias_value,
     )
     
     # Prepare output buffer
@@ -620,6 +604,7 @@ def main():
         jnp.asarray(max_steps, dtype=jnp.int32),
         prev_logit,
         rng,
+        initial_draft_logits,
     )
     out_ids_final.block_until_ready()
     

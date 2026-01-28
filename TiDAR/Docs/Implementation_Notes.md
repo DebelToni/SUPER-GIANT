@@ -36,7 +36,7 @@ shapes, masking, cache semantics) rather than re‑explaining TiDAR theory.
   - Key layout: `[PREFIX_CACHE | STEP_TOKENS]`.
   - Rules:
     - Verify queries see all prefix + causal verify tokens.
-    - Predraft queries see prefix + verify[0..r] + causal within their group.
+- Predraft queries see prefix + verify[0..r] + bidirectional within their group.
 
 - `build_prefill_draft_bias_template(cache_len, draft_len)`
   - Returns **all‑zero** bias: draft masks are **bidirectional** within the
@@ -68,16 +68,16 @@ Important behavior:
 
 ### High‑level flow
 
-1. **Prefill prompt** into KV cache (`prefill_prompt`).
+1. **Prefill + initial draft** in one forward (`prefill_prompt_with_draft`).
 2. **Sample first anchor** from `prev_logit` and **commit** it immediately.
-3. **Initial draft**: run K mask tokens (bidirectional bias) to get the first
-   draft block.
+3. **Initial draft** comes from the same forward pass (K mask tokens with
+   bidirectional mask block).
 4. **Iterative loop**:
    - Build `step_tokens = [current_draft | predraft_masks]`.
    - Compute `step_pos_ids = prefix_len - 1 + position_template`.
    - Run forward pass with `decode_prefix_len = prefix_len - 1` to **avoid
      double‑conditioning the anchor** (anchor is already in `step_tokens[0]`).
-   - Extract `verify_logits` (first K tokens) and `predraft_logits`.
+    - Extract `verify_logits` (first K tokens) and `predraft_logits`.
    - Sample predraft tokens, run rejection sampling.
    - Commit accepted tokens to cache and output buffer.
    - Choose next draft from the selected predraft group.
@@ -87,8 +87,26 @@ Important behavior:
 - `prefix_len` always counts **committed tokens**.
 - The anchor is already committed; therefore, during decode we **exclude it from
   the prefix cache** by passing `decode_prefix_len = prefix_len - 1`.
-- Cache writes are fixed‑shape (always K tokens, padded), while `prefix_len`
+- Cache writes are fixed-shape (always K tokens, padded), while `prefix_len`
   advances by the actual accepted count.
+
+### Prefill mask (single pass)
+```
+--- P0 P1 P2 P3 P4 P5 P6 P7 P8 | M0 M1 M2
+------------------------------------------
+P0   .  #  #  #  #  #  #  #  # |  #  #  #
+P1   .  .  #  #  #  #  #  #  # |  #  #  #
+P2   .  .  .  #  #  #  #  #  # |  #  #  #
+P3   .  .  .  .  #  #  #  #  # |  #  #  #
+P4   .  .  .  .  .  #  #  #  # |  #  #  #
+P5   .  .  .  .  .  .  #  #  # |  #  #  #
+P6   .  .  .  .  .  .  .  #  # |  #  #  #
+P7   .  .  .  .  .  .  .  .  # |  #  #  #
+P8   .  .  .  .  .  .  .  .  . |  #  #  #
+M0   .  .  .  .  .  .  .  .  . |  .  .  .
+M1   .  .  .  .  .  .  .  .  . |  .  .  .
+M2   .  .  .  .  .  .  .  .  . |  .  .  .
+```
 
 ### EOS handling
 

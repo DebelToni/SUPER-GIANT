@@ -131,10 +131,9 @@ def build_decode_bias_template(cache_len: int, draft_len: int, bias_value: float
     # i.e., step_k_idx < r+1, equivalently step_k_idx <= r
     allow_predraft_verify = is_predraft_q & is_verify_k & (step_k_idx <= predraft_q_group)
     
-    # Can see own predraft group causally
+    # Can see own predraft group bidirectionally
     same_group = predraft_q_group == predraft_k_group
-    causal_within_group = predraft_k_within <= predraft_q_within
-    allow_predraft_predraft = is_predraft_q & is_predraft_k & same_group & causal_within_group
+    allow_predraft_predraft = is_predraft_q & is_predraft_k & same_group
     
     # Combine all allowances
     allow = (
@@ -163,6 +162,49 @@ def build_prefill_draft_bias_template(cache_len: int, draft_len: int) -> jnp.nda
     # Prefix validity masking is handled in the attention layer; zero bias leaves
     # the K mask tokens fully bidirectional within the draft block.
     return jnp.zeros((1, 1, q_len, key_len), dtype=jnp.float32)
+
+
+def build_prefill_prompt_draft_bias_template(
+    cache_len: int,
+    prompt_len: int,
+    draft_len: int,
+    bias_value: float = -1e10,
+) -> jnp.ndarray:
+    """
+    Build attention bias for a single-pass prefill + initial draft.
+
+    Layout: [prompt | mask*draft_len] as both queries and step keys, with
+    prefix cache keys disabled (handled by prefix validity in attention).
+
+    Rules:
+    - Prompt queries: causal within prompt, no access to mask tokens.
+    - Mask queries: full access to prompt + bidirectional within mask block.
+
+    Shape: [1, 1, prompt_len + draft_len, cache_len + prompt_len + draft_len]
+    """
+    q_len = prompt_len + draft_len
+    key_len = cache_len + q_len
+    q_idx = jnp.arange(q_len)[:, None]
+    k_idx = jnp.arange(key_len)[None, :]
+
+    is_prefix_k = k_idx < cache_len
+    step_k_idx = k_idx - cache_len
+    is_step_k = k_idx >= cache_len
+
+    is_prompt_q = q_idx < prompt_len
+    is_mask_q = q_idx >= prompt_len
+    is_prompt_k = is_step_k & (step_k_idx < prompt_len)
+    is_mask_k = is_step_k & (step_k_idx >= prompt_len)
+
+    allow_prompt_prompt = is_prompt_q & is_prompt_k & (step_k_idx <= q_idx)
+    allow_mask_prompt = is_mask_q & is_prompt_k
+    allow_mask_mask = is_mask_q & is_mask_k
+
+    allow = allow_prompt_prompt | allow_mask_prompt | allow_mask_mask
+    allow = allow & (~is_prefix_k)
+
+    bias = jnp.where(allow, 0.0, bias_value)
+    return bias[None, None, :, :].astype(jnp.float32)
 
 
 # =============================================================================
@@ -458,3 +500,63 @@ def prefill_prompt(
     
     last_logit = logits[0, -1]  # [V]
     return mutated["cache"], prompt_len, last_logit
+
+
+def prefill_prompt_with_draft(
+    model,
+    params,
+    cache_vars,
+    prompt_ids: jnp.ndarray,
+    *,
+    draft_len: int,
+    mask_id: int,
+    kv_cache_len: int,
+    bias_value: float = -1.0e10,
+):
+    """
+    Prefill prompt and compute initial draft in a single forward pass.
+
+    Returns: (updated_cache, prefix_len, last_logit, draft_logits)
+    - last_logit: [V] logit predicting the next token after prompt
+    - draft_logits: [K, V] logits for the initial draft tokens
+    """
+    if prompt_ids.ndim == 1:
+        prompt_ids = prompt_ids[None, :]
+
+    batch_size, prompt_len = prompt_ids.shape
+    if prompt_len == 0:
+        dummy_logit = jnp.zeros((model.vocab_size,), dtype=jnp.float32)
+        draft_logits = jnp.zeros((draft_len, model.vocab_size), dtype=jnp.float32)
+        return cache_vars, 0, dummy_logit, draft_logits
+
+    mask_tokens = jnp.full((batch_size, draft_len), mask_id, dtype=jnp.int32)
+    step_tokens = jnp.concatenate([prompt_ids, mask_tokens], axis=1)
+    step_len = prompt_len + draft_len
+
+    position_ids = jnp.arange(step_len, dtype=jnp.int32)[None, :]
+    position_ids = jnp.broadcast_to(position_ids, (batch_size, step_len))
+
+    attn_bias = build_prefill_prompt_draft_bias_template(
+        kv_cache_len,
+        prompt_len,
+        draft_len,
+        bias_value=bias_value,
+    )
+
+    logits, mutated = model.apply(
+        {"params": params, "cache": cache_vars},
+        step_tokens,
+        deterministic=True,
+        use_kv_cache=True,
+        write_to_cache=False,
+        prefix_len=0,
+        cache_write_len=prompt_len,
+        attn_bias=attn_bias,
+        position_ids=position_ids,
+        kv_cache_len=kv_cache_len,
+        mutable=["cache"],
+    )
+
+    last_logit = logits[0, prompt_len - 1]
+    draft_logits = logits[0, prompt_len:]
+    return mutated["cache"], prompt_len, last_logit, draft_logits

@@ -185,12 +185,36 @@ Token types: 0 = clean, 1 = diff.
 
 Rules implemented:
 - Clean queries -> clean keys only, causal: `pos_k <= pos_q`.
-- Diff queries -> diff keys with block causality: `block_k <= block_q`.
+- Diff queries -> diff keys within the same block only: `block_k == block_q`.
 - Diff queries -> clean keys only before current block: `pos_k < block_start`.
 - Clean queries -> diff keys are disallowed.
 
 `key_padding_mask` (from sequence lengths and token mask) further masks
 invalid keys.
+
+Training mask example (S=9, K=3):
+```
+---- C0 C1 C2 C3 C4 C5 C6 C7 C8 | D0 D1 D2 D3 D4 D5 D6 D7 D8
+------------------------------------------------------------
+ C0   .  #  #  #  #  #  #  #  # |  #  #  #  #  #  #  #  #  #
+ C1   .  .  #  #  #  #  #  #  # |  #  #  #  #  #  #  #  #  #
+ C2   .  .  .  #  #  #  #  #  # |  #  #  #  #  #  #  #  #  #
+ C3   .  .  .  .  #  #  #  #  # |  #  #  #  #  #  #  #  #  #
+ C4   .  .  .  .  .  #  #  #  # |  #  #  #  #  #  #  #  #  #
+ C5   .  .  .  .  .  .  #  #  # |  #  #  #  #  #  #  #  #  #
+ C6   .  .  .  .  .  .  .  #  # |  #  #  #  #  #  #  #  #  #
+ C7   .  .  .  .  .  .  .  .  # |  #  #  #  #  #  #  #  #  #
+ C8   .  .  .  .  .  .  .  .  . |  #  #  #  #  #  #  #  #  #
+ D0   #  #  #  #  #  #  #  #  # |  .  .  .  #  #  #  #  #  #
+ D1   #  #  #  #  #  #  #  #  # |  .  .  .  #  #  #  #  #  #
+ D2   #  #  #  #  #  #  #  #  # |  .  .  .  #  #  #  #  #  #
+ D3   .  .  .  #  #  #  #  #  # |  #  #  #  .  .  .  #  #  #
+ D4   .  .  .  #  #  #  #  #  # |  #  #  #  .  .  .  #  #  #
+ D5   .  .  .  #  #  #  #  #  # |  #  #  #  .  .  .  #  #  #
+ D6   .  .  .  .  .  .  #  #  # |  #  #  #  #  #  #  .  .  .
+ D7   .  .  .  .  .  .  #  #  # |  #  #  #  #  #  #  .  .  .
+ D8   .  .  .  .  .  .  #  #  # |  #  #  #  #  #  #  .  .  .
+```
 
 ---
 
@@ -198,11 +222,33 @@ invalid keys.
 Files: `TiDAR/model/inference.py`, `TiDAR/model/tidar_core.py`
 
 ### 6.1 Prefill + first anchor
-1) Prefill prompt into KV cache (`prefill_prompt`).
+1) Prefill prompt and initial draft in one forward (`prefill_prompt_with_draft`).
 2) Sample first anchor from `prev_logit` (AR distribution) and commit it
    immediately.
-3) Initial draft: run K mask tokens with bidirectional bias to sample the
-   first draft block. The anchor is inserted at position 0 of the draft.
+3) Initial draft comes from the same forward pass (K mask tokens with
+   bidirectional mask block). The anchor is inserted at position 0 of the draft.
+
+Prefill mask example (prompt_len=9, K=3):
+```
+--- P0 P1 P2 P3 P4 P5 P6 P7 P8 | M0 M1 M2
+------------------------------------------
+P0   .  #  #  #  #  #  #  #  # |  #  #  #
+P1   .  .  #  #  #  #  #  #  # |  #  #  #
+P2   .  .  .  #  #  #  #  #  # |  #  #  #
+P3   .  .  .  .  #  #  #  #  # |  #  #  #
+P4   .  .  .  .  .  #  #  #  # |  #  #  #
+P5   .  .  .  .  .  .  #  #  # |  #  #  #
+P6   .  .  .  .  .  .  .  #  # |  #  #  #
+P7   .  .  .  .  .  .  .  .  # |  #  #  #
+P8   .  .  .  .  .  .  .  .  . |  #  #  #
+M0   .  .  .  .  .  .  .  .  . |  .  .  .
+M1   .  .  .  .  .  .  .  .  . |  .  .  .
+M2   .  .  .  .  .  .  .  .  . |  .  .  .
+```
+
+Anchor sampling note:
+- Sample the first anchor from the last prompt logit (P8 in the example) to get
+  a true AR token before verification begins.
 
 ### 6.2 Decode step layout
 K = draft_len, q_len = K + K*K.
@@ -224,11 +270,29 @@ Rules:
 - Predraft group r sees:
   - all prefix,
   - verify tokens up to index r (inclusive),
-  - causal within its own group.
+  - bidirectional within its own group.
 - Predraft groups do not attend to each other.
 
 Prefix validity (prefix_len) is enforced inside attention via a separate
 key-validity bias.
+
+Decode mask example (cache_len=9, K=3):
+```
+---- P0 P1 P2 P3 P4 P5 P6 P7 P8 | V0 V1 V2 G00 G01 G02 G10 G11 G12 G20 G21 G22
+------------------------------------------------------------------------------
+ V0   .  .  .  .  .  .  .  .  . |  .  #  #  #  #  #  #  #  #  #  #  #
+ V1   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  #  #  #  #  #  #
+ V2   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  #  #  #
+G00   .  .  .  .  .  .  .  .  . |  .  #  #  .  .  .  #  #  #  #  #  #
+G01   .  .  .  .  .  .  .  .  . |  .  #  #  .  .  .  #  #  #  #  #  #
+G02   .  .  .  .  .  .  .  .  . |  .  #  #  .  .  .  #  #  #  #  #  #
+G10   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  .  .  .  #  #  #
+G11   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  .  .  .  #  #  #
+G12   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  .  .  .  #  #  #
+G20   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  .  .  .
+G21   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  .  .  .
+G22   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  .  .  .
+```
 
 ### 6.4 Rejection sampling (anchor aware)
 Function: `anchor_rejection_sample` in `TiDAR/model/tidar_core.py`

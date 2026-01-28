@@ -38,7 +38,8 @@ def build_tidar_train_bias(
     is_diff_k = t_k == 1
 
     allow_clean_to_clean = is_clean_q & is_clean_k & (pos_k <= pos_q)
-    allow_diff_to_diff = is_diff_q & is_diff_k & (block_k <= block_q)
+    # Diffusion attends bidirectionally within the current block only.
+    allow_diff_to_diff = is_diff_q & is_diff_k & (block_k == block_q)
     allow_diff_to_clean = is_diff_q & is_clean_k & (pos_k < block_start)
 
     allow = allow_clean_to_clean | allow_diff_to_diff | allow_diff_to_clean

@@ -34,10 +34,13 @@ Important interpretation notes
 - Training acc and inference acc can diverge (especially with top-k truncation).
 
 Implementation updates that affect comparisons
-- Agreement KL is aligned by +1 position (AR t vs Diff t+1), and supports
-  `training.loss.agreement_temperature` (default 1.0).
+- Agreement losses are aligned by +1 position (AR t vs Diff t+1).
 - Training loss/metrics now live in `TiDAR/model/Training_step.py` and are
   called by `TiDAR/model/Run_training.py`.
+- **Loss formula update (Jan 2026)**: The loss function was refactored from a 2-term
+  formula with normalization to a 5-term configurable formula:
+  `Loss = alpha * L_AR + beta * L_Diff + rho * KL_fwd + chi * KL_rev + delta * L_hard`
+  See `TiDAR/Docs/TiDAR_docs.md` Section 1.2 for full documentation.
 
 Open questions for next experiments
 - Should acceptance logging average across multiple batch rows to reduce noise?

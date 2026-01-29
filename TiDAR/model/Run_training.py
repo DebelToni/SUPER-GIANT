@@ -78,9 +78,12 @@ class StageConfig:
     end_ratio: float
     shuffle: bool = True
     fraction: float = 1.0
-    loss_alpha: float | None = None
-    loss_agreement_lambda: float | None = None
-    loss_agreement_temperature: float | None = None
+    # Loss coefficients (None = use global default)
+    loss_alpha: float | None = None    # AR NTP loss
+    loss_beta: float | None = None     # Diffusion CE loss
+    loss_rho: float | None = None      # Forward KL: KL(P_AR || Q_Diff)
+    loss_chi: float | None = None      # Reverse KL: KL(Q_Diff || P_AR)
+    loss_delta: float | None = None    # Hard agreement CE
 
 
 @dataclass
@@ -184,15 +187,11 @@ def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
     stage_cfgs = []
     for stage in stages_raw:
         loss_cfg = stage.get("loss") or {}
-        loss_alpha = loss_cfg.get("alpha")
-        if loss_alpha is not None:
-            loss_alpha = float(loss_alpha)
-        loss_agreement_lambda = loss_cfg.get("agreement_lambda")
-        if loss_agreement_lambda is not None:
-            loss_agreement_lambda = float(loss_agreement_lambda)
-        loss_agreement_temperature = loss_cfg.get("agreement_temperature")
-        if loss_agreement_temperature is not None:
-            loss_agreement_temperature = float(loss_agreement_temperature)
+        
+        def get_float_or_none(key):
+            val = loss_cfg.get(key)
+            return float(val) if val is not None else None
+        
         stage_cfgs.append(
             StageConfig(
                 name=stage["name"],
@@ -202,9 +201,11 @@ def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
                 end_ratio=float(stage["end_ratio"]),
                 shuffle=bool(stage.get("shuffle", True)),
                 fraction=float(stage.get("fraction", 1.0)),
-                loss_alpha=loss_alpha,
-                loss_agreement_lambda=loss_agreement_lambda,
-                loss_agreement_temperature=loss_agreement_temperature,
+                loss_alpha=get_float_or_none("alpha"),
+                loss_beta=get_float_or_none("beta"),
+                loss_rho=get_float_or_none("rho"),
+                loss_chi=get_float_or_none("chi"),
+                loss_delta=get_float_or_none("delta"),
             )
         )
     return stage_cfgs
@@ -527,16 +528,20 @@ def main() -> None:
     # Loss configuration defaults (stage overrides may apply)
     loss_cfg = getattr(cfg.training, "loss", None)
     if loss_cfg is not None:
-        default_loss_alpha = float(getattr(loss_cfg, "alpha", 1.0))
-        default_loss_agreement_lambda = float(getattr(loss_cfg, "agreement_lambda", 0.0))
-        default_loss_agreement_temperature = float(getattr(loss_cfg, "agreement_temperature", 1.0))
+        default_alpha = float(getattr(loss_cfg, "alpha", 1.0))
+        default_beta = float(getattr(loss_cfg, "beta", 1.0))
+        default_rho = float(getattr(loss_cfg, "rho", 0.0))
+        default_chi = float(getattr(loss_cfg, "chi", 0.0))
+        default_delta = float(getattr(loss_cfg, "delta", 0.0))
     else:
-        default_loss_alpha = 1.0
-        default_loss_agreement_lambda = 0.0
-        default_loss_agreement_temperature = 1.0
+        default_alpha = 1.0
+        default_beta = 1.0
+        default_rho = 0.0
+        default_chi = 0.0
+        default_delta = 0.0
     print(
-        f"[loss] default alpha={default_loss_alpha}, agreement_lambda={default_loss_agreement_lambda}, "
-        f"agreement_temperature={default_loss_agreement_temperature}"
+        f"[loss] defaults: alpha={default_alpha}, beta={default_beta}, "
+        f"rho={default_rho}, chi={default_chi}, delta={default_delta}"
     )
 
     def _init_accum_grads(pytree):
@@ -545,7 +550,7 @@ def main() -> None:
     def _stack_batches(batches):
         return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *batches)
 
-    @partial(jax.jit, static_argnames=("loss_alpha", "loss_agreement_lambda", "loss_agreement_temperature"))
+    @partial(jax.jit, static_argnames=("alpha", "beta", "rho", "chi", "delta"))
     def _run_chunk(
         params,
         opt_state,
@@ -554,9 +559,11 @@ def main() -> None:
         accum_grads,
         accum_count,
         *,
-        loss_alpha,
-        loss_agreement_lambda,
-        loss_agreement_temperature,
+        alpha,
+        beta,
+        rho,
+        chi,
+        delta,
     ):
         grad_scale = jnp.asarray(1.0 / grad_accum, dtype=jnp.float32)
 
@@ -565,14 +572,16 @@ def main() -> None:
             dropout_rng = jax.random.fold_in(base_rng, step)
             compute_accept = jnp.logical_or(step == 0, (step + 1) % log_every == 0)
 
-            (loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)), grads = loss_and_grad(
+            (loss, (ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate)), grads = loss_and_grad(
                 params,
                 batch,
                 model=model,
                 dropout_rng=dropout_rng,
-                loss_alpha=loss_alpha,
-                agreement_lambda=loss_agreement_lambda,
-                agreement_temperature=loss_agreement_temperature,
+                alpha=alpha,
+                beta=beta,
+                rho=rho,
+                chi=chi,
+                delta=delta,
                 compute_accept=compute_accept,
                 accept_top_k=accept_top_k,
                 accept_max_positions=accept_max_positions,
@@ -615,7 +624,7 @@ def main() -> None:
                 step + 1,
                 accum_grads,
                 accum_count,
-            ), (loss, ntp_loss, diff_loss, agreement_loss, accept_rate)
+            ), (loss, ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate)
 
         (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
             body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
@@ -637,28 +646,19 @@ def main() -> None:
         stage_steps_target = runtime.total_steps
         completed_in_stage = stage_step_total if stage_idx == current_stage_idx else 0
 
-        stage_loss_alpha = (
-            runtime.config.loss_alpha if runtime.config.loss_alpha is not None else default_loss_alpha
-        )
-        stage_loss_agreement_lambda = (
-            runtime.config.loss_agreement_lambda
-            if runtime.config.loss_agreement_lambda is not None
-            else default_loss_agreement_lambda
-        )
-        stage_loss_agreement_temperature = (
-            runtime.config.loss_agreement_temperature
-            if runtime.config.loss_agreement_temperature is not None
-            else default_loss_agreement_temperature
-        )
+        stage_alpha = runtime.config.loss_alpha if runtime.config.loss_alpha is not None else default_alpha
+        stage_beta = runtime.config.loss_beta if runtime.config.loss_beta is not None else default_beta
+        stage_rho = runtime.config.loss_rho if runtime.config.loss_rho is not None else default_rho
+        stage_chi = runtime.config.loss_chi if runtime.config.loss_chi is not None else default_chi
+        stage_delta = runtime.config.loss_delta if runtime.config.loss_delta is not None else default_delta
 
         print(
             f"→ Stage {runtime.config.name}: seq_len={runtime.config.seq_len} epochs={runtime.config.epochs} "
             f"steps={stage_steps_target} (resume at {completed_in_stage})"
         )
         print(
-            f"[loss] stage={runtime.config.name} alpha={stage_loss_alpha}, "
-            f"agreement_lambda={stage_loss_agreement_lambda}, "
-            f"agreement_temperature={stage_loss_agreement_temperature}"
+            f"[loss] stage={runtime.config.name} alpha={stage_alpha}, beta={stage_beta}, "
+            f"rho={stage_rho}, chi={stage_chi}, delta={stage_delta}"
         )
 
         pbar = tqdm(
@@ -706,9 +706,11 @@ def main() -> None:
                 global_step,
                 accum_grads,
                 accum_count,
-                loss_alpha=stage_loss_alpha,
-                loss_agreement_lambda=stage_loss_agreement_lambda,
-                loss_agreement_temperature=stage_loss_agreement_temperature,
+                alpha=stage_alpha,
+                beta=stage_beta,
+                rho=stage_rho,
+                chi=stage_chi,
+                delta=stage_delta,
             )
             losses_host = jax.device_get(losses)
             if isinstance(losses_host, tuple):
@@ -733,21 +735,28 @@ def main() -> None:
                     step_val = chunk_start + offset
                     print(f"[warn] non-finite loss at step {step_val} (stage {runtime.config.name}); skipping log")
                     continue
-                ntp_val = float(losses[offset, 1]) if losses.shape[1] > 1 else loss_val
+                ar_val = float(losses[offset, 1]) if losses.shape[1] > 1 else loss_val
                 diff_val = float(losses[offset, 2]) if losses.shape[1] > 2 else loss_val
-                agree_val = float(losses[offset, 3]) if losses.shape[1] > 3 else 0.0
-                accept_val = float(losses[offset, 4]) if losses.shape[1] > 4 else 0.0
+                kl_fwd_val = float(losses[offset, 3]) if losses.shape[1] > 3 else 0.0
+                kl_rev_val = float(losses[offset, 4]) if losses.shape[1] > 4 else 0.0
+                hard_agree_val = float(losses[offset, 5]) if losses.shape[1] > 5 else 0.0
+                accept_val = float(losses[offset, 6]) if losses.shape[1] > 6 else 0.0
                 last_loss = loss_val
                 step_val = chunk_start + offset
                 if step_val == 1 or step_val % log_every == 0:
                     elapsed = time.time() - start
                     log_msg = (
                         f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
-                        f"loss {loss_val:.4f} ntp {ntp_val:.4f} diff {diff_val:.4f} "
+                        f"loss {loss_val:.4f} ar {ar_val:.4f} diff {diff_val:.4f} "
                         f"acc {accept_val:.3f}"
                     )
-                    if stage_loss_agreement_lambda > 0.0:
-                        log_msg += f" agree {agree_val:.4f}"
+                    # Add extra loss terms only if their coefficients are > 0
+                    if stage_rho > 0.0:
+                        log_msg += f" kl_fwd {kl_fwd_val:.4f}"
+                    if stage_chi > 0.0:
+                        log_msg += f" kl_rev {kl_rev_val:.4f}"
+                    if stage_delta > 0.0:
+                        log_msg += f" hard {hard_agree_val:.4f}"
                     log_msg += f" ({elapsed:.1f}s)"
                     print()
                     print(log_msg)

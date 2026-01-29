@@ -16,7 +16,7 @@ def _compute_accept_rate(
     accept_top_k: int,
     accept_max_positions: int,
 ):
-    # Theoretical acceptance rate on the last batch row.
+    """Theoretical acceptance rate on the last batch row (greedy-style metric)."""
     # Align AR logits (predict token t at position t-1) with Diff logits (predict token t).
     S = logits.shape[1] // 2
     if S <= 1:
@@ -50,19 +50,106 @@ def _compute_accept_rate(
     return (accept_per_pos * pos_mask).sum() / denom
 
 
+def _compute_alignment_losses(
+    logits: jnp.ndarray,
+    mask_ntp: jnp.ndarray,
+    mask_diff: jnp.ndarray,
+    *,
+    rho: float,
+    chi: float,
+    delta: float,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Compute KL and hard-agreement losses between AR and Diff distributions.
+    
+    Returns: (kl_fwd_loss, kl_rev_loss, hard_agree_loss)
+    """
+    S = logits.shape[1] // 2
+    
+    # AR logits at positions 0..S-2 predict tokens 1..S-1
+    ar_logits = logits[:, : S - 1]          # [B, S-1, V]
+    # Diff logits at positions S+1..2S-1 predict tokens 1..S-1 (aligned)
+    diff_logits_aligned = logits[:, S + 1 :]  # [B, S-1, V]
+    
+    # Mask for valid positions (both AR and Diff active)
+    diff_mask_aligned = mask_diff[:, S + 1 :]  # [B, S-1]
+    ar_mask_aligned = mask_ntp[:, : S - 1]      # [B, S-1]
+    joint_mask = ar_mask_aligned * diff_mask_aligned  # [B, S-1]
+    joint_denom = jnp.maximum(joint_mask.sum(), 1.0)
+    
+    # Stop-gradient AR (all agreement losses only update Diff)
+    ar_logits_sg = jax.lax.stop_gradient(ar_logits)
+    
+    # Probabilities (log and regular)
+    log_p_ar = jax.nn.log_softmax(ar_logits_sg, axis=-1)
+    p_ar = jax.nn.softmax(ar_logits_sg, axis=-1)
+    log_q_diff = jax.nn.log_softmax(diff_logits_aligned, axis=-1)
+    q_diff = jax.nn.softmax(diff_logits_aligned, axis=-1)
+    
+    # Forward KL: KL(P_AR || Q_Diff)
+    if rho > 0.0:
+        kl_fwd_terms = log_p_ar - log_q_diff
+        kl_fwd_per_pos = jnp.sum(jnp.where(p_ar > 0, p_ar * kl_fwd_terms, 0.0), axis=-1)
+        kl_fwd_per_pos = jnp.where(joint_mask > 0, kl_fwd_per_pos, 0.0)
+        kl_fwd_loss = kl_fwd_per_pos.sum() / joint_denom
+    else:
+        kl_fwd_loss = jnp.array(0.0, dtype=jnp.float32)
+    
+    # Reverse KL: KL(Q_Diff || P_AR)
+    if chi > 0.0:
+        kl_rev_terms = log_q_diff - log_p_ar
+        kl_rev_per_pos = jnp.sum(jnp.where(q_diff > 0, q_diff * kl_rev_terms, 0.0), axis=-1)
+        kl_rev_per_pos = jnp.where(joint_mask > 0, kl_rev_per_pos, 0.0)
+        kl_rev_loss = kl_rev_per_pos.sum() / joint_denom
+    else:
+        kl_rev_loss = jnp.array(0.0, dtype=jnp.float32)
+    
+    # Hard agreement: CE(onehot(argmax P_AR), logits_diff)
+    if delta > 0.0:
+        ar_argmax = jnp.argmax(ar_logits_sg, axis=-1)  # [B, S-1]
+        hard_ce = optax.softmax_cross_entropy_with_integer_labels(
+            diff_logits_aligned, ar_argmax
+        )  # [B, S-1]
+        hard_ce = jnp.where(joint_mask > 0, hard_ce, 0.0)
+        hard_agree_loss = hard_ce.sum() / joint_denom
+    else:
+        hard_agree_loss = jnp.array(0.0, dtype=jnp.float32)
+    
+    return kl_fwd_loss, kl_rev_loss, hard_agree_loss
+
+
 def loss_and_metrics(
     params,
     batch,
     *,
     model,
     dropout_rng,
-    loss_alpha: float,
-    agreement_lambda: float,
-    agreement_temperature: float,
+    # Loss coefficients (each can be 0 to skip computation)
+    alpha: float,      # AR NTP loss coefficient
+    beta: float,       # Diffusion loss coefficient
+    rho: float,        # Forward KL: KL(P_AR || Q_Diff)
+    chi: float,        # Reverse KL: KL(Q_Diff || P_AR)
+    delta: float,      # Hard agreement: CE(onehot(argmax P_AR), logits_diff)
+    # Acceptance metric
     compute_accept,
     accept_top_k: int,
     accept_max_positions: int,
 ) -> Tuple:
+    """
+    Compute TiDAR training loss with 5 configurable terms:
+    
+    Loss = alpha * L_AR + beta * L_Diff + rho * KL_fwd + chi * KL_rev + delta * L_hard
+    
+    Where:
+      - L_AR: AR next-token prediction CE loss (clean half, shifted)
+      - L_Diff: Diffusion denoising CE loss (diff half, aligned with clean tokens)
+      - KL_fwd: KL(stopgrad(P_AR) || Q_Diff) - punishes Diff for missing AR mass
+      - KL_rev: KL(Q_Diff || stopgrad(P_AR)) - punishes Diff for extra mass
+      - L_hard: CE(onehot(argmax stopgrad(P_AR)), logits_diff) - greedy agreement
+    
+    All AR terms are stopgrad'd to prevent gradients flowing into AR from Diff losses.
+    Terms with coefficient == 0 are skipped entirely (no compute).
+    """
     logits = model.apply(
         {"params": params},
         batch["input_ids"],
@@ -75,38 +162,58 @@ def loss_and_metrics(
     mask_ntp = batch["loss_mask_ntp"]
     mask_diff = batch["loss_mask_diff"]
 
-    active = (mask_ntp + mask_diff) > 0
-    labels_safe = jnp.where(active, labels, 0)
-    ce = optax.softmax_cross_entropy_with_integer_labels(logits, labels_safe)
-    ce = jnp.where(active, ce, 0.0)
-    ntp_loss = (ce * mask_ntp).sum() / jnp.maximum(mask_ntp.sum(), 1.0)
-    diff_loss = (ce * mask_diff).sum() / jnp.maximum(mask_diff.sum(), 1.0)
-    tidar_loss = (loss_alpha * ntp_loss + diff_loss) / (1.0 + loss_alpha)
-
-    if agreement_lambda > 0.0:
-        # Sequence layout: [clean (S) | diff (S)]
-        # Align AR (predict token t+1 at position t) with Diff (predict token t+1 at position t+1).
-        S = logits.shape[1] // 2
-        ar_logits = logits[:, : S - 1]
-        diff_logits = logits[:, S + 1 :]
-        temperature = jnp.asarray(agreement_temperature, dtype=jnp.float32)
-        temperature = jnp.maximum(temperature, 1e-6)
-        ar_logits_scaled = ar_logits / temperature
-        diff_logits_scaled = diff_logits / temperature
-        log_p_ar = jax.nn.log_softmax(ar_logits_scaled, axis=-1)
-        p_ar = jax.nn.softmax(jax.lax.stop_gradient(ar_logits_scaled), axis=-1)
-        log_p_ar_sg = jax.lax.stop_gradient(log_p_ar)
-        log_p_diff = jax.nn.log_softmax(diff_logits_scaled, axis=-1)
-        kl_terms = log_p_ar_sg - log_p_diff
-        kl_per_pos = jnp.sum(jnp.where(p_ar > 0, p_ar * kl_terms, 0.0), axis=-1)
-        diff_mask_for_kl = mask_diff[:, S + 1 :]
-        kl_per_pos = jnp.where(diff_mask_for_kl > 0, kl_per_pos, 0.0)
-        agreement_loss = kl_per_pos.sum() / jnp.maximum(diff_mask_for_kl.sum(), 1.0)
-        total_loss = tidar_loss + agreement_lambda * agreement_loss
+    # ---------------------------------------------------------------------------
+    # Term 1: AR NTP loss (alpha)
+    # Positions 0..S-2 predict tokens 1..S-1
+    # ---------------------------------------------------------------------------
+    if alpha > 0.0:
+        ar_active = mask_ntp > 0
+        ar_labels_safe = jnp.where(ar_active, labels, 0)
+        ar_ce = optax.softmax_cross_entropy_with_integer_labels(logits, ar_labels_safe)
+        ar_ce = jnp.where(ar_active, ar_ce, 0.0)
+        ar_loss = (ar_ce * mask_ntp).sum() / jnp.maximum(mask_ntp.sum(), 1.0)
     else:
-        agreement_loss = jnp.array(0.0)
-        total_loss = tidar_loss
+        ar_loss = jnp.array(0.0, dtype=jnp.float32)
 
+    # ---------------------------------------------------------------------------
+    # Term 2: Diffusion CE loss (beta)
+    # Positions S..2S-1 predict tokens 0..S-1 (aligned denoising)
+    # ---------------------------------------------------------------------------
+    if beta > 0.0:
+        diff_active = mask_diff > 0
+        diff_labels_safe = jnp.where(diff_active, labels, 0)
+        diff_ce = optax.softmax_cross_entropy_with_integer_labels(logits, diff_labels_safe)
+        diff_ce = jnp.where(diff_active, diff_ce, 0.0)
+        diff_loss = (diff_ce * mask_diff).sum() / jnp.maximum(mask_diff.sum(), 1.0)
+    else:
+        diff_loss = jnp.array(0.0, dtype=jnp.float32)
+
+    # ---------------------------------------------------------------------------
+    # Terms 3-5: KL divergences and hard agreement
+    # ---------------------------------------------------------------------------
+    if (rho > 0.0) or (chi > 0.0) or (delta > 0.0):
+        kl_fwd_loss, kl_rev_loss, hard_agree_loss = _compute_alignment_losses(
+            logits, mask_ntp, mask_diff, rho=rho, chi=chi, delta=delta
+        )
+    else:
+        kl_fwd_loss = jnp.array(0.0, dtype=jnp.float32)
+        kl_rev_loss = jnp.array(0.0, dtype=jnp.float32)
+        hard_agree_loss = jnp.array(0.0, dtype=jnp.float32)
+
+    # ---------------------------------------------------------------------------
+    # Total loss
+    # ---------------------------------------------------------------------------
+    total_loss = (
+        alpha * ar_loss
+        + beta * diff_loss
+        + rho * kl_fwd_loss
+        + chi * kl_rev_loss
+        + delta * hard_agree_loss
+    )
+
+    # ---------------------------------------------------------------------------
+    # Acceptance metric (optional, for logging)
+    # ---------------------------------------------------------------------------
     accept_rate = jax.lax.cond(
         compute_accept,
         lambda _: _compute_accept_rate(
@@ -120,7 +227,7 @@ def loss_and_metrics(
         operand=None,
     )
 
-    return total_loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)
+    return total_loss, (ar_loss, diff_loss, kl_fwd_loss, kl_rev_loss, hard_agree_loss, accept_rate)
 
 
 def loss_and_grad(
@@ -129,9 +236,11 @@ def loss_and_grad(
     *,
     model,
     dropout_rng,
-    loss_alpha: float,
-    agreement_lambda: float,
-    agreement_temperature: float,
+    alpha: float,
+    beta: float,
+    rho: float,
+    chi: float,
+    delta: float,
     compute_accept,
     accept_top_k: int,
     accept_max_positions: int,
@@ -142,9 +251,11 @@ def loss_and_grad(
             batch,
             model=model,
             dropout_rng=dropout_rng,
-            loss_alpha=loss_alpha,
-            agreement_lambda=agreement_lambda,
-            agreement_temperature=agreement_temperature,
+            alpha=alpha,
+            beta=beta,
+            rho=rho,
+            chi=chi,
+            delta=delta,
             compute_accept=compute_accept,
             accept_top_k=accept_top_k,
             accept_max_positions=accept_max_positions,
@@ -158,9 +269,11 @@ def loss_and_grad(
     static_argnames=[
         "model",
         "optimizer",
-        "loss_alpha",
-        "agreement_lambda",
-        "agreement_temperature",
+        "alpha",
+        "beta",
+        "rho",
+        "chi",
+        "delta",
         "accept_top_k",
         "accept_max_positions",
     ],
@@ -173,28 +286,32 @@ def train_step(
     model,
     optimizer,
     dropout_rng,
-    loss_alpha: float = 1.0,
-    agreement_lambda: float = 0.0,
-    agreement_temperature: float = 1.0,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    rho: float = 0.0,
+    chi: float = 0.0,
+    delta: float = 0.0,
     compute_accept=False,
     accept_top_k: int = 64,
     accept_max_positions: int = 256,
 ):
-    (loss, (ntp_loss, diff_loss, agreement_loss, accept_rate)), grads = loss_and_grad(
+    (loss, (ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate)), grads = loss_and_grad(
         params,
         batch,
         model=model,
         dropout_rng=dropout_rng,
-        loss_alpha=loss_alpha,
-        agreement_lambda=agreement_lambda,
-        agreement_temperature=agreement_temperature,
+        alpha=alpha,
+        beta=beta,
+        rho=rho,
+        chi=chi,
+        delta=delta,
         compute_accept=compute_accept,
         accept_top_k=accept_top_k,
         accept_max_positions=accept_max_positions,
     )
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
-    return new_params, opt_state, loss, ntp_loss, diff_loss, agreement_loss, accept_rate
+    return new_params, opt_state, loss, ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate
 
 
 __all__ = ["loss_and_metrics", "loss_and_grad", "train_step"]

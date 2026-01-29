@@ -16,8 +16,8 @@ Sections 2+ mirror the current implementation under `TiDAR/model/`.
 TiDAR keeps one decoder-only transformer trained under two attention regimes:
 
 - Talk (AR): standard causal next-token prediction on the clean half.
-- Think (Diffusion): masked tokens with blockwise bidirectional attention and
-  inter-block causality.
+- Think (Diffusion): masked tokens with blockwise bidirectional attention
+  (blocks do not attend to each other).
 
 Training uses a doubled sequence (clean + masked) with aligned position ids
 and a block diffusion mask. The baseline joint loss is:
@@ -43,30 +43,44 @@ Inference (paper-style):
 - Verify only positions 1..K-1; the anchor is never verified.
 - Guarantees at least +1 token progress per step.
 
-### 1.2 Agreement loss to boost acceptance (implemented)
-Goal: increase acceptance rate by nudging Diff to match AR distributions at the
-same positions (even if this hurts quality).
+### 1.2 Five-term loss with configurable agreement (implemented)
+Goal: flexible control over AR/Diff training balance and acceptance rate optimization.
+Each term can be independently enabled/disabled by setting its coefficient to 0.
 
 ```
-L_tidar(theta) = (alpha * L_AR_CE + L_Diff_CE) / (1 + alpha)
-L_total(theta) = L_tidar(theta) + lambda * KL(stopgrad(p_AR^T) || p_Diff^T)
+Loss = alpha * L_AR + beta * L_Diff + rho * KL_fwd + chi * KL_rev + delta * L_hard
 ```
 
-- `alpha` controls how much training focuses on AR vs Diff (config: `training.loss.alpha`).
-- `lambda` controls how hard Diff is pushed to agree with AR (config: `training.loss.agreement_lambda`).
-- `T` is the KL temperature (config: `training.loss.agreement_temperature`, default 1.0).
-- `stopgrad`/`detach` makes AR a fixed teacher so gradients update Diff only.
-- When `agreement_lambda == 0`, the agreement term is skipped entirely (fast path).
- - Agreement is computed on aligned positions: AR positions 0..S-2 vs Diff positions S+1..2S-1
-   (both predict token t+1).
+Where:
+- `L_AR`: AR next-token prediction CE loss (clean half, shifted: positions 0..S-2 predict tokens 1..S-1)
+- `L_Diff`: Diffusion denoising CE loss (diff half, aligned: positions S..2S-1 predict tokens 0..S-1)
+- `KL_fwd`: Forward KL `KL(stopgrad(P_AR) || Q_Diff)` - punishes Diff for missing AR probability mass
+- `KL_rev`: Reverse KL `KL(Q_Diff || stopgrad(P_AR))` - punishes Diff for extra probability mass
+- `L_hard`: Hard agreement `CE(onehot(argmax stopgrad(P_AR)), logits_diff)` - greedy agreement loss
+
+Key properties:
+- All agreement terms use `stopgrad` on AR logits, so gradients only update Diff parameters
+- Terms with coefficient == 0 are skipped entirely (no compute, different JIT traces)
+- The function returns 7 values: `(total_loss, ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate)`
+
+**Coefficient meanings:**
+- `alpha`: Weight on AR language modeling. Higher = stronger AR capability.
+- `beta`: Weight on Diff denoising. Higher = better diffusion quality.
+- `rho`: Forward KL weight. Punishes Diff when AR assigns probability but Diff doesn't (mode-covering).
+- `chi`: Reverse KL weight. Punishes Diff when Diff assigns probability but AR doesn't (mode-seeking).
+- `delta`: Hard agreement weight. Forces Diff argmax to match AR argmax (greedy alignment).
 
 Config example (in `Config.yml` or model config):
 ```yaml
 training:
   loss:
-    alpha: 1.0              # equal weight AR/Diff
-  agreement_lambda: 0.0   # disabled by default; try 0.05-0.4 for speed focus
-  agreement_temperature: 1.0
+    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard
+    # Each term with coefficient 0 is skipped entirely (no compute)
+    alpha: 1.0    # AR next-token prediction CE loss
+    beta: 1.0     # Diffusion denoising CE loss
+    rho: 0.0      # Forward KL: KL(P_AR || Q_Diff) - punishes Diff for missing AR mass
+    chi: 0.0      # Reverse KL: KL(Q_Diff || P_AR) - punishes Diff for extra mass
+    delta: 0.0    # Hard agreement: CE(onehot(argmax P_AR), logits_diff) - greedy agreement
 ```
 
 Stage-level overrides (optional):
@@ -79,24 +93,25 @@ stages:
     end_ratio: 1.0
     loss:
       alpha: 0.5
-      agreement_lambda: 0.2
-      agreement_temperature: 1.0
+      beta: 1.0
+      rho: 0.1
+      chi: 0.0
+      delta: 0.0
 ```
 
-When a stage defines its own `loss` subsection, those `alpha` and
-`agreement_lambda` values replace the global defaults just for that stage.
-If a field is omitted, it falls back to `training.loss.*`.
+When a stage defines its own `loss` subsection, those values replace the global
+defaults for that stage. If a field is omitted, it falls back to `training.loss.*`.
 
 Alignment note:
-- Agreement KL compares AR positions 0..S-2 to Diff positions S+1..2S-1
-  so both sides predict token t+1.
+- Agreement losses (KL_fwd, KL_rev, L_hard) compare AR positions 0..S-2 to Diff positions S+1..2S-1
+  so both sides predict the same token (t+1).
 
-
-Suggested hyperparameters (acceptance/speed focused):
-- Mild nudge: alpha=1.0, lambda=0.05-0.10
-- Speed-biased: alpha=0.3-0.5, lambda=0.2-0.4
-- Aggressive: alpha=0.2-0.3, lambda=0.5-1.0
-- One concrete go-fast start: alpha=0.3, lambda=0.2
+**Suggested hyperparameters:**
+- Baseline (no agreement): alpha=1.0, beta=1.0, rho=0, chi=0, delta=0
+- Mild agreement nudge: alpha=1.0, beta=1.0, rho=0.05, chi=0, delta=0
+- Forward KL focused: alpha=1.0, beta=1.0, rho=0.1-0.2, chi=0, delta=0
+- Hard greedy agreement: alpha=1.0, beta=1.0, rho=0, chi=0, delta=0.1-0.3
+- Speed-biased: alpha=0.5, beta=1.0, rho=0.2, chi=0, delta=0.1
 
 ---
 
@@ -105,8 +120,8 @@ Anchor-TiDAR keeps one decoder-only transformer and trains it with two
 attention regimes in a single forward pass:
 
 - Talk (AR): standard causal next-token prediction on the clean half.
-- Think (Diffusion): masked tokens with blockwise bidirectional attention and
-  inter-block causality.
+- Think (Diffusion): masked tokens with blockwise bidirectional attention
+  (blocks do not attend to each other).
 
 At inference time, each decode iteration runs one forward pass that:
 

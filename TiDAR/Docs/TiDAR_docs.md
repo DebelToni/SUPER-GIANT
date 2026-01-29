@@ -346,6 +346,8 @@ Files: `TiDAR/model/Prepare_mask_token.py`, `TiDAR/model/tokenizer_utils.py`
   matches AR baselines (distributional invariance).
 - `TiDAR/model/tidar_core.py`: position/bias templates, sampling utilities,
   rejection sampling, KV cache helpers.
+- `TiDAR/model/config_schema.py`: structured OmegaConf dataclasses +
+  `load_typed_config` for typed config access and path resolution.
 
 ---
 

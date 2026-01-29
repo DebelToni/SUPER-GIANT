@@ -36,12 +36,11 @@ shapes, masking, cache semantics) rather than re‑explaining TiDAR theory.
   - Key layout: `[PREFIX_CACHE | STEP_TOKENS]`.
   - Rules:
     - Verify queries see all prefix + causal verify tokens.
-- Predraft queries see prefix + verify[0..r] + bidirectional within their group.
+    - Predraft queries see prefix + verify[0..r] + bidirectional within their group.
+    - Predraft groups do not attend to each other.
 
-- `build_prefill_draft_bias_template(cache_len, draft_len)`
-  - Returns **all‑zero** bias: draft masks are **bidirectional** within the
-    draft block and can see the prefix. Prefix validity is handled in the
-    attention layer via `prefix_len` masking.
+- `build_prefill_prompt_draft_bias_template(cache_len, prompt_len, draft_len)`
+  - Single-pass prefill + initial draft bias (prompt causal, masks bidirectional).
 
 ### Sampling utilities
 
@@ -78,6 +77,7 @@ Important behavior:
    - Run forward pass with `decode_prefix_len = prefix_len - 1` to **avoid
      double‑conditioning the anchor** (anchor is already in `step_tokens[0]`).
     - Extract `verify_logits` (first K tokens) and `predraft_logits`.
+    - Predraft groups are bidirectional within-group and do not attend to each other.
    - Sample predraft tokens, run rejection sampling.
    - Commit accepted tokens to cache and output buffer.
    - Choose next draft from the selected predraft group.

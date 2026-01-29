@@ -1,0 +1,95 @@
+model:
+  embedding_size: 576
+  num_heads: 9
+  num_kv_heads: 3
+  num_layers: 30
+  feed_forward_size: 1536
+  rope_dim: 64
+  context_length: 2048
+  dropout_rate: 0.0
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tidar:
+  draft_length: 8
+  attn_bias_value: -1.0e10
+
+inference:
+  stop_on_eos: true
+  max_decode_steps: 64
+  temperature: 1.0
+  top_k: 0
+  draft_length: 8
+
+optimizer:
+  base_learning_rate: 1.0e-4
+  min_learning_rate: 1.0e-5
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip_norm: 0.5
+  weight_decay_exclusions:
+    - bias
+    - scale
+    # - embedding
+
+training:
+  batch_size: 8
+  gradient_accumulation: 4
+  max_epochs: 1
+  seed: 0
+  dataset_dir: "dataset_artifacts"
+  log_every: 500
+  checkpoint_every: 20000
+  mini_checkpoint_every: 100
+  mini_max_to_keep: 2
+  # label_smoothing <- future implement
+  scan_chunk: 1
+  loss:
+    alpha: 1.0              # weight for AR loss: L_tidar = (alpha*L_AR + L_Diff)/(1+alpha)
+    agreement_lambda: 0.0   # KL(stopgrad(p_AR) || p_Diff) coefficient; 0 disables
+
+stages:
+  - name: fw_edu_667m
+    dataset: fw_edu_667m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 0.6670
+    shuffle: true
+    fraction: 1.0
+  - name: cosmopedia_v2_167m
+    dataset: cosmopedia_v2_167m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 0.8340
+    shuffle: true
+    fraction: 1.0
+  - name: openwebmath_111m
+    dataset: openwebmath_111m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 0.9450
+    shuffle: true
+    fraction: 1.0
+  - name: starcoder_python_edu_44m
+    dataset: starcoder_python_edu_44m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 0.9890
+    shuffle: true
+    fraction: 1.0
+  - name: ultrachat_rehearsal_11m
+    dataset: ultrachat_rehearsal_11m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 1.0
+
+qa_finetune: {}
+
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"
+#export XLA_PYTHON_CLIENT_PREALLOCATE=false
+#export XLA_PYTHON_CLIENT_PREALLOCATE=true
+#export XLA_PYTHON_CLIENT_MEM_FRACTION=1.0

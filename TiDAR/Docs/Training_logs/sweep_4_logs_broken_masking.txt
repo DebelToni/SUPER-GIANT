@@ -1,0 +1,25 @@
+NOTE: Derived from Results_Sweep_4_runs_smollm135.typ; broken masking sweep.
+step    125 | loss 13.7980 ntp 2.6500 diff 15.5048 acc 0.0180
+step    250 | loss 10.8582 ntp 2.8544 diff 12.0599 acc 0.0340
+step    375 | loss 7.0645 ntp 2.7380 diff 7.6726 acc 0.1800
+step    500 | loss 6.2412 ntp 2.8343 diff 6.6817 acc 0.1910
+step    625 | loss 5.6279 ntp 2.6238 diff 5.9947 acc 0.2530
+step    750 | loss 5.3656 ntp 2.5836 diff 5.6723 acc 0.2410
+step    875 | loss 5.5364 ntp 2.8946 diff 5.7975 acc 0.2740
+step   1000 | loss 5.2680 ntp 2.6135 diff 5.5024 acc 0.3010
+step   1125 | loss 5.2849 ntp 2.7064 diff 5.4819 acc 0.2920
+step   1250 | loss 5.2516 ntp 2.7484 diff 5.4275 acc 0.3220
+step   1375 | loss 5.2813 ntp 2.7492 diff 5.4588 acc 0.3210
+step   1500 | loss 5.0336 ntp 2.5734 diff 5.1954 acc 0.3100
+step   1625 | loss 5.1637 ntp 2.7014 diff 5.3288 acc 0.3140
+step   1750 | loss 5.1199 ntp 2.6384 diff 5.2838 acc 0.2920
+step   1875 | loss 5.2155 ntp 2.7464 diff 5.3797 acc 0.3050
+step   2000 | loss 5.0151 ntp 2.6373 diff 5.1652 acc 0.3390
+step   2125 | loss 4.8394 ntp 1.8429 diff 5.0180 acc 0.2710
+step   2250 | loss 4.7868 ntp 1.7660 diff 4.9770 acc 0.2620
+step   2375 | loss 4.7444 ntp 1.8258 diff 4.9086 acc 0.2750
+step   2500 | loss 4.7736 ntp 1.8452 diff 4.9378 acc 0.2700
+step   2625 | loss 4.4644 ntp 2.2095 diff 4.6146 acc 0.3290
+step   2750 | loss 4.6415 ntp 2.3002 diff 4.7911 acc 0.3270
+step   2875 | loss 4.5355 ntp 2.3120 diff 4.6710 acc 0.3300
+step   3000 | loss 3.9294 ntp 1.3364 diff 4.0648 acc 0.2710

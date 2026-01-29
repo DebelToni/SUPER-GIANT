@@ -28,7 +28,6 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
 import jax
 import jax.numpy as jnp
 import numpy as np
-from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +36,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from TiDAR.model.GiantTiDAR import TiDAR
 from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embedding_params
+from TiDAR.model.config_schema import TiDARConfig, load_typed_config
 from TiDAR.model.tidar_core import (
     build_decode_bias_template,
     build_decode_position_template,
@@ -52,71 +52,19 @@ from GIANT.v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
 # Config / IO
 # =============================================================================
 
-def _resolve_config_path(value: str | None, default: Path) -> Path:
-    if value is None:
-        return default
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = (Path.cwd() / candidate).resolve()
-    return candidate
-
-
 def load_configs(
     model_config_path: str | None = None,
     global_config_path: str | None = None,
-) -> OmegaConf:
-    model_dir = Path(__file__).resolve().parent
-    project_root = model_dir.parent
-    resolved_model_cfg = _resolve_config_path(model_config_path, model_dir / "Config.yml")
-    resolved_global_cfg = _resolve_config_path(global_config_path, project_root / "Global_Config.yml")
-    cfg = OmegaConf.merge(
-        OmegaConf.load(resolved_global_cfg),
-        OmegaConf.load(resolved_model_cfg),
-    )
-    
-    base_prefix_str = cfg.paths.get("data_root", "") if "paths" in cfg else ""
-    base_prefix = Path(base_prefix_str) if base_prefix_str else None
-    
-    def resolve_path(value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return None
-        path = Path(str(value))
-        if path.is_absolute() or base_prefix is None:
-            return str(path)
-        return str((base_prefix / path).resolve())
-    
-    if base_prefix is not None:
-        cfg.paths.data_root = str(base_prefix)
-    else:
-        cfg.paths.data_root = str(project_root)
-    
-    for key in ("checkpoints_root", "hf_cache_root", "logs_root"):
-        if key in cfg.paths and cfg.paths[key] is not None:
-            resolved = resolve_path(cfg.paths[key])
-            if resolved is not None:
-                cfg.paths[key] = resolved
-    
-    if "tokenizer" in cfg:
-        cache_dir = cfg.tokenizer.get("cache_dir")
-        if cache_dir:
-            cache_path = Path(str(cache_dir))
-            if not cache_path.is_absolute():
-                cfg.tokenizer.cache_dir = str(Path(cfg.paths.data_root) / cache_path)
-        custom_path = cfg.tokenizer.get("custom_path")
-        if custom_path:
-            custom_path = Path(str(custom_path))
-            if not custom_path.is_absolute():
-                cfg.tokenizer.custom_path = str(Path(cfg.paths.data_root) / custom_path)
-    
-    return cfg
+) -> TiDARConfig:
+    return load_typed_config(model_config_path, global_config_path)
 
 
 def resolve_params_dir(root: Path) -> Path:
     return root if root.name == "params" else root / "params"
 
 
-def resolve_checkpoint_path(cfg, checkpoint: Optional[str], checkpoint_dir: Optional[str]) -> Path:
-    base_root = Path(cfg.paths.data_root)
+def resolve_checkpoint_path(cfg: TiDARConfig, checkpoint: Optional[str], checkpoint_dir: Optional[str]) -> Path:
+    base_root = Path(str(cfg.paths.data_root))
     ckpt_dir = Path(checkpoint_dir or cfg.paths.checkpoints_root)
     if not ckpt_dir.is_absolute():
         ckpt_dir = (base_root / ckpt_dir).resolve()
@@ -142,7 +90,7 @@ def resolve_checkpoint_path(cfg, checkpoint: Optional[str], checkpoint_dir: Opti
     return Path(latest)
 
 
-def load_tokenizer(cfg):
+def load_tokenizer(cfg: TiDARConfig):
     tok_cfg = cfg.tokenizer
     if tok_cfg.use_custom:
         tokenizer = AutoTokenizer.from_pretrained(tok_cfg.custom_path)
@@ -160,7 +108,7 @@ def load_tokenizer(cfg):
     return tokenizer
 
 
-def build_model(cfg, vocab_size: int, context_length: int) -> TiDAR:
+def build_model(cfg: TiDARConfig, vocab_size: int, context_length: int) -> TiDAR:
     model_cfg = cfg.model
     return TiDAR(
         vocab_size=vocab_size,
@@ -557,7 +505,7 @@ def main():
     cache_vars = init_kv_cache(model, batch_size=1, pad_token_id=pad_token_id)
     cache_vars = jax.device_put(cache_vars)
     
-    # Prefill prompt
+    # Prefill prompt + initial draft (single pass)
     print("Prefilling prompt + initial draft...")
     cache_vars, prefix_len, prev_logit, initial_draft_logits = prefill_prompt_with_draft(
         model,

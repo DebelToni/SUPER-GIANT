@@ -14,9 +14,10 @@ Position IDs (relative to prefix_len L):
   Predraft: For group r in [0..K-1]:
               positions [L+r+1, L+r+2, ..., L+r+K]
               
-Attention pattern:
-  - Verify tokens: causal among themselves + see all prefix
-  - Predraft group r: sees prefix + verify[0:r+1] + causal within group
+ Attention pattern:
+   - Verify tokens: causal among themselves + see all prefix
+   - Predraft group r: sees prefix + verify[0:r+1] + bidirectional within group
+   - Predraft groups do not attend to each other
 
 Rejection sampling:
   - Verify starts at position 1 (not 0): check if sampled_from_logit[i] == draft[i]

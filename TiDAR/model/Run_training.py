@@ -18,11 +18,11 @@ import numpy as np
 import optax
 from flax import core as flax_core
 from flax import serialization
-from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
 from TiDAR.model.GiantTiDAR import TiDAR
 from TiDAR.model.Training_step import loss_and_grad
+from TiDAR.model.config_schema import TiDARConfig, load_typed_config
 from TiDAR.model.tidar_utils import build_train_batch
 from TiDAR.model.tokenizer_utils import (
     ensure_tidar_mask_token,
@@ -93,66 +93,14 @@ class StageRuntime:
     total_steps: int
 
 
-def _resolve_config_path(value: str | None, default: Path) -> Path:
-    if value is None:
-        return default
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = (Path.cwd() / candidate).resolve()
-    return candidate
-
-
 def load_configs(
     model_config_path: str | None = None,
     global_config_path: str | None = None,
-) -> OmegaConf:
-    model_dir = Path(__file__).resolve().parent
-    project_root = model_dir.parent
-    resolved_model_cfg = _resolve_config_path(model_config_path, model_dir / "Config.yml")
-    resolved_global_cfg = _resolve_config_path(global_config_path, project_root / "Global_Config.yml")
-    cfg = OmegaConf.merge(
-        OmegaConf.load(resolved_global_cfg),
-        OmegaConf.load(resolved_model_cfg),
-    )
-
-    base_prefix_str = cfg.paths.get("data_root", "") if "paths" in cfg else ""
-    base_prefix = Path(base_prefix_str) if base_prefix_str else None
-
-    def resolve_path(value: str | None) -> str | None:
-        if value is None:
-            return None
-        path = Path(str(value))
-        if path.is_absolute() or base_prefix is None:
-            return str(path)
-        return str((base_prefix / path).resolve())
-
-    if base_prefix is not None:
-        cfg.paths.data_root = str(base_prefix)
-    else:
-        cfg.paths.data_root = str(project_root)
-
-    for key in ("processed_data_root", "dataloader_state_root", "logs_root", "checkpoints_root", "hf_cache_root"):
-        if key in cfg.paths and cfg.paths[key] is not None:
-            resolved = resolve_path(cfg.paths[key])
-            if resolved is not None:
-                cfg.paths[key] = resolved
-
-    if "tokenizer" in cfg:
-        cache_dir = cfg.tokenizer.get("cache_dir")
-        if cache_dir:
-            cache_path = Path(str(cache_dir))
-            if not cache_path.is_absolute():
-                cfg.tokenizer.cache_dir = str(Path(cfg.paths.data_root) / cache_path)
-        custom_path = cfg.tokenizer.get("custom_path")
-        if custom_path:
-            custom_path = Path(str(custom_path))
-            if not custom_path.is_absolute():
-                cfg.tokenizer.custom_path = str(Path(cfg.paths.data_root) / custom_path)
-
-    return cfg
+) -> TiDARConfig:
+    return load_typed_config(model_config_path, global_config_path)
 
 
-def load_tokenizer(cfg: OmegaConf):
+def load_tokenizer(cfg: TiDARConfig):
     from transformers import AutoTokenizer
 
     tok_cfg = cfg.tokenizer
@@ -172,8 +120,8 @@ def load_tokenizer(cfg: OmegaConf):
     return tokenizer
 
 
-def ensure_mask_id(tokenizer, cfg: OmegaConf) -> int:
-    base_token = getattr(cfg.tokenizer, "mask_token_override", None) or "[MASK]"
+def ensure_mask_id(tokenizer, cfg: TiDARConfig) -> int:
+    base_token = cfg.tokenizer.mask_token_override or "[MASK]"
     mask_token, mask_id, added = ensure_tidar_mask_token(tokenizer, base_token=base_token)
     if added <= 0:
         print(f"[mask] using existing token '{mask_token}' (id={mask_id})")
@@ -182,30 +130,33 @@ def ensure_mask_id(tokenizer, cfg: OmegaConf) -> int:
     return mask_id
 
 
-def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
-    stages_raw = OmegaConf.to_container(cfg.stages, resolve=True)
+def parse_stage_configs(cfg: TiDARConfig) -> List[StageConfig]:
     stage_cfgs = []
-    for stage in stages_raw:
-        loss_cfg = stage.get("loss") or {}
-        
-        def get_float_or_none(key):
-            val = loss_cfg.get(key)
-            return float(val) if val is not None else None
-        
+    for stage in cfg.stages or []:
+        loss_cfg = getattr(stage, "loss", None)
+
+        def get_loss_value(key: str):
+            if loss_cfg is None:
+                return None
+            return getattr(loss_cfg, key, None)
+
+        def get_float_or_none(value):
+            return float(value) if value is not None else None
+
         stage_cfgs.append(
             StageConfig(
-                name=stage["name"],
-                dataset=stage["dataset"],
-                seq_len=int(stage["seq_len"]),
-                epochs=int(stage["epochs"]),
-                end_ratio=float(stage["end_ratio"]),
-                shuffle=bool(stage.get("shuffle", True)),
-                fraction=float(stage.get("fraction", 1.0)),
-                loss_alpha=get_float_or_none("alpha"),
-                loss_beta=get_float_or_none("beta"),
-                loss_rho=get_float_or_none("rho"),
-                loss_chi=get_float_or_none("chi"),
-                loss_delta=get_float_or_none("delta"),
+                name=stage.name,
+                dataset=stage.dataset,
+                seq_len=int(stage.seq_len),
+                epochs=int(stage.epochs),
+                end_ratio=float(stage.end_ratio),
+                shuffle=bool(getattr(stage, "shuffle", True)),
+                fraction=float(getattr(stage, "fraction", 1.0)),
+                loss_alpha=get_float_or_none(get_loss_value("alpha")),
+                loss_beta=get_float_or_none(get_loss_value("beta")),
+                loss_rho=get_float_or_none(get_loss_value("rho")),
+                loss_chi=get_float_or_none(get_loss_value("chi")),
+                loss_delta=get_float_or_none(get_loss_value("delta")),
             )
         )
     return stage_cfgs
@@ -266,7 +217,7 @@ def build_stage_runtimes(
     return runtimes
 
 
-def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientTransformation:
+def build_optimizer(cfg: TiDARConfig, total_steps: int, params) -> optax.GradientTransformation:
     warmup_steps = int(cfg.optimizer.warmup_steps)
     if total_steps <= warmup_steps + 1:
         schedule = optax.constant_schedule(cfg.optimizer.base_learning_rate)
@@ -278,7 +229,7 @@ def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientT
             decay_steps=total_steps - warmup_steps,
             end_value=cfg.optimizer.min_learning_rate,
         )
-    exclusions = cfg.optimizer.get("weight_decay_exclusions", [])
+    exclusions = list(cfg.optimizer.weight_decay_exclusions or [])
     mask = create_weight_decay_mask(params, exclusions) if exclusions else None
 
     optimizer = optax.chain(
@@ -295,8 +246,8 @@ def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientT
     return optax.apply_if_finite(optimizer, max_consecutive_errors=5)
 
 
-def dataloader_state_path(cfg: OmegaConf, step: int) -> Path:
-    root = Path(cfg.paths.dataloader_state_root)
+def dataloader_state_path(cfg: TiDARConfig, step: int) -> Path:
+    root = Path(str(cfg.paths.dataloader_state_root))
     return root / f"state_{step:07d}.json"
 
 
@@ -349,7 +300,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_configs(args.config, args.global_config)
-    global_seed = cfg.get("global_seed")
+    global_seed = cfg.global_seed
     if global_seed is not None:
         np.random.seed(int(global_seed))
     tokenizer = load_tokenizer(cfg)
@@ -641,6 +592,7 @@ def main() -> None:
     start = time.time()
     accum_grads = _init_accum_grads(params)
     accum_count = jnp.asarray(0, dtype=jnp.int32)
+    last_loss = None
     for stage_idx in range(current_stage_idx, len(stage_runtimes)):
         runtime = stage_runtimes[stage_idx]
         stage_steps_target = runtime.total_steps

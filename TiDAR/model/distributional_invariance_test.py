@@ -46,7 +46,7 @@ from TiDAR.model.inference import (
 )
 from TiDAR.model.tidar_core import (
     init_kv_cache,
-    prefill_prompt,
+    prefill_prompt_with_draft,
     sample_tokens,
 )
 from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embedding_params
@@ -131,6 +131,7 @@ def collect_histograms(
     out_ids,
     prefix_len,
     prev_logit,
+    initial_draft_logits,
     prompt_len: int,
     num_tokens: int,
     seed: int,
@@ -147,6 +148,7 @@ def collect_histograms(
             jnp.asarray(num_tokens, dtype=jnp.int32),
             prev_logit,
             rng,
+            initial_draft_logits,
         )
         out_ids_final.block_until_ready()
         generated_count = int(np.asarray(generated))
@@ -279,15 +281,18 @@ def main() -> None:
     eos_id = tokenizer.eos_token_id
     eos_id_for_jit = int(eos_id) if eos_id is not None else -1
 
-    # Prefill prompt once and reuse across samples.
-    cache_vars = init_kv_cache(model, batch_size=1, pad_token_id=pad_token_id)
-    cache_vars = jax.device_put(cache_vars)
-    cache_vars, prefix_len, prev_logit = prefill_prompt(
+    # Prefill prompt + initial draft once for the AR baseline.
+    empty_cache = init_kv_cache(model, batch_size=1, pad_token_id=pad_token_id)
+    empty_cache = jax.device_put(empty_cache)
+    cache_vars, prefix_len, prev_logit, _ = prefill_prompt_with_draft(
         model,
         params,
-        cache_vars,
+        empty_cache,
         jnp.asarray(prompt_ids),
+        draft_len=max_draft_len,
+        mask_id=int(mask_id),
         kv_cache_len=context_length,
+        bias_value=float(cfg.tidar.attn_bias_value),
     )
 
     buffer_len = required_len
@@ -317,6 +322,16 @@ def main() -> None:
     distributions[baseline_label] = [normalize(counter) for counter in ar_counters]
 
     for draft_len in draft_lens:
+        cache_vars, _, _, initial_draft_logits = prefill_prompt_with_draft(
+            model,
+            params,
+            empty_cache,
+            jnp.asarray(prompt_ids),
+            draft_len=int(draft_len),
+            mask_id=int(mask_id),
+            kv_cache_len=context_length,
+            bias_value=float(cfg.tidar.attn_bias_value),
+        )
         generate_fn = make_anchor_tidar_generate_fn(
             model,
             cache_len=context_length,
@@ -338,6 +353,7 @@ def main() -> None:
             out_ids=out_ids,
             prefix_len=prefix_len,
             prev_logit=prev_logit,
+            initial_draft_logits=initial_draft_logits,
             prompt_len=prompt_len,
             num_tokens=args.num_tokens,
             seed=args.seed,

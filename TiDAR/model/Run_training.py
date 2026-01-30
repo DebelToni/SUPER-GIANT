@@ -300,6 +300,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_configs(args.config, args.global_config)
+    jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
     global_seed = cfg.global_seed
     if global_seed is not None:
         np.random.seed(int(global_seed))
@@ -343,9 +344,15 @@ def main() -> None:
         context_length=max_seq_len * 2,
         d_model=cfg.model.embedding_size,
         n_heads=cfg.model.num_heads,
+        num_kv_heads=cfg.model.num_kv_heads,
+        rope_dim=cfg.model.rope_dim,
         d_ff=cfg.model.feed_forward_size,
         n_layers=cfg.model.num_layers,
         dropout_rate=cfg.model.dropout_rate,
+        param_dtype=cfg.model.param_dtype,
+        compute_dtype=cfg.model.compute_dtype,
+        use_remat=cfg.model.use_remat,
+        draft_len=cfg.tidar.draft_length,
     )
 
     rng = jax.random.PRNGKey(seed)

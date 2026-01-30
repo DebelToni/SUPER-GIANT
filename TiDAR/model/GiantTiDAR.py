@@ -1,41 +1,33 @@
 from typing import Optional
-from pathlib import Path
-
 import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
-from omegaconf import OmegaConf
 
 from TiDAR.model.Transformer_block import TinyTransformerBlock
 
-MODEL_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = MODEL_DIR.parent
 
-cfg = OmegaConf.merge(
-    OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
-    OmegaConf.load(MODEL_DIR / "Config.yml"),
-)
-MODEL_CFG = cfg.model
-
-
-def _to_dtype(name: str) -> jnp.dtype:
-    try:
-        return getattr(jnp, name)
-    except AttributeError:
-        return jnp.dtype(name)
-
-
-PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
-COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
+def _resolve_dtype(value: str | jnp.dtype) -> jnp.dtype:
+    if isinstance(value, str):
+        try:
+            return getattr(jnp, value)
+        except AttributeError:
+            return jnp.dtype(value)
+    return value
 
 class TiDAR(nn.Module):
     vocab_size:     int
     context_length: int
     d_model:        int
     n_heads:        int
+    num_kv_heads:   int
+    rope_dim:       int
     d_ff:           int
     n_layers:       int
     dropout_rate:   float = 0.1
+    param_dtype:    str | jnp.dtype = "float32"
+    compute_dtype:  str | jnp.dtype = "bfloat16"
+    use_remat:      bool = False
+    draft_len:      int = 0
 
     @nn.compact
     def __call__(
@@ -53,12 +45,15 @@ class TiDAR(nn.Module):
         kv_cache_len: Optional[int] = None,
         return_hidden: bool = False,
     ):
+        param_dtype = _resolve_dtype(self.param_dtype)
+        compute_dtype = _resolve_dtype(self.compute_dtype)
+
         embed = nn.Embed(
             num_embeddings=self.vocab_size,
             features=self.d_model,
             embedding_init=nn.initializers.normal(stddev=0.02),
-            dtype=COMPUTE_DTYPE,
-            param_dtype=PARAM_DTYPE,
+            dtype=compute_dtype,
+            param_dtype=param_dtype,
         )
         x = embed(tokens)
 
@@ -68,10 +63,15 @@ class TiDAR(nn.Module):
             x = TinyTransformerBlock(
                     d_model=self.d_model,
                     n_heads=self.n_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    rope_dim=self.rope_dim,
                     d_ff=self.d_ff,
                     context_length=self.context_length,
                     dropout_rate=self.dropout_rate,
-                    dtype=COMPUTE_DTYPE,
+                    dtype=compute_dtype,
+                    param_dtype=param_dtype,
+                    use_remat=self.use_remat,
+                    draft_len=self.draft_len,
             )(
                 x,
                 deterministic=deterministic,
@@ -90,7 +90,7 @@ class TiDAR(nn.Module):
             return x
 
         # SmolLM/LLaMA-style final RMSNorm
-        x = RMSNorm(name="final_norm", dtype=COMPUTE_DTYPE, epsilon=1e-5)(x)
+        x = RMSNorm(name="final_norm", dtype=compute_dtype, epsilon=1e-5)(x)
 
         logits = jnp.einsum("bld,vd->blv",
                             x.astype(jnp.float32),

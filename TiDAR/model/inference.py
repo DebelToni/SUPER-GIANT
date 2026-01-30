@@ -108,16 +108,22 @@ def load_tokenizer(cfg: TiDARConfig):
     return tokenizer
 
 
-def build_model(cfg: TiDARConfig, vocab_size: int, context_length: int) -> TiDAR:
+def build_model(cfg: TiDARConfig, vocab_size: int, context_length: int, draft_len: int) -> TiDAR:
     model_cfg = cfg.model
     return TiDAR(
         vocab_size=vocab_size,
         context_length=context_length,
         d_model=model_cfg.embedding_size,
         n_heads=model_cfg.num_heads,
+        num_kv_heads=model_cfg.num_kv_heads,
+        rope_dim=model_cfg.rope_dim,
         d_ff=model_cfg.feed_forward_size,
         n_layers=model_cfg.num_layers,
         dropout_rate=0.0,
+        param_dtype=model_cfg.param_dtype,
+        compute_dtype=model_cfg.compute_dtype,
+        use_remat=model_cfg.use_remat,
+        draft_len=int(draft_len),
     )
 
 
@@ -482,7 +488,7 @@ def main():
         print(f"Using mask token '{mask_token}' (id={mask_id})")
     
     # Build model and load params
-    model = build_model(cfg, len(tokenizer), context_length)
+    model = build_model(cfg, len(tokenizer), context_length, draft_len)
     params = load_params(checkpoint_path)
     
     rng = jax.random.PRNGKey(args.seed)

@@ -94,6 +94,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_configs(args.config, args.global_config)
+    jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
     tokenizer = load_tokenizer(cfg)
 
     model_cfg = cfg.model
@@ -102,9 +103,15 @@ def main() -> None:
         context_length=model_cfg.context_length,
         d_model=model_cfg.embedding_size,
         n_heads=model_cfg.num_heads,
+        num_kv_heads=model_cfg.num_kv_heads,
+        rope_dim=model_cfg.rope_dim,
         d_ff=model_cfg.feed_forward_size,
         n_layers=model_cfg.num_layers,
         dropout_rate=0.0,
+        param_dtype=model_cfg.param_dtype,
+        compute_dtype=model_cfg.compute_dtype,
+        use_remat=model_cfg.use_remat,
+        draft_len=getattr(cfg, "tidar", {}).get("draft_length", 0),
     )
 
     dummy = jnp.full((1, 1), 0, dtype=jnp.int32)

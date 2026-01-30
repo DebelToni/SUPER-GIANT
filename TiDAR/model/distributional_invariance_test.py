@@ -263,7 +263,7 @@ def main() -> None:
     else:
         print(f"Using mask token '{mask_token}' (id={mask_id})")
 
-    model = build_model(cfg, len(tokenizer), context_length)
+    model = build_model(cfg, len(tokenizer), context_length, max_draft_len)
     params = load_params(checkpoint_path)
 
     rng = jax.random.PRNGKey(args.seed)

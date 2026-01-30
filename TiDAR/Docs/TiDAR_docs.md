@@ -292,22 +292,59 @@ Prefix validity (prefix_len) is enforced inside attention via a separate
 key-validity bias.
 
 Decode mask example (cache_len=9, K=3):
+A - anchor (basically D0 but sampled from AR)
+Di - draft i (positions 1..K-1)
+Mij - mask in predraft i, index j
+
 ```
----- P0 P1 P2 P3 P4 P5 P6 P7 P8 | V0 V1 V2 G00 G01 G02 G10 G11 G12 G20 G21 G22
+---- P0 P1 P2 P3 P4 P5 P6 P7 P8 | A0 D1 D2 M00 M01 M02 M10 M11 M12 M20 M21 M22
 ------------------------------------------------------------------------------
  V0   .  .  .  .  .  .  .  .  . |  .  #  #  #  #  #  #  #  #  #  #  #
- V1   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  #  #  #  #  #  #
- V2   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  #  #  #
-G00   .  .  .  .  .  .  .  .  . |  .  #  #  .  .  .  #  #  #  #  #  #
-G01   .  .  .  .  .  .  .  .  . |  .  #  #  .  .  .  #  #  #  #  #  #
-G02   .  .  .  .  .  .  .  .  . |  .  #  #  .  .  .  #  #  #  #  #  #
-G10   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  .  .  .  #  #  #
-G11   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  .  .  .  #  #  #
-G12   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  .  .  .  #  #  #
-G20   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  .  .  .
-G21   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  .  .  .
-G22   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  .  .  .
+ D1   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  #  #  #  #  #  #
+ D2   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  #  #  #
+M00   .  .  .  .  .  .  .  .  . |  .  #  #  .  .  .  #  #  #  #  #  #
+M01   .  .  .  .  .  .  .  .  . |  .  #  #  .  .  .  #  #  #  #  #  #
+M02   .  .  .  .  .  .  .  .  . |  .  #  #  .  .  .  #  #  #  #  #  #
+M10   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  .  .  .  #  #  #
+M11   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  .  .  .  #  #  #
+M12   .  .  .  .  .  .  .  .  . |  .  .  #  #  #  #  .  .  .  #  #  #
+M20   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  .  .  .
+M21   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  .  .  .
+M22   .  .  .  .  .  .  .  .  . |  .  .  .  #  #  #  #  #  #  .  .  .
 ```
+
+Additional Verbose explenation of how decode pass works:
+
+At inference draft token Mij from block i sees the prefix tokens + also the anchor token + any currently verified token up to token i (including it) from the draft that is being validated from last step
+
+So if we verify this:
+A - anchor
+D - drafts but starting from 1, becasue 0 is the anchor
+Mij - Mask in theoretical draft i, at index j
+
+We input this at K=5:
+A D1 D2 D3 D4 M00 M01 M02 M03 M04 M10 M11 M12 M13 M14 M20 M21 M22 M23 M24 M30 M31 M32 M33 M34 M40 M41 M42 M43 M44
+(we also have in KV cache any prefix)
+
+More visual way to present it would be:
+```
+A   D1  D2  D3  D4  
+    M00 M01 M02 M03 M04 
+        M10 M11 M12 M13 M14 
+            M20 M21 M22 M23 M24 
+                M30 M31 M32 M33 M34 
+                    M40 M41 M42 M43 M44
+```
+^ Here Mij sees the prefix + from the current pass the tokens from the first row to the left of the Mi0 token ^
+
+Lets take M21 for example.
+M21 will attend causally to:
+* prefix
+* A D1 D2 
+bidiretionally:
+* M20 M21 M22 M23 M24
+(all tokens in the same block)
+
 
 ### 6.4 Rejection sampling (anchor aware)
 Function: `anchor_rejection_sample` in `TiDAR/model/tidar_core.py`
@@ -352,6 +389,12 @@ Files: `TiDAR/model/Prepare_mask_token.py`, `TiDAR/model/tokenizer_utils.py`
 ---
 
 ## 9) Practical notes for future work
+- **Config handling (Jan 30, 2026)**: `GiantTiDAR` and `Transformer_block` no longer read
+  `TiDAR/model/Config.yml` at import time. All model-specific settings
+  (`num_kv_heads`, `rope_dim`, `param_dtype`, `compute_dtype`, `use_remat`,
+  `draft_length`) are passed from the runtime config (`--config`) into the model
+  constructors. This enables switching between SmolLM-135M and SmolLM2-360M
+  without changing `Config.yml`.
 - Training uses block diffusion (non-overlapping blocks) as implemented in
   `build_tidar_train_bias`.
 - Training loss/metrics are centralized in `TiDAR/model/Training_step.py` and

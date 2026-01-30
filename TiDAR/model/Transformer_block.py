@@ -7,35 +7,6 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
 
-from pathlib import Path
-
-from omegaconf import OmegaConf
-
-
-MODEL_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = MODEL_DIR.parent
-
-cfg = OmegaConf.merge(
-    OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
-    OmegaConf.load(MODEL_DIR / "Config.yml"),
-)
-MODEL_CFG = cfg.model
-TIDAR_CFG = getattr(cfg, "tidar", None)
-
-
-def _to_dtype(name: str) -> jnp.dtype:
-    try:
-        return getattr(jnp, name)
-    except AttributeError:
-        return jnp.dtype(name)
-
-
-PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
-COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
-
-from jax import config as jax_config
-jax_config.update("jax_default_matmul_precision", MODEL_CFG.compute_dtype)  
-
 IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
 
 def _rotate_every_two(x):
@@ -67,11 +38,13 @@ class NativeJaxSelfAttention(nn.Module):
 
     num_heads: int
     qkv_features: int
-    context_length: int = MODEL_CFG.context_length
+    context_length: int
     dropout_rate: float = 0.0
     num_kv: int = 1
-    dtype: jnp.dtype = COMPUTE_DTYPE
-    rotary_dim: int = MODEL_CFG.rope_dim
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+    rotary_dim: int = 64
+    draft_len: int = 0
 
     def setup(self):
         assert self.qkv_features % self.num_heads == 0, "qkv_features must be divisible by num_heads"
@@ -86,21 +59,18 @@ class NativeJaxSelfAttention(nn.Module):
             use_bias=False,
             name="qkv_proj",
             dtype=self.dtype,
-            param_dtype=PARAM_DTYPE,
+            param_dtype=self.param_dtype,
         )
         self.o_proj = nn.Dense(
             self.qkv_features,
             use_bias=False,
             name="o_proj",
             dtype=self.dtype,
-            param_dtype=PARAM_DTYPE,
+            param_dtype=self.param_dtype,
         )
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
-        draft_len = 0
-        if TIDAR_CFG is not None and hasattr(TIDAR_CFG, "draft_length"):
-            draft_len = int(TIDAR_CFG.draft_length)
-        rope_len = int(self.context_length) + (2 * draft_len)
+        rope_len = int(self.context_length) + (2 * int(self.draft_len))
         self._rope_sin, self._rope_cos = _build_rope_cache(
             rope_len, self.rotary_dim, self.dtype
         )
@@ -284,9 +254,14 @@ class TinyTransformerBlock(nn.Module):
     d_model: int
     n_heads: int
     d_ff: int
-    context_length: int = MODEL_CFG.context_length
+    num_kv_heads: int
+    rope_dim: int
+    context_length: int
     dropout_rate: float = 0.1
-    dtype: jnp.dtype = COMPUTE_DTYPE
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+    draft_len: int = 0
+    use_remat: bool = False
 
     @nn.compact
     def __call__(
@@ -308,11 +283,14 @@ class TinyTransformerBlock(nn.Module):
             h_norm = RMSNorm(name="rms1", dtype=self.dtype, epsilon=1e-5)(h)
             h_attn = NativeJaxSelfAttention(
                 num_heads=module.n_heads,
-                num_kv=MODEL_CFG.num_kv_heads,
+                num_kv=module.num_kv_heads,
                 qkv_features=module.d_model,
                 context_length=module.context_length,
                 dropout_rate=module.dropout_rate,
                 dtype=module.dtype,
+                param_dtype=module.param_dtype,
+                rotary_dim=module.rope_dim,
+                draft_len=module.draft_len,
             )(
                 h_norm,
                 deterministic=deterministic,
@@ -337,7 +315,7 @@ class TinyTransformerBlock(nn.Module):
                 proj_dim,
                 name="fc1",
                 dtype=module.dtype,
-                param_dtype=PARAM_DTYPE,
+                param_dtype=module.param_dtype,
                 use_bias=False,
             )(h_norm)
 
@@ -349,12 +327,11 @@ class TinyTransformerBlock(nn.Module):
                 module.d_model,
                 name="fc2",
                 dtype=module.dtype,
-                param_dtype=PARAM_DTYPE,
+                param_dtype=module.param_dtype,
                 use_bias=False,
             )(h_ffn)
             h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)
             return residual + h_ffn
 
-        use_remat = bool(getattr(MODEL_CFG, "use_remat", False))
-        block_fn = nn.remat(_block) if use_remat else _block
+        block_fn = nn.remat(_block) if self.use_remat else _block
         return block_fn(self, x)

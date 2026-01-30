@@ -1,15 +1,15 @@
-# TiDAR Config for SmolLM-135M
-# HuggingFace repo: HuggingFaceTB/SmolLM-135M
-# Checkpoint: /proj/giant-data/TiDAR/smol/smollm-135m.npz
+# TiDAR Config for SmolLM2-360M
+# HuggingFace repo: HuggingFaceTB/SmolLM2-360M
+# Checkpoint: /proj/giant-data/TiDAR/smol/smollm2-360m.npz
 
 model:
-  embedding_size: 576
-  num_heads: 9
-  num_kv_heads: 3
-  num_layers: 30
-  feed_forward_size: 1536
+  embedding_size: 960
+  num_heads: 15
+  num_kv_heads: 5
+  num_layers: 32
+  feed_forward_size: 2560
   rope_dim: 64
-  context_length: 2048
+  context_length: 8192
   dropout_rate: 0.0
   use_remat: false
   param_dtype: float32
@@ -38,8 +38,8 @@ optimizer:
     # - embedding
 
 training:
-  batch_size: 8
-  gradient_accumulation: 4
+  batch_size: 4
+  gradient_accumulation: 8
   max_epochs: 1
   seed: 0
   dataset_dir: "dataset_artifacts"

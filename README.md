@@ -1,6 +1,6 @@
 
 <h1 align="center">SUPER GIANT</h1>
-<h5 align="center"> SUPERsupreme Utra PROfesional ELITE ReVolutIonary GIGA intelligent ArtIfical neXus TITAN </h5>
+<!-- <h5 align="center"> SUPERsupreme Utra PROfesional ELITE ReVolutIonary GIGA intelligent ArtIfical neXus TITAN </h5> -->
 
 GIANT is my own custom implementation of a large language model (LLM) written in Python - JAX.
 It is designed to be a modern, robust and easily expandable implementation with a focus on performance on a single GPU and ease of use. 

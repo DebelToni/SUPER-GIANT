@@ -1,0 +1,33 @@
+# TiDAR Data Pipeline Config for Greedy Acceptance Rate Experiment
+# Target: ~500M tokens for SmolLM-135M training
+# Goal: Train with high hard agreement loss to maximize greedy acceptance rate
+
+outputs:
+  processed_root: "dataset_artifacts/Greedy_exp_500m"
+  rows_per_shard: 32768
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 7777
+  write_batch_size: 256
+  dry_run_preview_rows: 200
+
+stages:
+  fw_edu_500m:
+    description: "FineWeb-Edu 500M tokens at 2048 context for greedy acceptance experiment"
+    output_dir: "fw_edu_500m"
+    sequence_length: 2048
+    target_tokens: 500000000
+    min_tokens: 64
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceFW/fineweb-edu"
+        split: "train"
+        streaming: true
+        text_field: "text"

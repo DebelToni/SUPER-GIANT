@@ -50,6 +50,47 @@ def _compute_accept_rate(
     return (accept_per_pos * pos_mask).sum() / denom
 
 
+def _compute_greedy_accept_rate(
+    logits,
+    mask_ntp,
+    mask_diff,
+    *,
+    accept_max_positions: int,
+):
+    """
+    Greedy acceptance rate: fraction of positions where argmax(AR) == argmax(Diff).
+    
+    This is the metric that directly measures speculative decoding performance in greedy mode.
+    Computed over the full batch (not just last row) for stability.
+    """
+    S = logits.shape[1] // 2
+    if S <= 1:
+        return jnp.array(0.0, dtype=jnp.float32)
+    
+    # AR logits at positions 0..S-2 predict tokens 1..S-1
+    ar_logits = logits[:, : S - 1]          # [B, S-1, V]
+    # Diff logits at positions S+1..2S-1 predict tokens 1..S-1 (aligned)
+    diff_logits = logits[:, S + 1 :]        # [B, S-1, V]
+    
+    # Masks
+    ar_mask = mask_ntp[:, : S - 1]          # [B, S-1]
+    diff_mask = mask_diff[:, S + 1 :]       # [B, S-1]
+    joint_mask = (ar_mask * diff_mask) > 0  # [B, S-1]
+    
+    # Argmax for both
+    ar_argmax = jnp.argmax(ar_logits, axis=-1)    # [B, S-1]
+    diff_argmax = jnp.argmax(diff_logits, axis=-1)  # [B, S-1]
+    
+    # Match where both are valid
+    matches = (ar_argmax == diff_argmax) & joint_mask
+    
+    # Compute rate
+    num_matches = matches.sum()
+    num_valid = jnp.maximum(joint_mask.sum(), 1.0)
+    
+    return num_matches / num_valid
+
+
 def _compute_alignment_losses(
     logits: jnp.ndarray,
     mask_ntp: jnp.ndarray,
@@ -226,8 +267,21 @@ def loss_and_metrics(
         lambda _: jnp.array(0.0, dtype=jnp.float32),
         operand=None,
     )
+    
+    # Greedy acceptance rate (argmax match) - always compute for greedy decoding metric
+    greedy_accept_rate = jax.lax.cond(
+        compute_accept,
+        lambda _: _compute_greedy_accept_rate(
+            logits,
+            mask_ntp,
+            mask_diff,
+            accept_max_positions=accept_max_positions,
+        ),
+        lambda _: jnp.array(0.0, dtype=jnp.float32),
+        operand=None,
+    )
 
-    return total_loss, (ar_loss, diff_loss, kl_fwd_loss, kl_rev_loss, hard_agree_loss, accept_rate)
+    return total_loss, (ar_loss, diff_loss, kl_fwd_loss, kl_rev_loss, hard_agree_loss, accept_rate, greedy_accept_rate)
 
 
 def loss_and_grad(
@@ -295,7 +349,7 @@ def train_step(
     accept_top_k: int = 64,
     accept_max_positions: int = 256,
 ):
-    (loss, (ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate)), grads = loss_and_grad(
+    (loss, (ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate, greedy_accept_rate)), grads = loss_and_grad(
         params,
         batch,
         model=model,
@@ -311,7 +365,7 @@ def train_step(
     )
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
-    return new_params, opt_state, loss, ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate
+    return new_params, opt_state, loss, ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate, greedy_accept_rate
 
 
 __all__ = ["loss_and_metrics", "loss_and_grad", "train_step"]

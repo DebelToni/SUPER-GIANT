@@ -1,0 +1,75 @@
+# TiDAR Config for Greedy Acceptance Rate Experiment
+# Model: SmolLM-135M
+# Goal: Maximize greedy acceptance rate with high hard agreement loss (delta)
+# Checkpoint: /proj/giant-data/TiDAR/smol/smollm-135m.npz
+
+model:
+  embedding_size: 576
+  num_heads: 9
+  num_kv_heads: 3
+  num_layers: 30
+  feed_forward_size: 1536
+  rope_dim: 64
+  context_length: 2048
+  dropout_rate: 0.0
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tidar:
+  draft_length: 8
+  attn_bias_value: -1.0e10
+
+inference:
+  stop_on_eos: true
+  max_decode_steps: 64
+  temperature: 1.0
+  top_k: 0
+  draft_length: 8
+
+optimizer:
+  base_learning_rate: 5.0e-5 # Moderate LR for stability
+  min_learning_rate: 5.0e-6
+  warmup_steps: 1000
+  weight_decay: 0.01
+  gradient_clip_norm: 0.5
+  weight_decay_exclusions:
+    - bias
+    - scale
+
+training:
+  batch_size: 8
+  gradient_accumulation: 4
+  max_epochs: 1
+  seed: 7777
+  dataset_dir: "dataset_artifacts/Greedy_exp_500m"
+  log_every: 100
+  checkpoint_every: 5000
+  mini_checkpoint_every: 500
+  mini_max_to_keep: 3
+  scan_chunk: 1
+  loss:
+    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard
+    # Experiment: Heavy hard agreement loss to maximize greedy acceptance
+    alpha: 1.0 # AR next-token prediction CE loss - keep for model quality
+    beta: 1.0 # Diffusion denoising CE loss - keep for diffusion head
+    rho: 0.0 # Forward KL - disabled
+    chi: 0.0 # Reverse KL - disabled
+    delta: 3.0 # Hard agreement: CE(onehot(argmax P_AR), logits_diff) - HIGH for greedy match
+
+paths:
+  checkpoints_root: "Params/Greedy_exp"
+
+stages:
+  - name: fw_edu_500m
+    dataset: fw_edu_500m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 1.0
+
+qa_finetune: {}
+
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"

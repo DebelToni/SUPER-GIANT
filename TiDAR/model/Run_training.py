@@ -294,6 +294,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of steps to fuse with lax.scan inside a single compiled call.",
     )
+    cli.add_argument(
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Override batch size from config.",
+    )
+    cli.add_argument(
+        "--log_every",
+        type=int,
+        default=None,
+        help="Override log_every from config (log every N steps).",
+    )
+    cli.add_argument(
+        "--gradient_accumulation",
+        type=int,
+        default=None,
+        help="Override gradient_accumulation from config.",
+    )
     return cli.parse_args()
 
 
@@ -319,7 +337,7 @@ def main() -> None:
     if not dataset_root.is_absolute():
         dataset_root = (base_root / dataset_root).resolve()
 
-    batch_size = int(cfg.training.batch_size)
+    batch_size = args.batch_size if args.batch_size is not None else int(cfg.training.batch_size)
     seed = getattr(cfg.training, "seed", None)
     if seed is None:
         seed = global_seed if global_seed is not None else 0
@@ -399,7 +417,7 @@ def main() -> None:
     training_cfg = cfg.training
     mini_every = int(getattr(training_cfg, "mini_checkpoint_every", max(1, checkpoint_every // 10)))
     mini_max_to_keep = int(getattr(training_cfg, "mini_max_to_keep", 3))
-    log_every = int(getattr(training_cfg, "log_every", 1))
+    log_every = args.log_every if args.log_every is not None else int(getattr(training_cfg, "log_every", 1))
     accept_top_k = 64
     accept_max_positions = 256
     mini_ckpt_dir = training_states_dir / "mini"
@@ -481,7 +499,9 @@ def main() -> None:
     base_rng = jax.random.PRNGKey(seed)
     cfg_chunk = int(getattr(cfg.training, "scan_chunk", 1))
     chunk_size = max(1, int(args.scan_chunk)) if args.scan_chunk is not None else max(1, cfg_chunk)
-    grad_accum = max(1, int(getattr(cfg.training, "gradient_accumulation", 1)))
+    cfg_grad_accum = int(getattr(cfg.training, "gradient_accumulation", 1))
+    grad_accum = args.gradient_accumulation if args.gradient_accumulation is not None else cfg_grad_accum
+    grad_accum = max(1, grad_accum)
 
     # Loss configuration defaults (stage overrides may apply)
     loss_cfg = getattr(cfg.training, "loss", None)
@@ -530,7 +550,7 @@ def main() -> None:
             dropout_rng = jax.random.fold_in(base_rng, step)
             compute_accept = jnp.logical_or(step == 0, (step + 1) % log_every == 0)
 
-            (loss, (ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate)), grads = loss_and_grad(
+            (loss, (ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate, greedy_accept_rate)), grads = loss_and_grad(
                 params,
                 batch,
                 model=model,
@@ -582,7 +602,7 @@ def main() -> None:
                 step + 1,
                 accum_grads,
                 accum_count,
-            ), (loss, ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate)
+            ), (loss, ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate, greedy_accept_rate)
 
         (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
             body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
@@ -700,6 +720,7 @@ def main() -> None:
                 kl_rev_val = float(losses[offset, 4]) if losses.shape[1] > 4 else 0.0
                 hard_agree_val = float(losses[offset, 5]) if losses.shape[1] > 5 else 0.0
                 accept_val = float(losses[offset, 6]) if losses.shape[1] > 6 else 0.0
+                greedy_accept_val = float(losses[offset, 7]) if losses.shape[1] > 7 else 0.0
                 last_loss = loss_val
                 step_val = chunk_start + offset
                 if step_val == 1 or step_val % log_every == 0:
@@ -707,7 +728,7 @@ def main() -> None:
                     log_msg = (
                         f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
                         f"loss {loss_val:.4f} ar {ar_val:.4f} diff {diff_val:.4f} "
-                        f"acc {accept_val:.3f}"
+                        f"greedy_acc {greedy_accept_val:.3f}"
                     )
                     # Add extra loss terms only if their coefficients are > 0
                     if stage_rho > 0.0:

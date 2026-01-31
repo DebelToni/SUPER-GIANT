@@ -177,3 +177,85 @@ acceptance estimate, which is top-k truncated and computed on a single batch row
   --num_samples 30 \
   --num_tokens 1
 ```
+
+## Batch Size Finder (`TiDAR/tests/find_batch_size.py`)
+
+Utility script to find the maximum batch size for a given TiDAR training config
+that fits in GPU memory without OOM.
+
+### How it works
+
+1. Parses the provided training config YAML
+2. Identifies the stage with the **longest `seq_len`** (worst-case memory usage)
+3. Creates a temporary test config with only that stage (modified for quick testing)
+4. Uses **binary search** O(log n) to find the maximum working batch size
+5. Spawns training runs as **separate processes** to ensure clean GPU memory state
+6. Monitors the `logs.txt` file in the checkpoint directory to detect successful training
+7. Detects OOM by looking for JAX/XLA error patterns in stderr
+
+### Important: Must run ON the GPU box
+
+The script spawns local subprocesses for training. It must be executed **on the
+remote GPU machine**, not locally. Running locally will fail because there is no
+GPU available.
+
+### Usage
+
+First sync your local changes to the GPU box:
+```bash
+git add -N . && git diff --binary | ssh root@gpu-box-3 'set -e; cd /proj/SUPER-GIANT; git reset --hard; git clean -fd; git apply --index'
+```
+
+Then run the script on the remote:
+```bash
+ssh root@gpu-box-3 'cd /proj/SUPER-GIANT && /opt/venv/bin/python TiDAR/tests/find_batch_size.py \
+  --config TiDAR/model/model_configs/your_config.yml \
+  --global_config TiDAR/Global_Config.yml \
+  --min_batch_size 1 \
+  --max_batch_size 32 \
+  --wait_for_logs 5 \
+  --timeout 300'
+```
+
+### CLI arguments
+
+- `--config` (required): Path to the training config YAML
+- `--global_config`: Path to Global_Config.yml (optional, uses TiDAR/Global_Config.yml by default)
+- `--min_batch_size`: Lower bound for binary search (default: 1)
+- `--max_batch_size`: Upper bound for binary search (default: 64)
+- `--wait_for_logs`: Number of log entries to wait for before declaring success (default: 5)
+- `--timeout`: Timeout per test run in seconds (default: 600)
+- `--init_checkpoint`: Optional checkpoint to initialize from
+- `--python_path`: Path to Python executable (default: system Python)
+- `--verbose`: Print detailed output including stderr on failures
+
+### Output
+
+The script prints results like:
+```
+================================================================================
+                          BATCH SIZE FINDER RESULTS
+================================================================================
+Config: TiDAR/model/model_configs/batch_size_test_30L_512ctx.yml
+Max context length tested: 512
+
+Maximum working batch size: 6
+
+Test history:
+  batch_size=1   SUCCESS  Success: 5 log entries after 45.2s
+  batch_size=32  FAILED   OOM detected in output
+  batch_size=16  FAILED   OOM detected in output
+  batch_size=8   FAILED   OOM detected in output
+  batch_size=4   SUCCESS  Success: 5 log entries after 38.1s
+  batch_size=6   SUCCESS  Success: 5 log entries after 40.3s
+  batch_size=7   FAILED   OOM detected in output
+================================================================================
+```
+
+### Notes
+
+- The script adds CLI arguments `--batch_size`, `--gradient_accumulation`, and
+  `--log_every` to `Run_training.py` that override config values
+- Always uses `--gradient_accumulation 1` during batch size testing
+- Creates a temporary checkpoint directory that is cleaned up after testing
+- Result labels: `SUCCESS` = training ran, `FAILED` = OOM or other error, `[CFG]` = config error (e.g., dataset too small)

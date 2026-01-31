@@ -45,8 +45,11 @@ training:
   # label_smoothing <- future implement
   scan_chunk: 1
   loss:
-    alpha: 0.3
-    agreement_lambda: 0.5
+    alpha: 0.3    # AR loss weight
+    beta: 1.0     # Diffusion loss weight
+    rho: 0.5      # Forward KL (was agreement_lambda)
+    chi: 0.0      # Reverse KL
+    delta: 0.0    # Hard agreement
 
 paths:
   params_dir: "Sweep/Params/sweep_3_lr3e5_a0p3_l0p5_params"

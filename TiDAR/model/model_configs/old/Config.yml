@@ -46,8 +46,11 @@ training:
   # label_smoothing <- future implement
   scan_chunk: 1
   loss:
-    alpha: 1.0              # weight for AR loss: L_tidar = (alpha*L_AR + L_Diff)/(1+alpha)
-    agreement_lambda: 0.0   # KL(stopgrad(p_AR) || p_Diff) coefficient; 0 disables
+    alpha: 1.0    # AR loss weight
+    beta: 1.0     # Diffusion loss weight
+    rho: 0.0      # Forward KL (was agreement_lambda)
+    chi: 0.0      # Reverse KL
+    delta: 0.0    # Hard agreement
 
 stages:
   - name: fw_edu_667m

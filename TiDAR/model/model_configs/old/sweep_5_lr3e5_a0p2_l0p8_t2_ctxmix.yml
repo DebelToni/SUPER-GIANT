@@ -44,9 +44,12 @@ training:
   mini_max_to_keep: 2
   scan_chunk: 1
   loss:
-    alpha: 0.2
-    agreement_lambda: 0.8
-    agreement_temperature: 2.0
+    alpha: 0.2    # AR loss weight
+    beta: 1.0     # Diffusion loss weight
+    rho: 0.8      # Forward KL (was agreement_lambda)
+    chi: 0.0      # Reverse KL
+    delta: 0.0    # Hard agreement
+    # Note: agreement_temperature: 2.0 was used in old version (not in current 5-term loss)
 
 paths:
   params_dir: "Sweep/Params/sweep_5_lr3e5_a0p2_l0p8_t2_ctxmix_params"

@@ -81,6 +81,11 @@ DATA_DIR="${APP_ROOT}/giant-data"
 REPO_DIR="${APP_ROOT}/SUPER-GIANT"
 REPO_URL="https://github.com/DebelToni/SUPER-GIANT"
 
+# Trust this repo path even if ownership differs (common with bind mounts in Docker)
+if ! git config --system --get-all safe.directory 2>/dev/null | grep -Fxq "$REPO_DIR"; then
+  git config --system --add safe.directory "$REPO_DIR" 2>/dev/null || true
+fi
+
 # mkdir -p "$DATA_DIR"
 # if [[ ! -d "$REPO_DIR" ]]; then
 #   git clone "$REPO_URL" "$REPO_DIR"

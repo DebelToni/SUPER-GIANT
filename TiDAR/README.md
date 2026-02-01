@@ -85,3 +85,12 @@ Decode step 3 input:
 (Here we take I' sampled from last step instead of the I that is in the IJK block).
 I*JK
 ```
+
+---
+
+Latest training results:
+
+Tested how model capacity affects drafting performance - tested smollm-135m vs smollm-360m on the exact same [data config](./data_pipeline/data_configs/Greedy_exp_500m.yml) with the same [training config][./model/training_configs/Greedy_exp_135m.yml]
+<br>
+Greedy runs (135M vs 360M, draft_len=8) used the hard (greedy) agreement loss to reach avg_accept_per_iter 1.43 (135M) / 1.40 (360M), and the results are documented [here. Small preview:](Docs/Results_Greedy_runs_135_360.pdf).
+[![alt text](../docs+archive/images/PDF-preview-greedy-results.png)](Docs/Results_Greedy_runs_135_360.pdf)

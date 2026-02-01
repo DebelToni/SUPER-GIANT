@@ -97,6 +97,16 @@ mkdir -p "$DATA_DIR"
 BUCKET="${SYNC_BUCKET:-giant-data}"
 SYNC_DIRS="${SYNC_DIRS:-}"
 FORCE_SYNC="${FORCE_SYNC:-0}"
+SYNC_DIRS_FILE="s3://${BUCKET}/sync_dirs.txt"
+
+# Optional override: if sync_dirs.txt exists in the bucket, use its contents
+if s5cmd ls "${SYNC_DIRS_FILE}" >/dev/null 2>&1; then
+  _file_dirs="$(s5cmd cat "${SYNC_DIRS_FILE}" | tr '\n' ',' | sed 's/,,*/,/g; s/^,//; s/,$//')"
+  if [[ -n "${_file_dirs}" ]]; then
+    SYNC_DIRS="${_file_dirs}"
+    echo "[sync] using sync_dirs.txt from ${SYNC_DIRS_FILE}: ${SYNC_DIRS}"
+  fi
+fi
 
 SYNC_DIRS="${SYNC_DIRS#\"}"
 SYNC_DIRS="${SYNC_DIRS%\"}"

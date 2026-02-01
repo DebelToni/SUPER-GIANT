@@ -1,0 +1,61 @@
+# GIANT Base Training Config for TinyStories
+# ~30M parameter model with 512 context length
+# This config is for base AR pre-training before TiDAR post-training
+
+model:
+  embedding_size: 384
+  num_heads: 6
+  num_kv_heads: 2
+  num_layers: 18
+  feed_forward_size: 1024
+  rope_dim: 64
+  context_length: 512
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tokenizer:
+  use_custom: true
+  custom_path: "/proj/giant-data/TiDAR/Tiny_tokenizer"
+
+optimizer:
+  base_learning_rate: 3.0e-4
+  min_learning_rate: 1.0e-5
+  warmup_steps: 1000
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
+
+training:
+  batch_size: 32
+  gradient_accumulation: 4
+  max_epochs: 1
+  seed: 42
+  log_every: 500
+  checkpoint_every: 5000
+  mini_checkpoint_every: 500
+  mini_max_to_keep: 2
+  scan_chunk: 4
+
+stages:
+  - name: tinystories_512
+    dataset: tinystories_512
+    seq_len: 512
+    epochs: 2
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 0.75
+
+qa_finetune: {}
+
+inference:
+  stop_on_eos: true
+
+paths:
+  checkpoints_root: "checkpoints/TinyStories_exp/giant"
+  processed_data_root: "dataset_artifacts/TinyStories_exp"

@@ -1,0 +1,36 @@
+# TinyStories Data Pipeline Config
+# Prepares the full TinyStories dataset for training
+
+outputs:
+  processed_root: "dataset_artifacts/TinyStories_exp"
+  rows_per_shard: 16384 # ~16k rows per shard
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 42
+  write_batch_size: 256
+  dry_run_preview_rows: 200
+
+stages:
+  # Full TinyStories dataset at 512 sequence length
+  tinystories_512:
+    description: "TinyStories full dataset - 512 context"
+    output_dir: "tinystories_512"
+    sequence_length: 512
+    target_tokens: null # Process entire dataset
+    min_tokens: 32
+    pack_sequences: true
+    add_eos: true
+    emit_final_partial: false
+    long_document_strategy: random_window
+    random_windows_per_document: 1
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "roneneldan/TinyStories"
+        split: "train"
+        streaming: false # TinyStories is small enough to download
+        text_field: "text"

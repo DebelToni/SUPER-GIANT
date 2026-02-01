@@ -236,12 +236,14 @@ class NativeJaxSelfAttention(nn.Module):
 
 
 class TinyTransformerBlock(nn.Module):
-    """Decoder‑style transformer block (GPT) with checkpointing."""
+    """Pre-norm Transformer block with RMSNorm + native JAX attention."""
 
     d_model: int
     n_heads: int
     d_ff: int
     dropout_rate: float = 0.1
+    num_kv_heads: Optional[int] = None  # If None, uses num_heads (MHA)
+    rotary_dim: Optional[int] = None  # If None, uses MODEL_CFG.rope_dim
     dtype: jnp.dtype = COMPUTE_DTYPE
 
     @nn.compact
@@ -249,12 +251,16 @@ class TinyTransformerBlock(nn.Module):
         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
             residual = h
             h_norm = RMSNorm(name="rms1", dtype=self.dtype, epsilon=1e-5)(h)
+            # Use provided num_kv_heads or fall back to n_heads (MHA) or global config
+            num_kv = module.num_kv_heads if module.num_kv_heads is not None else MODEL_CFG.num_kv_heads
+            rotary_dim = module.rotary_dim if module.rotary_dim is not None else MODEL_CFG.rope_dim
             h_attn = NativeJaxSelfAttention(
                 num_heads=module.n_heads,
-                num_kv=MODEL_CFG.num_kv_heads,
+                num_kv=num_kv,
                 qkv_features=module.d_model,
                 dropout_rate=module.dropout_rate,
                 dtype=module.dtype,
+                rotary_dim=rotary_dim,
             )(h_norm, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
             h = residual + h_attn
 

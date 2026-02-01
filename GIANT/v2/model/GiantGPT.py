@@ -4,6 +4,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 from flax import linen as nn
+from flax.linen import RMSNorm
 from omegaconf import OmegaConf
 
 from GIANT.v2.model.Transformer_block import TinyTransformerBlock
@@ -36,6 +37,8 @@ class GiantGPT(nn.Module):
     d_ff:           int
     n_layers:       int
     dropout_rate:   float = 0.1
+    num_kv_heads:   Optional[int] = None  # If None, uses n_heads (MHA) or global config
+    rotary_dim:     Optional[int] = None  # If None, uses global config
 
     @nn.compact
     def __call__(
@@ -63,10 +66,12 @@ class GiantGPT(nn.Module):
                     n_heads=self.n_heads,
                     d_ff=self.d_ff,
                     dropout_rate=self.dropout_rate,
+                    num_kv_heads=self.num_kv_heads,
+                    rotary_dim=self.rotary_dim,
                     dtype=COMPUTE_DTYPE,
             )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
 
-
+        x = RMSNorm(name="final_norm", dtype=COMPUTE_DTYPE, epsilon=1e-5)(x)
         logits = jnp.einsum("bld,vd->blv",
                             x.astype(jnp.float32),
                             embed.embedding)

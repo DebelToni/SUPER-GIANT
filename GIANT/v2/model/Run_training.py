@@ -83,12 +83,26 @@ class StageRuntime:
     total_steps: int
 
 
-def load_configs() -> OmegaConf:
+def load_configs(
+    config_path: str | None = None,
+    global_config_path: str | None = None,
+) -> OmegaConf:
     model_dir = Path(__file__).resolve().parent
     project_root = model_dir.parent
-    global_cfg = OmegaConf.load(project_root / "Global_Config.yml")
-    local_cfg = OmegaConf.load(model_dir / "Config.yml")
-    cfg = OmegaConf.merge(global_cfg, local_cfg)
+    
+    # Resolve config paths
+    if config_path is None:
+        config_path = str(model_dir / "Config.yml")
+    if global_config_path is None:
+        global_config_path = str(project_root / "Global_Config.yml")
+    
+    # Load configs, with fallback if global config doesn't exist
+    local_cfg = OmegaConf.load(config_path)
+    if Path(global_config_path).exists():
+        global_cfg = OmegaConf.load(global_config_path)
+        cfg = OmegaConf.merge(global_cfg, local_cfg)
+    else:
+        cfg = local_cfg
 
     base_prefix_str = cfg.paths.get("data_root", "") if "paths" in cfg else ""
     base_prefix = Path(base_prefix_str) if base_prefix_str else None
@@ -310,6 +324,8 @@ def _prefetch_to_device(iterator, size: int = 2, *, device: jax.Device):
 
 def parse_args() -> argparse.Namespace:
     cli = argparse.ArgumentParser("SUPER-GIANT training")
+    cli.add_argument("--config", default=None, help="Path to training config YAML file")
+    cli.add_argument("--global_config", default=None, help="Path to global config YAML file")
     cli.add_argument("--checkpoint_dir", default="checkpoints")
     cli.add_argument("--checkpoint_every", type=int, default=None)
     cli.add_argument("--resume", nargs="?", const="latest", default=None)
@@ -325,7 +341,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    cfg = load_configs()
+    cfg = load_configs(config_path=args.config, global_config_path=args.global_config)
     global_seed = cfg.get("global_seed")
     if global_seed is not None:
         np.random.seed(int(global_seed))
@@ -358,6 +374,9 @@ def main() -> None:
     total_steps = sum(stage.total_steps for stage in stage_runtimes)
 
     max_seq_len = max(stage.config.seq_len for stage in stage_runtimes)
+    # Get optional model config params with defaults
+    num_kv_heads = cfg.model.get("num_kv_heads", None)
+    rotary_dim = cfg.model.get("rope_dim", None)
     model = GiantGPT(
         vocab_size=len(tokenizer),
         context_length=max_seq_len,
@@ -366,6 +385,8 @@ def main() -> None:
         d_ff=cfg.model.feed_forward_size,
         n_layers=cfg.model.num_layers,
         dropout_rate=cfg.model.dropout_rate,
+        num_kv_heads=num_kv_heads,
+        rotary_dim=rotary_dim,
     )
 
     rng = jax.random.PRNGKey(seed)

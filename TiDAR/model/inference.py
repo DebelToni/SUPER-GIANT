@@ -236,6 +236,7 @@ def make_anchor_tidar_generate_fn(
         # Stats tracking
         total_accepts = jnp.array(0, dtype=jnp.int32)
         n_iterations = jnp.array(0, dtype=jnp.int32)
+        max_accepts = jnp.array(0, dtype=jnp.int32)
         
         # === Step 1: Sample first anchor from prev_logit ===
         rng_key, anchor = sample_tokens(rng_key, prev_logit, temperature, top_k)
@@ -268,12 +269,12 @@ def make_anchor_tidar_generate_fn(
         current_draft_logits = init_logits  # [K, V]
         
         def cond_fn(state):
-            _, _, _, _, _, generated, _, done, _, _ = state
+            _, _, _, _, _, generated, _, done, _, _, _ = state
             return (generated < max_steps) & (~done)
         
         def body_fn(state):
             (rng, cache, out, prefix_len, current_draft, generated, 
-             current_draft_logits, done, total_accepts, n_iters) = state
+             current_draft_logits, done, total_accepts, n_iters, max_acc) = state
             
             # The anchor at current_draft[0] is ALREADY committed (in previous iteration)
             # We only need to verify and commit positions 1..K-1 and possibly a bonus
@@ -376,27 +377,29 @@ def make_anchor_tidar_generate_fn(
             # Stats
             total_accepts2 = total_accepts + eff_accept
             n_iters2 = n_iters + 1
+            max_acc2 = jnp.maximum(max_acc, eff_accept)
             
             return (
                 rng, cache, out, prefix_len2, next_draft, generated2,
-                next_draft_logits, done2, total_accepts2, n_iters2
+                next_draft_logits, done2, total_accepts2, n_iters2, max_acc2
             )
         
         state0 = (
             rng_key, cache_vars, out_ids, prefix_len, current_draft, generated,
-            current_draft_logits, done, total_accepts, n_iterations
+            current_draft_logits, done, total_accepts, n_iterations, max_accepts
         )
         
         state_final = jax.lax.while_loop(cond_fn, body_fn, state0)
         
         (_, _, out_final, prefix_len_final, _, generated_final,
-         _, _, total_accepts_final, n_iters_final) = state_final
+         _, _, total_accepts_final, n_iters_final, max_accepts_final) = state_final
         
         # Build stats dict
         stats = {
             "total_accepts": total_accepts_final,
             "n_iterations": n_iters_final,
             "avg_accept_per_iter": total_accepts_final.astype(jnp.float32) / jnp.maximum(n_iters_final, 1),
+            "max_accept_per_iter": max_accepts_final,
         }
         
         return out_final, prefix_len_final, generated_final, stats
@@ -584,6 +587,7 @@ def main():
         gen_count = int(np.asarray(generated))
         n_iters = int(np.asarray(stats["n_iterations"]))
         avg_accept = float(np.asarray(stats["avg_accept_per_iter"]))
+        max_accept = int(np.asarray(stats["max_accept_per_iter"]))
         toks_per_s = gen_count / decode_time if decode_time > 0 else float("inf")
         
         print("\n[stats]")
@@ -591,6 +595,7 @@ def main():
         print(f"  generated_tokens:  {gen_count}")
         print(f"  n_iterations:      {n_iters}")
         print(f"  avg_accept/iter:   {avg_accept:.2f}")
+        print(f"  max_accept/iter:   {max_accept}")
         print(f"  decode_time_s:     {decode_time:.4f}")
         print(f"  tokens_per_second: {toks_per_s:.2f}")
 

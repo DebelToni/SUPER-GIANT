@@ -5,17 +5,18 @@
 #let color-135 = rgb(33, 150, 243)
 #let color-360 = rgb(244, 162, 97)
 
-#let legend-item(label, color) = stack(
-  dir: ltr,
-  spacing: 4pt,
+#let legend-item(label, color) = grid(
+  columns: (auto, auto), // <- was (auto, 1fr)
+  gutter: 2pt,           // spacing between square and text
+  align: left,
   rect(width: 10pt, height: 10pt, fill: color, radius: 2pt),
-  text(size: 8pt)[label],
+  text(size: 12pt)[#(label)],
 )
 
 #let compare-legend = box(width: 100%, inset: 6pt, stroke: 0.6pt + rgb(200, 200, 200), radius: 4pt)[
   #grid(
-    columns: (1fr, 1fr),
-    gutter: 8pt,
+    columns: (auto, auto),
+    gutter: 6pt, 
     align: left,
     [#legend-item("135M - 5.23$ on 5090 with 32GB VRAM", color-135)],
     [#legend-item("360M - 11.81$ on RTX PRO 6000 with 96GB VRAM", color-360)],
@@ -91,12 +92,12 @@
 
 = Results: Greedy Runs (135M vs 360M), draft length 8
 
-== Metric legend for 5 hour run
+== Metric legend for 5 hour run, total cost 17.5 \$
 #compare-legend
 
 The bigger model ran with 50% bigger batch size but logs are synced by optimizer steps.
 
-=== AR loss (lower is better)
+=== AR loss (lower is better) - This loss is not important for this experiment
 #compare-chart(
   (
     (label: "135M", color: color-135, data: ar-135),
@@ -141,12 +142,11 @@ Output:
 Once upon a time, John Grusky, the first White House astronomer, was chosen as a first-year intern. The first thing he saw was Mount Tai, in sight of the top of Mount Fresar in the Midwest. At first, Grusky didn't think of it as a comet. He loved comparing it to the
 ]
 
-Stats:
 #[
   #set text(weight: "bold")
-  - generated_tokens: 64
   - n_iterations: 44
   - avg_accept_per_iter: 1.43
+  - max_accept_per_iter: 4
 ]
 - tokens_per_second: 5.50
 
@@ -157,12 +157,118 @@ Output:
 Once upon a time, there lived a wicked queen who was such a horrible figure that she even had to have a cat to put off her spirit. There was a girl named Rapunzel, who loved to play in the forest. Her father, the King, had given up his kingdom for a beautiful princess who loved him dearly.
 ]
 
-Stats:
 #[
   #set text(weight: "bold")
-  - generated_tokens: 64
   - n_iterations: 45
   - avg_accept_per_iter: 1.40
+  - max_accept_per_iter: 4
 ]
 - tokens_per_second: 3.44
 
+=== Verbose output from generation with the 135m model
+#text(size: 9pt)[
+```
+prompt: Once upon a time
+draft len: 8; max steps: 12
+
+anchor: ,        ->  there
+currently verified draft:   (,)      |  the     |  was     |  a       |  the     |  the     |  the     |  the
+sample from verified draft:  there   |  was     |  a       |  the     |  the     |  the     |  the     |  the
+accept 1 of 8:               there
+select 1-th draft for next:  there   |  was     |  a       |  a       |  the     |  the     |  the     |  the
+
+anchor:  there   ->  man
+currently verified draft:   ( there) |  was     |  a       |  a       |  the     |  the     |  the     |  the
+sample from verified draft:  was     |  a       |  man     |  the     |  the     |  the     |  the     |  the
+accept 3 of 8:               was     |  a       |  man
+select 3-th draft for next:  man     |  named   |  a       |  the     | .        |  the     |  the     |  the
+
+anchor:  man     ->  John
+currently verified draft:   ( man)   |  named   |  a       |  the     | .        |  the     |  the     |  the
+sample from verified draft:  named   |  John    |  the     | .        |  the     |  the     |  the     |  the
+accept 2 of 8:               named   |  John
+select 2-th draft for next:  John    | .        | .        |  He      |  was     |  a       |  a       | .
+
+anchor:  John    ->  He
+currently verified draft:   ( John)  | .        | .        |  He      |  was     |  a       |  a       | .
+sample from verified draft: .        |  He      |  He      |  was     |  a       |  a       | .        |  He
+accept 2 of 8:              .        |  He
+select 2-th draft for next:  He      |  was     |  was     |  a       |  a       | ,        | ,        | ,
+
+anchor:  He      ->  a
+currently verified draft:   ( He)    |  was     |  was     |  a       |  a       | ,        | ,        | ,
+sample from verified draft:  was     |  a       |  a       |  a       | ,        | ,        | ,        |  and
+accept 2 of 8:               was     |  a
+select 2-th draft for next:  a       |  man     |  man     |  man     |  man     |  He      |  He      |  He
+
+anchor:  a       ->  very
+currently verified draft:   ( a)     |  man     |  man     |  man     |  man     |  He      |  He      |  He
+sample from verified draft:  very    |  man     |  man     |  man     |  He      |  He      |  He      |  He
+accept 1 of 8:               very
+select 1-th draft for next:  very    |  man     |  He      |  He      |  He      |  He      |  He      |  He
+
+final output
+Once upon a time, there was a man named John. He was a very
+```
+]
+
+#pagebreak()
+
+=== Verbose output from generation with the 360m model
+#text(size: 9pt)[
+```
+prompt: Once upon
+draft len: 8; max steps: 12
+
+anchor:  a      ->  in
+currently verified draft:   ( a)    |  time   | ,       |  a      |  a      |  a      |  a      |  a
+sample from verified draft:  time   | ,       |  in     |  a      |  a      |  a      |  a      |  a
+accept 3 of 8:               time   | ,       |  in
+select 3-th draft for next:  in     |  was    |  a      |  a      |  a      |  a      |  a      |  the
+
+anchor:  in     ->  a
+currently verified draft:   ( in)   |  was    |  a      |  a      |  a      |  a      |  a      |  the
+sample from verified draft:  a      |  a      |  a      |  a      |  a      |  a      |  the    |  a
+accept 1 of 8:               a
+select 1-th draft for next:  a      |  small  | ,       | ,       | ,       | ,       | ,       | ,
+
+anchor:  a      ->  land
+currently verified draft:   ( a)    |  small  | ,       | ,       | ,       | ,       | ,       | ,
+sample from verified draft:  land   | ,       | ,       | ,       | ,       | ,       | ,       |  town
+accept 1 of 8:               land
+select 1-th draft for next:  land   |  town   | ,       | ,       | ,       | ,       |  a      |  a
+
+anchor:  land   ->  far
+currently verified draft:   ( land) |  town   | ,       | ,       | ,       | ,       |  a      |  a
+sample from verified draft:  far    | ,       | ,       | ,       | ,       |  a      |  a      |  man
+accept 1 of 8:               far
+select 1-th draft for next:  far    |  the    | ,       | ,       | ,       | ,       |  a      |  a
+
+anchor:  far    -> ,
+currently verified draft:   ( far)  |  the    | ,       | ,       | ,       | ,       |  a      |  a
+sample from verified draft: ,       | ,       | ,       | ,       | ,       |  a      |  a      | ,
+accept 1 of 8:              ,
+select 1-th draft for next: ,       | ,       | ,       |  a      |  a      |  a      |  a      |  a
+
+anchor: ,       ->  far
+currently verified draft:   (,)     | ,       | ,       |  a      |  a      |  a      |  a      |  a
+sample from verified draft:  far    | ,       |  a      |  a      |  a      |  a      |  a      |  a
+accept 1 of 8:               far
+select 1-th draft for next:  far    | ,       | ,       |  a      |  a      |  a      |  a      |  a
+
+anchor:  far    ->  away
+currently verified draft:   ( far)  | ,       | ,       |  a      |  a      |  a      |  a      |  a
+sample from verified draft:  away   | ,       |  a      |  a      |  a      |  a      |  a      |  a
+accept 1 of 8:               away
+select 1-th draft for next:  away   | ,       |  a      |  a      |  a      |  a      |  a      |  a
+
+anchor:  away   ->  there
+currently verified draft:   ( away) | ,       |  a      |  a      |  a      |  a      |  a      |  a
+sample from verified draft: ,       |  there  |  a      |  a      |  a      |  a      |  a      |  a
+accept 2 of 8:              ,       |  there
+select 2-th draft for next:  there  |  a      |  a      |  a      |  a      |  a      | .       | .
+
+final output
+Once upon a time, in a land far, far away, there
+```
+]

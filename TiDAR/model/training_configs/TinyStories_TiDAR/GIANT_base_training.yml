@@ -34,7 +34,6 @@ optimizer:
 training:
   batch_size: 32
   gradient_accumulation: 4
-  max_epochs: 1
   seed: 42
   log_every: 500
   checkpoint_every: 5000

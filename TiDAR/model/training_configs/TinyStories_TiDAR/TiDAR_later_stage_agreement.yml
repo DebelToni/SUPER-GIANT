@@ -1,6 +1,6 @@
-# TiDAR Post-Training Config for TinyStories
-# Same ~30M parameter model, TiDAR speculative decoding training
-# Use --init_checkpoint to load the base-trained model
+# TiDAR Later-Stage Agreement Config for TinyStories
+# Same architecture as TiDAR_post_training.yml, but enable agreement losses.
+# Use --resume latest (or --init_checkpoint) to continue from a prior run.
 
 model:
   embedding_size: 384
@@ -52,12 +52,12 @@ training:
   scan_chunk: 2
   loss:
     # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard
-    # Baseline TiDAR training (no agreement loss initially)
+    # Later-stage agreement losses enabled
     alpha: 1.0 # AR next-token prediction CE loss
     beta: 1.0 # Diffusion denoising CE loss
-    rho: 0.0 # Forward KL - disabled
+    rho: 0.1 # Forward KL: KL(P_AR || Q_Diff)
     chi: 0.0 # Reverse KL - disabled
-    delta: 0.0 # Hard agreement - disabled
+    delta: 0.3 # Hard agreement CE
 
 paths:
   checkpoints_root: "checkpoints/TinyStories_exp/tidar"

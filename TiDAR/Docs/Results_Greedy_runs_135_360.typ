@@ -4,6 +4,7 @@
 
 #let color-135 = rgb(33, 150, 243)
 #let color-360 = rgb(244, 162, 97)
+#let color-delta = rgb(150, 150, 150)
 
 #let legend-item(label, color) = grid(
   columns: (auto, auto), // <- was (auto, 1fr)
@@ -30,6 +31,8 @@
   border: rgb(180, 180, 180),
   x_label: "Step",
   y_label: "Metric",
+  delta_data: none,
+  delta_color: color-delta,
 ) = {
   let margin-left = 22pt
   let margin-right = 8pt
@@ -48,6 +51,11 @@
   let max-y = max-y + pad
   let scale-x = if max-x == min-x { plot-width } else { plot-width / (max-x - min-x) }
   let scale-y = if max-y == min-y { plot-height } else { plot-height / (max-y - min-y) }
+  let delta-values = if delta_data == none { () } else { delta_data.map(d => d.at(1)) }
+  let delta-max-dev = if delta-values.len() == 0 { 0 } else { calc.max(..delta-values.map(v => calc.abs(v - 1))) }
+  let delta-scale = if delta-max-dev == 0 { 0pt } else { (plot-height / 2) / delta-max-dev }
+  let delta-mid = plot-height / 2
+  let show-delta = delta-values.len() > 0
 
   box(width: width, height: height, stroke: 0.8pt + border, radius: 6pt, inset: 4pt)[
     #place(top + left, dx: margin-left, dy: margin-top + plot-height)[
@@ -55,6 +63,11 @@
     ]
     #place(top + left, dx: margin-left, dy: margin-top)[
       #line(length: plot-height, angle: 90deg, stroke: 0.6pt + black)
+    ]
+    #if show-delta [
+      #place(top + left, dx: margin-left, dy: margin-top + delta-mid)[
+        #line(length: plot-width, stroke: (paint: rgb(170, 170, 170), thickness: 0.6pt, dash: (2pt, 2pt)))
+      ]
     ]
     #for s in series [
       #place(top + left, dx: margin-left, dy: margin-top)[
@@ -64,6 +77,18 @@
           ..s.data.map(d => (
             (d.at(0) - min-x) * scale-x,
             plot-height - (d.at(1) - min-y) * scale-y
+          ))
+        )
+      ]
+    ]
+    #if show-delta [
+      #place(top + left, dx: margin-left, dy: margin-top)[
+        #path(
+          stroke: 0.6pt + delta_color,
+          fill: none,
+          ..delta_data.map(d => (
+            (d.at(0) - min-x) * scale-x,
+            delta-mid - (d.at(1) - 1) * delta-scale
           ))
         )
       ]
@@ -79,6 +104,20 @@
       #rotate(-90deg)[#text(size: 8pt)[#(y_label)]]
     ]
   ]
+}
+
+#let delta-ratio-series(smaller, bigger) = {
+  let ratios = smaller.map(p => {
+    let x = p.at(0)
+    let y-small = p.at(1)
+    let match = bigger.filter(q => q.at(0) == x)
+    if match.len() > 0 {
+      (x, y-small / match.at(0).at(1))
+    } else {
+      none
+    }
+  })
+  ratios.filter(r => r != none)
 }
 
 #let ar-135 = ((1, 2.6989), (100, 2.9392), (200, 3.0165), (300, 2.9936), (400, 2.9674), (500, 2.8861), (600, 2.7878), (700, 2.6799), (800, 3.1962), (900, 2.9063), (1000, 2.9105), (1100, 2.9217), (1200, 2.4662), (1300, 2.8834), (1400, 2.8897), (1500, 2.6821), (1600, 2.7936), (1800, 2.6535), (2100, 2.8706), (2400, 2.5486), (2700, 3.1900), (3000, 2.7669), (3300, 2.5599), (3600, 3.0211), (3900, 3.0163), (4200, 2.6354), (4500, 2.8914), (4800, 2.8974), (5100, 2.7435), (5400, 2.6979), (5700, 2.6244), (6000, 2.7643), (6300, 2.8079), (6600, 3.0621), (6900, 3.0089), (7200, 2.9405), (7500, 3.1120), (7800, 2.9210), (8100, 2.9620), (8400, 2.8130), (8700, 2.7758), (9000, 2.8913), (9300, 2.9720), (9600, 2.6524), (9900, 2.5071), (10200, 2.8670), (10500, 2.8284), (10800, 2.8016), (11100, 2.9349), (11400, 2.7103), (11700, 2.8071), (12000, 2.9235), (12300, 2.9259), (12600, 2.6671), (12900, 2.9915), (13200, 2.9013), (13500, 2.7857), (13800, 2.8952), (14100, 2.8405), (14400, 2.9533), (14700, 2.8780), (15000, 2.9919), (15300, 2.8096), (15600, 2.7023), (15900, 2.8030), (16200, 3.0167), (16500, 2.6814), (16800, 2.8781), (17100, 2.9784), (17400, 2.8617), (17700, 3.0445), (18000, 2.6279), (18300, 2.6726), (18600, 3.1604), (18900, 3.0090), (19200, 2.8199), (19500, 2.7796), (19800, 3.0667), (20100, 2.8754), (20400, 2.6700), (20700, 2.8286), (21000, 2.8381), (21300, 2.9799), (21600, 2.9878), (21900, 2.6471), (22200, 3.1221), (22500, 2.7166), (22800, 2.9845), (23100, 2.6163), (23400, 2.9105), (23700, 3.1273), (24000, 2.7629), (24300, 2.9362), (24600, 2.7077), (24900, 2.9625), (25200, 2.8071), (25500, 2.7861), (25800, 2.7886), (26100, 2.8722), (26400, 2.9590), (26700, 2.7068), (27000, 2.8368), (27300, 2.8697), (27600, 2.3631), (27900, 3.0595), (28200, 2.5525), (28500, 2.8076), (28800, 2.7256), (29100, 2.8591), (29400, 2.7321), (29700, 2.9137), (30000, 2.8787), (30300, 2.7206), (30600, 2.8340), (30900, 2.4959), (31200, 2.7839), (31500, 2.9896), (31800, 3.1633), (32100, 2.6438), (32400, 2.8337), (32700, 3.0061), (33000, 2.9126), (33300, 2.8739), (33600, 3.0375), (33900, 2.7946), (34200, 2.8489), (34500, 2.7057), (34800, 2.6562), (35100, 2.8852), (35400, 2.7897), (35700, 2.9306), (36000, 3.0185), (36300, 2.9690), (36600, 2.7036), (36900, 2.9282), (37200, 2.9441), (37500, 3.0161), (37800, 3.0898), (38100, 2.8892), (38400, 2.7861), (38700, 2.8024), (39000, 2.8092), (39300, 3.0721), (39600, 2.6065), (39900, 3.0480), (40200, 2.7357))
@@ -104,6 +143,7 @@ The bigger model ran with 50% bigger batch size but logs are synced by optimizer
     (label: "360M", color: color-360, data: ar-360),
   ),
   y_label: "AR loss",
+  delta_data: delta-ratio-series(ar-135, ar-360),
 )
 
 === Diffusion loss (lower is better)
@@ -113,6 +153,7 @@ The bigger model ran with 50% bigger batch size but logs are synced by optimizer
     (label: "360M", color: color-360, data: diff-360),
   ),
   y_label: "Diff loss",
+  delta_data: delta-ratio-series(diff-135, diff-360),
 )
 
 === Hard (greedy) loss (lower is better)
@@ -122,6 +163,7 @@ The bigger model ran with 50% bigger batch size but logs are synced by optimizer
     (label: "360M", color: color-360, data: hard-360),
   ),
   y_label: "Hard loss",
+  delta_data: delta-ratio-series(hard-135, hard-360),
 )
 
 === Greedy acceptance (higher is better)
@@ -131,6 +173,7 @@ The bigger model ran with 50% bigger batch size but logs are synced by optimizer
     (label: "360M", color: color-360, data: acc-360),
   ),
   y_label: "Greedy accept",
+  delta_data: delta-ratio-series(acc-135, acc-360),
 )
 
 == Inference (Once upon a time, verbose)

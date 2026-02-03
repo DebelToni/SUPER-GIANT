@@ -1,0 +1,74 @@
+# TiDAR Later-Stage Agreement Config for TinyStories (Max Acceptance)
+# Agreement-dominant loss: reverse KL + hard agreement, minimal CE.
+# Use --resume latest (or --init_checkpoint) to continue from a prior run.
+
+model:
+  embedding_size: 384
+  num_heads: 6
+  num_kv_heads: 2
+  num_layers: 18
+  feed_forward_size: 1024
+  rope_dim: 64
+  context_length: 512
+  dropout_rate: 0.0
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tokenizer:
+  use_custom: true
+  custom_path: "/proj/giant-data/TiDAR/Tiny_tokenizer"
+
+tidar:
+  draft_length: 6
+  attn_bias_value: -1.0e10
+
+inference:
+  stop_on_eos: true
+  max_decode_steps: 64
+  temperature: 1.0
+  top_k: 0
+  draft_length: 6
+
+optimizer:
+  base_learning_rate: 5.0e-5
+  min_learning_rate: 5.0e-6
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_clip_norm: 0.5
+  weight_decay_exclusions:
+    - bias
+    - scale
+
+training:
+  batch_size: 16
+  gradient_accumulation: 4
+  seed: 42
+  dataset_dir: "dataset_artifacts/TinyStories_exp"
+  log_every: 500
+  checkpoint_every: 5000
+  mini_checkpoint_every: 500
+  mini_max_to_keep: 2
+  scan_chunk: 2
+  loss:
+    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard
+    # Agreement-dominant: reverse KL + hard agreement, minimal CE
+    alpha: 0.2
+    beta: 0.2
+    rho: 0.0
+    chi: 0.4
+    delta: 1.0
+
+paths:
+  checkpoints_root: "checkpoints/TinyStories_exp/tidar"
+
+stages:
+  - name: tinystories_512
+    dataset: tinystories_512
+    seq_len: 512
+    epochs: 3
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 0.75
+
+qa_finetune: {}

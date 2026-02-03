@@ -10,13 +10,12 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, cast
 
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
 from flax import serialization
-from flax.training import orbax_utils
 from flax.traverse_util import flatten_dict, unflatten_dict
 
 
@@ -79,7 +78,7 @@ def save_npz(
     Save *params* (a PyTree/FrozenDict) to **path** with names like
     'Embed_0/embedding', 'Block_3/kv_proj/kernel' …
     """
-    flat: Dict[tuple[str, ...], np.ndarray] = flatten_dict(jax.device_get(params))
+    flat: Dict[tuple[str, ...], Any] = flatten_dict(jax.device_get(params))
     payload = {"/".join(k): _as_numpy(v) for k, v in flat.items()}
     merged_meta: Dict[str, Optional[str]] = {}
     if metadata:
@@ -96,7 +95,8 @@ def save_npz(
         payload[f"{META_PREFIX}{key}"] = np.array(str(value))
     if name is not None:
         payload[NAME_KEY] = np.array(str(name))
-    np.savez_compressed(path, **payload)
+    save_fn = cast(Any, np.savez_compressed)
+    save_fn(path, **payload)
 
 
 def load_npz(path, *, print_name: bool = True) -> Dict:
@@ -243,17 +243,14 @@ class AsyncMiniCheckpointManager:
         self.ckpt_dir = Path(self.ckpt_dir)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        handler = ocp.PyTreeCheckpointHandler()
-        self.checkpointer = ocp.AsyncCheckpointer(handler)
-
         options = ocp.CheckpointManagerOptions(
             max_to_keep=self.max_to_keep,
             create=True,
+            enable_async_checkpointing=True,
         )
         self.manager = ocp.CheckpointManager(
             str(self.ckpt_dir),
-            self.checkpointer,
-            options,
+            options=options,
         )
 
     def latest_step(self) -> int | None:
@@ -267,7 +264,8 @@ class AsyncMiniCheckpointManager:
         step = self.manager.latest_step()
         if step is None:
             return target, 0
-        restored = self.manager.restore(step, items=target)
+        restore_fn = cast(Any, ocp.args.StandardRestore)
+        restored = self.manager.restore(step, args=restore_fn(target))
         return restored, step
 
     def save(self, step: int, state: Mapping[str, Any]) -> None:
@@ -275,19 +273,15 @@ class AsyncMiniCheckpointManager:
         Asynchronously save `state` at `step`.
         Returns quickly; actual I/O is in background threads.
         """
-        save_args = orbax_utils.save_args_from_target(state)
-        self.manager.save(
-            step,
-            state,
-            save_kwargs={"save_args": save_args},
-        )
+        save_fn = cast(Any, ocp.args.StandardSave)
+        self.manager.save(step, args=save_fn(state))
 
     def wait_until_finished(self, timeout: float | None = None) -> None:
         """
         Optionally wait for any pending async writes.
         """
-        _ = timeout  # retained for API compatibility; AsyncCheckpointer does not take a timeout arg.
-        self.checkpointer.wait_until_finished()
+        _ = timeout  # retained for API compatibility; CheckpointManager does not take a timeout arg.
+        self.manager.wait_until_finished()
 
 
 def _main() -> None:

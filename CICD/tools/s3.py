@@ -402,6 +402,23 @@ def parse_ls_output(output: str, base: PurePosixPath) -> List[LsEntry]:
     return entries
 
 
+def parse_ls_file_line(line: str, display_name: str, key_path: PurePosixPath) -> Optional[LsEntry]:
+    file_match = LS_FILE_RE.match(line)
+    if not file_match:
+        return None
+    mtime = datetime.strptime(
+        f"{file_match.group('date')} {file_match.group('time')}",
+        "%Y/%m/%d %H:%M:%S",
+    ).replace(tzinfo=timezone.utc)
+    return LsEntry(
+        name=display_name,
+        key=key_path,
+        size=int(file_match.group("size")),
+        mtime=mtime,
+        is_dir=False,
+    )
+
+
 def list_dir(state: ShellState, prefix: PurePosixPath) -> List[LsEntry]:
     uri = s3_uri_for_prefix(state, prefix)
     output = run_s5cmd(["ls", uri], state.endpoint)
@@ -636,6 +653,17 @@ def cmd_ls(state: ShellState, args: List[str]) -> None:
         for line in format_entries(entries, colorize=colorize):
             print(line)
         return
+    if raw_path and not raw_path.endswith("/"):
+        uri = build_s3_uri_from_raw(state, raw_path)
+        output = run_s5cmd(["ls", uri], state.endpoint, allow_missing=True)
+        if output.strip():
+            line = output.splitlines()[0]
+            key_path = resolve_prefix(state, raw_path)
+            entry = parse_ls_file_line(line, raw_path, key_path)
+            if entry:
+                for line_out in format_entries([entry], colorize=colorize):
+                    print(line_out)
+                return
     if depth == 1:
         entries = sort_entries(list_dir(state, prefix))
         for line in format_entries(entries, colorize=colorize):

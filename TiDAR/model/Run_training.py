@@ -759,7 +759,7 @@ def main() -> None:
                     log_msg = (
                         f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
                         f"loss {loss_val:.4f} ar {ar_val:.4f} diff {diff_val:.4f} "
-                        f"greedy_acc {greedy_accept_val:.3f}"
+                        f"accept {accept_val:.3f} greedy_acc {greedy_accept_val:.3f}"
                     )
                     # Add extra loss terms only if their coefficients are > 0
                     if stage_rho > 0.0:

@@ -80,6 +80,7 @@ APP_ROOT=/proj
 DATA_DIR="${APP_ROOT}/giant-data"
 REPO_DIR="${APP_ROOT}/SUPER-GIANT"
 REPO_URL="https://github.com/DebelToni/SUPER-GIANT"
+GIT_CLONE_DEPTH="${GIT_CLONE_DEPTH:-1}"
 
 # Trust this repo path even if ownership differs (common with bind mounts in Docker)
 if ! git config --system --get-all safe.directory 2>/dev/null | grep -Fxq "$REPO_DIR"; then
@@ -169,13 +170,13 @@ fi
 if [[ ! -d "$REPO_DIR/.git" ]]; then
   # Fresh clone (also handles "dir missing" or "dir exists but not a git repo")
   rm -rf "$REPO_DIR" 2>/dev/null || true
-  git clone "$REPO_URL" "$REPO_DIR"
+  git clone --depth "$GIT_CLONE_DEPTH" "$REPO_URL" "$REPO_DIR"
 else
   # Repo exists: update it
-  git -C "$REPO_DIR" fetch --all --prune
+  git -C "$REPO_DIR" fetch --all --prune --depth "$GIT_CLONE_DEPTH"
 
   # If you want to keep local changes, use pull --rebase:
-  git -C "$REPO_DIR" pull --rebase --autostash
+  git -C "$REPO_DIR" pull --rebase --autostash --depth "$GIT_CLONE_DEPTH"
 
   # If you prefer "always exactly match remote" (discard local changes), use instead:
   # git -C "$REPO_DIR" reset --hard origin/HEAD

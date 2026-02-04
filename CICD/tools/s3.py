@@ -967,6 +967,14 @@ def cmd_mv(state: ShellState, args: List[str]) -> None:
     dst_type, dst = classify_path(state, dst_raw)
     if src_type == "local" and dst_type == "local":
         die("mv requires at least one S3 path")
+    if src_type == "s3" and dst_type == "local":
+        die("mv does not support S3 -> local; use cp then rm")
+    if src_type == "s3" and dst_type == "s3":
+        src_base = resolve_s3_uri(state, src_raw).rstrip("/")
+        dst_base = resolve_s3_uri(state, dst_raw).rstrip("/")
+        if src_base == dst_base:
+            sys.stderr.write("mv: source and destination are the same; nothing to do\n")
+            return
 
     if dst_type == "s3" and dst_raw.endswith("/") and not dst.endswith("/"):
         dst += "/"

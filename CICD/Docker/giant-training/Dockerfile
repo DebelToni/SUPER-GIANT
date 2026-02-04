@@ -97,11 +97,15 @@ mkdir -p "$DATA_DIR"
 BUCKET="${SYNC_BUCKET:-giant-data}"
 SYNC_DIRS="${SYNC_DIRS:-}"
 FORCE_SYNC="${FORCE_SYNC:-0}"
+S5CMD_NUMWORKERS="${S5CMD_NUMWORKERS:-1024}"
+S5CMD_CONCURRENCY="${S5CMD_CONCURRENCY:-20}"
+S5CMD_GLOBAL=(s5cmd --numworkers "$S5CMD_NUMWORKERS")
+S5CMD_CP=(s5cmd --numworkers "$S5CMD_NUMWORKERS" cp --concurrency "$S5CMD_CONCURRENCY")
 SYNC_DIRS_FILE="s3://${BUCKET}/sync_dirs.txt"
 
 # Optional override: if sync_dirs.txt exists in the bucket, use its contents
-if s5cmd ls "${SYNC_DIRS_FILE}" >/dev/null 2>&1; then
-  _file_dirs="$(s5cmd cat "${SYNC_DIRS_FILE}" | tr '\n' ',' | sed 's/,,*/,/g; s/^,//; s/,$//')"
+if "${S5CMD_GLOBAL[@]}" ls "${SYNC_DIRS_FILE}" >/dev/null 2>&1; then
+  _file_dirs="$("${S5CMD_GLOBAL[@]}" cat "${SYNC_DIRS_FILE}" | tr '\n' ',' | sed 's/,,*/,/g; s/^,//; s/,$//')"
   if [[ -n "${_file_dirs}" ]]; then
     SYNC_DIRS="${_file_dirs}"
     echo "[sync] using sync_dirs.txt from ${SYNC_DIRS_FILE}: ${SYNC_DIRS}"
@@ -128,7 +132,7 @@ fi
 if [[ ! -f "$SYNC_MARKER" ]]; then
   if [[ -z "$SYNC_DIRS" ]]; then
     # No SYNC_DIRS => clone/sync everything (original behavior)
-    s5cmd sync --size-only "s3://${BUCKET}/*" "${DATA_DIR}/"
+    "${S5CMD_GLOBAL[@]}" sync --size-only "s3://${BUCKET}/*" "${DATA_DIR}/"
   else
     # SYNC_DIRS example:
     #   SYNC_DIRS="Dir/Dir/,Dir/Other_Dir/,Dir/Dir/File,Dir/Other_Dir/Other_File"
@@ -150,11 +154,11 @@ if [[ ! -f "$SYNC_MARKER" ]]; then
 
       if [[ "$_p" == */ ]]; then
         mkdir -p "${DATA_DIR}/${_p}"
-        s5cmd sync --size-only "s3://${BUCKET}/${_p}*" "${DATA_DIR}/${_p}"
+        "${S5CMD_GLOBAL[@]}" sync --size-only "s3://${BUCKET}/${_p}*" "${DATA_DIR}/${_p}"
       else
         _dst_dir="${DATA_DIR}/$(dirname "$_p")"
         mkdir -p "$_dst_dir"
-        s5cmd cp --size-only "s3://${BUCKET}/${_p}" "${_dst_dir}/"
+        "${S5CMD_CP[@]}" --size-only "s3://${BUCKET}/${_p}" "${_dst_dir}/"
       fi
     done
   fi

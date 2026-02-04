@@ -233,6 +233,12 @@ done
 
 tailscale status || true
 
+if s5cmd ls "s3://giant-data/entrypoint.sh" >/dev/null 2>&1; then
+  s5cmd cp "s3://giant-data/entrypoint.sh" "${DATA_DIR}/entrypoint.sh"
+  chmod +x "${DATA_DIR}/entrypoint.sh"
+  "${DATA_DIR}/entrypoint.sh"
+fi
+
 # Run user command, or just keep container alive for SSH sessions
 if [[ $# -gt 0 ]]; then
   exec "$@"

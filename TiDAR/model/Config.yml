@@ -50,13 +50,15 @@ training:
   # label_smoothing <- future implement
   scan_chunk: 1
   loss:
-    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard
+    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard + eta*L_distill
     # Each term with coefficient 0 is skipped entirely (no compute)
     alpha: 1.0    # AR next-token prediction CE loss
     beta: 1.0     # Diffusion denoising CE loss
     rho: 0.0      # Forward KL: KL(P_AR || Q_Diff) - punishes Diff for missing AR mass
     chi: 0.0      # Reverse KL: KL(Q_Diff || P_AR) - punishes Diff for extra mass
     delta: 0.0    # Hard agreement: CE(onehot(argmax P_AR), logits_diff) - greedy agreement
+    eta: 0.0      # Soft distillation: KL(softmax(AR/T) || softmax(Diff/T))
+    eta_T: 0.0    # Distillation temperature
 
 stages:
   - name: fw_edu_667m

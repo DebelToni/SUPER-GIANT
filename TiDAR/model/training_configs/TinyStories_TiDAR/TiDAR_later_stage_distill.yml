@@ -1,5 +1,5 @@
-# TiDAR Later-Stage Agreement Config for TinyStories
-# Same architecture as TiDAR_post_training.yml, but enable agreement losses.
+# TiDAR Later-Stage Distillation Config for TinyStories
+# AR->Diff soft distillation on drafted positions.
 # Use --resume latest (or --init_checkpoint) to continue from a prior run.
 
 model:
@@ -31,7 +31,7 @@ inference:
   draft_length: 6
 
 optimizer:
-  base_learning_rate: 5.0e-5 # Lower LR for post-training
+  base_learning_rate: 5.0e-5
   min_learning_rate: 5.0e-6
   warmup_steps: 500
   weight_decay: 0.01
@@ -52,14 +52,14 @@ training:
   scan_chunk: 2
   loss:
     # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard + eta*L_distill
-    # Later-stage agreement losses enabled
-    alpha: 1.0 # AR next-token prediction CE loss
-    beta: 1.0 # Diffusion denoising CE loss
-    rho: 0.1 # Forward KL: KL(P_AR || Q_Diff)
-    chi: 0.0 # Reverse KL - disabled
-    delta: 0.3 # Hard agreement CE
-    eta: 0.0 # Soft distillation - disabled
-    eta_T: 0.0 # Distillation temperature
+    # Distill: KL(softmax(AR/T) || softmax(Diff/T)) on drafted positions (AR stopgrad)
+    alpha: 1.0
+    beta: 1.0
+    rho: 0.0
+    chi: 0.0
+    delta: 0.0
+    eta: 0.04
+    eta_T: 2.0
 
 paths:
   checkpoints_root: "checkpoints/TinyStories_exp/tidar"

@@ -50,6 +50,8 @@ training:
     rho: 0.2      # Forward KL (was agreement_lambda)
     chi: 0.0      # Reverse KL
     delta: 0.0    # Hard agreement
+    eta: 0.0      # Soft distillation
+    eta_T: 0.0    # Distillation temperature
 
 paths:
   params_dir: "Sweep/Params/sweep_4_lr1e5_a0p5_l0p2_params"

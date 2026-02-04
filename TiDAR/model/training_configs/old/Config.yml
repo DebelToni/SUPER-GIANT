@@ -51,6 +51,8 @@ training:
     rho: 0.0      # Forward KL (was agreement_lambda)
     chi: 0.0      # Reverse KL
     delta: 0.0    # Hard agreement
+    eta: 0.0      # Soft distillation
+    eta_T: 0.0    # Distillation temperature
 
 stages:
   - name: fw_edu_667m

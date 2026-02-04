@@ -1,5 +1,5 @@
-# TiDAR Later-Stage Agreement Config for TinyStories (Max Acceptance)
-# Agreement-dominant loss: reverse KL + hard agreement, minimal CE.
+# TiDAR Later-Stage Aggressive Greedy Config for TinyStories
+# Extreme agreement-focused loss. Expect quality collapse, maximize greedy acceptance.
 # Use --resume latest (or --init_checkpoint) to continue from a prior run.
 
 model:
@@ -52,14 +52,14 @@ training:
   scan_chunk: 2
   loss:
     # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard + eta*L_distill
-    # Agreement-dominant: reverse KL + hard agreement, minimal CE
-    alpha: 0.2
-    beta: 0.2
+    # Aggressive: hard agreement + sharp distill, minimal CE
+    alpha: 0.1
+    beta: 0.1
     rho: 0.0
-    chi: 0.4
-    delta: 1.0
-    eta: 0.0
-    eta_T: 0.0
+    chi: 0.0
+    delta: 3.0
+    eta: 1.0
+    eta_T: 0.7
 
 paths:
   checkpoints_root: "checkpoints/TinyStories_exp/tidar"

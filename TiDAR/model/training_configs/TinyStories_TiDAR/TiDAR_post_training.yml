@@ -51,13 +51,15 @@ training:
   mini_max_to_keep: 2
   scan_chunk: 2
   loss:
-    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard
+    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard + eta*L_distill
     # Baseline TiDAR training (no agreement loss initially)
     alpha: 1.0 # AR next-token prediction CE loss
     beta: 1.0 # Diffusion denoising CE loss
     rho: 0.0 # Forward KL - disabled
     chi: 0.0 # Reverse KL - disabled
     delta: 0.0 # Hard agreement - disabled
+    eta: 0.0 # Soft distillation - disabled
+    eta_T: 0.0 # Distillation temperature
 
 paths:
   checkpoints_root: "checkpoints/TinyStories_exp/tidar"

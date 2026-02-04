@@ -51,13 +51,15 @@ training:
   mini_max_to_keep: 2
   scan_chunk: 2
   loss:
-    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard
+    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard + eta*L_distill
     # Forward KL forces Diff to cover AR mass; hard nudges argmax.
     alpha: 0.3
     beta: 0.0
     rho: 0.5
     chi: 0.0
     delta: 0.2
+    eta: 0.0
+    eta_T: 0.0
 
 paths:
   checkpoints_root: "checkpoints/TinyStories_exp/tidar"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Edge case tests for the 5-term TiDAR loss function.
+Edge case tests for the 6-term TiDAR loss function.
 
 Tests cover:
 1. Numerical stability with extreme logits
@@ -84,9 +84,9 @@ def test_extreme_logits():
         "attn_bias": jnp.zeros((B, 1, 2 * S, 2 * S)),
     }
     
-    total, (ar, diff, kl_fwd, kl_rev, hard, acc) = loss_and_metrics(
+    total, (ar, diff, kl_fwd, kl_rev, hard, distill, acc, _) = loss_and_metrics(
         {}, batch, model=LargeLogitModel(), dropout_rng=jax.random.PRNGKey(0),
-        alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1,
+        alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1, eta=0.0, eta_T=1.0,
         compute_accept=False, accept_top_k=64, accept_max_positions=256
     )
     
@@ -108,7 +108,7 @@ def test_extreme_logits():
     
     total2, _ = loss_and_metrics(
         {}, batch, model=SmallLogitModel(), dropout_rng=jax.random.PRNGKey(0),
-        alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1,
+        alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1, eta=0.0, eta_T=1.0,
         compute_accept=False, accept_top_k=64, accept_max_positions=256
     )
     
@@ -151,9 +151,9 @@ def test_single_valid_position():
         "attn_bias": jnp.zeros((B, 1, 2 * S, 2 * S)),
     }
     
-    total, (ar, diff, kl_fwd, kl_rev, hard, acc) = loss_and_metrics(
+    total, (ar, diff, kl_fwd, kl_rev, hard, distill, acc, _) = loss_and_metrics(
         {}, batch, model=SinglePosModel(), dropout_rng=jax.random.PRNGKey(0),
-        alpha=1.0, beta=1.0, rho=0.0, chi=0.0, delta=0.0,
+        alpha=1.0, beta=1.0, rho=0.0, chi=0.0, delta=0.0, eta=0.0, eta_T=1.0,
         compute_accept=False, accept_top_k=64, accept_max_positions=256
     )
     
@@ -187,9 +187,9 @@ def test_all_zero_coefficient():
     }
     
     # All coefficients = 0 should give 0 loss
-    total, (ar, diff, kl_fwd, kl_rev, hard, acc) = loss_and_metrics(
+    total, (ar, diff, kl_fwd, kl_rev, hard, distill, acc, _) = loss_and_metrics(
         {}, batch, model=ZeroCoeffModel(), dropout_rng=jax.random.PRNGKey(0),
-        alpha=0.0, beta=0.0, rho=0.0, chi=0.0, delta=0.0,
+        alpha=0.0, beta=0.0, rho=0.0, chi=0.0, delta=0.0, eta=0.0, eta_T=1.0,
         compute_accept=False, accept_top_k=64, accept_max_positions=256
     )
     
@@ -240,21 +240,26 @@ def test_coefficient_additivity():
         return float(total)
     
     # Get individual loss terms
-    l_ar = get_loss(alpha=1.0, beta=0.0, rho=0.0, chi=0.0, delta=0.0)
-    l_diff = get_loss(alpha=0.0, beta=1.0, rho=0.0, chi=0.0, delta=0.0)
-    l_rho = get_loss(alpha=0.0, beta=0.0, rho=1.0, chi=0.0, delta=0.0)
-    l_chi = get_loss(alpha=0.0, beta=0.0, rho=0.0, chi=1.0, delta=0.0)
-    l_delta = get_loss(alpha=0.0, beta=0.0, rho=0.0, chi=0.0, delta=1.0)
+    l_ar = get_loss(alpha=1.0, beta=0.0, rho=0.0, chi=0.0, delta=0.0, eta=0.0, eta_T=1.0)
+    l_diff = get_loss(alpha=0.0, beta=1.0, rho=0.0, chi=0.0, delta=0.0, eta=0.0, eta_T=1.0)
+    l_rho = get_loss(alpha=0.0, beta=0.0, rho=1.0, chi=0.0, delta=0.0, eta=0.0, eta_T=1.0)
+    l_chi = get_loss(alpha=0.0, beta=0.0, rho=0.0, chi=1.0, delta=0.0, eta=0.0, eta_T=1.0)
+    l_delta = get_loss(alpha=0.0, beta=0.0, rho=0.0, chi=0.0, delta=1.0, eta=0.0, eta_T=1.0)
+    l_eta = get_loss(alpha=0.0, beta=0.0, rho=0.0, chi=0.0, delta=0.0, eta=1.0, eta_T=2.0)
     
     # Get combined loss
-    alpha, beta, rho, chi, delta = 0.5, 0.7, 0.1, 0.05, 0.2
-    l_combined = get_loss(alpha=alpha, beta=beta, rho=rho, chi=chi, delta=delta)
+    alpha, beta, rho, chi, delta, eta = 0.5, 0.7, 0.1, 0.05, 0.2, 0.3
+    eta_T = 2.0
+    l_combined = get_loss(alpha=alpha, beta=beta, rho=rho, chi=chi, delta=delta, eta=eta, eta_T=eta_T)
     
-    expected = alpha * l_ar + beta * l_diff + rho * l_rho + chi * l_chi + delta * l_delta
+    expected = alpha * l_ar + beta * l_diff + rho * l_rho + chi * l_chi + delta * l_delta + eta * l_eta
     
     assert abs(l_combined - expected) < 1e-4, f"Additivity failed: {l_combined} vs {expected}"
     
-    print(f"  L_AR={l_ar:.4f}, L_Diff={l_diff:.4f}, L_rho={l_rho:.4f}, L_chi={l_chi:.4f}, L_delta={l_delta:.4f}")
+    print(
+        f"  L_AR={l_ar:.4f}, L_Diff={l_diff:.4f}, L_rho={l_rho:.4f}, "
+        f"L_chi={l_chi:.4f}, L_delta={l_delta:.4f}, L_eta={l_eta:.4f}"
+    )
     print(f"  Combined: {l_combined:.4f}, Expected: {expected:.4f}")
     print("  PASSED")
 
@@ -292,7 +297,7 @@ def test_gradient_finite():
     # Test gradient computation (accept_top_k must be <= V)
     (total, aux), grads = loss_and_grad(
         params, batch, model=GradModel(), dropout_rng=jax.random.PRNGKey(0),
-        alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1,
+        alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1, eta=0.0, eta_T=1.0,
         compute_accept=False, accept_top_k=min(64, V), accept_max_positions=256
     )
     
@@ -352,9 +357,9 @@ def test_build_train_batch_integration():
         def apply(self, variables, input_ids, rngs, deterministic, attn_bias, position_ids):
             return logits
     
-    total, (ar, diff, kl_fwd, kl_rev, hard, acc) = loss_and_metrics(
+    total, (ar, diff, kl_fwd, kl_rev, hard, distill, acc, _) = loss_and_metrics(
         {}, batch, model=IntegrationModel(), dropout_rng=jax.random.PRNGKey(0),
-        alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1,
+        alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1, eta=0.0, eta_T=1.0,
         compute_accept=True, accept_top_k=64, accept_max_positions=256
     )
     
@@ -383,6 +388,8 @@ training:
     rho: 0.15
     chi: 0.05
     delta: 0.25
+    eta: 0.04
+    eta_T: 2.0
 
 stages:
   - name: test_stage
@@ -403,6 +410,8 @@ stages:
     assert cfg.training.loss.rho == 0.15
     assert cfg.training.loss.chi == 0.05
     assert cfg.training.loss.delta == 0.25
+    assert cfg.training.loss.eta == 0.04
+    assert cfg.training.loss.eta_T == 2.0
     
     # Check stage override
     assert cfg.stages[0].loss.alpha == 0.5
@@ -443,9 +452,9 @@ def test_accept_rate_bounds():
             "attn_bias": jnp.zeros((B, 1, 2 * S, 2 * S)),
         }
         
-        _, (_, _, _, _, _, acc) = loss_and_metrics(
+        _, (_, _, _, _, _, _, acc, _) = loss_and_metrics(
             {}, batch, model=AcceptModel(), dropout_rng=jax.random.PRNGKey(0),
-            alpha=1.0, beta=1.0, rho=0.0, chi=0.0, delta=0.0,
+            alpha=1.0, beta=1.0, rho=0.0, chi=0.0, delta=0.0, eta=0.0, eta_T=1.0,
             compute_accept=True, accept_top_k=64, accept_max_positions=256
         )
         
@@ -486,7 +495,7 @@ def test_jit_consistency():
     def compute_loss():
         return loss_and_metrics(
             {}, batch, model=JitModel(), dropout_rng=jax.random.PRNGKey(0),
-            alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1,
+            alpha=1.0, beta=1.0, rho=0.1, chi=0.1, delta=0.1, eta=0.0, eta_T=1.0,
             compute_accept=False, accept_top_k=min(64, V), accept_max_positions=256
         )
     
@@ -513,7 +522,7 @@ def test_jit_consistency():
 
 def main():
     print("=" * 60)
-    print("TiDAR 5-Term Loss Edge Case Tests")
+    print("TiDAR 6-Term Loss Edge Case Tests")
     print("=" * 60)
     
     test_extreme_logits()

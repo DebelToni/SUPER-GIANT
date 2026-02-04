@@ -51,13 +51,15 @@ training:
   mini_max_to_keep: 2
   scan_chunk: 2
   loss:
-    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard
+    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard + eta*L_distill
     # Agreement-dominant: reverse KL + hard agreement, minimal CE
     alpha: 0.2
     beta: 0.2
     rho: 0.0
     chi: 0.4
     delta: 1.0
+    eta: 0.0
+    eta_T: 0.0
 
 paths:
   checkpoints_root: "checkpoints/TinyStories_exp/tidar"

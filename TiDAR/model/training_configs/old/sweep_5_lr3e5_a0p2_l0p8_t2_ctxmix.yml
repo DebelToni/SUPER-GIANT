@@ -49,7 +49,9 @@ training:
     rho: 0.8      # Forward KL (was agreement_lambda)
     chi: 0.0      # Reverse KL
     delta: 0.0    # Hard agreement
-    # Note: agreement_temperature: 2.0 was used in old version (not in current 5-term loss)
+    eta: 0.0      # Soft distillation
+    eta_T: 0.0    # Distillation temperature
+    # Note: agreement_temperature: 2.0 was used in old version (not in current 6-term loss)
 
 paths:
   params_dir: "Sweep/Params/sweep_5_lr3e5_a0p2_l0p8_t2_ctxmix_params"

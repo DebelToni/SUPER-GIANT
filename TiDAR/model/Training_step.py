@@ -99,11 +99,13 @@ def _compute_alignment_losses(
     rho: float,
     chi: float,
     delta: float,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    eta: float,
+    eta_T: float,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Compute KL and hard-agreement losses between AR and Diff distributions.
+    Compute KL, hard-agreement, and distillation losses between AR and Diff distributions.
     
-    Returns: (kl_fwd_loss, kl_rev_loss, hard_agree_loss)
+    Returns: (kl_fwd_loss, kl_rev_loss, hard_agree_loss, distill_loss)
     """
     S = logits.shape[1] // 2
     
@@ -156,7 +158,22 @@ def _compute_alignment_losses(
     else:
         hard_agree_loss = jnp.array(0.0, dtype=jnp.float32)
     
-    return kl_fwd_loss, kl_rev_loss, hard_agree_loss
+    # Soft distillation: KL(softmax(AR/T) || softmax(Diff/T)) with AR stopgrad
+    # Uses the same aligned positions as greedy acceptance (AR 0..S-2 vs Diff S+1..2S-1).
+    if eta > 0.0:
+        temp = jnp.asarray(eta_T, dtype=jnp.float32)
+        temp = jnp.maximum(temp, 1.0e-4)
+        log_p_ar_t = jax.nn.log_softmax(ar_logits_sg / temp, axis=-1)
+        p_ar_t = jnp.exp(log_p_ar_t)
+        log_q_diff_t = jax.nn.log_softmax(diff_logits_aligned / temp, axis=-1)
+        kl_t = log_p_ar_t - log_q_diff_t
+        distill_per_pos = jnp.sum(p_ar_t * kl_t, axis=-1)
+        distill_per_pos = jnp.where(joint_mask > 0, distill_per_pos, 0.0)
+        distill_loss = (distill_per_pos.sum() / joint_denom) * (temp * temp)
+    else:
+        distill_loss = jnp.array(0.0, dtype=jnp.float32)
+    
+    return kl_fwd_loss, kl_rev_loss, hard_agree_loss, distill_loss
 
 
 def loss_and_metrics(
@@ -171,15 +188,17 @@ def loss_and_metrics(
     rho: float,        # Forward KL: KL(P_AR || Q_Diff)
     chi: float,        # Reverse KL: KL(Q_Diff || P_AR)
     delta: float,      # Hard agreement: CE(onehot(argmax P_AR), logits_diff)
+    eta: float,        # Soft distillation: KL(softmax(AR/T) || softmax(Diff/T))
+    eta_T: float,      # Distillation temperature
     # Acceptance metric
     compute_accept,
     accept_top_k: int,
     accept_max_positions: int,
 ) -> Tuple:
     """
-    Compute TiDAR training loss with 5 configurable terms:
+    Compute TiDAR training loss with 6 configurable terms:
     
-    Loss = alpha * L_AR + beta * L_Diff + rho * KL_fwd + chi * KL_rev + delta * L_hard
+    Loss = alpha * L_AR + beta * L_Diff + rho * KL_fwd + chi * KL_rev + delta * L_hard + eta * L_distill
     
     Where:
       - L_AR: AR next-token prediction CE loss (clean half, shifted)
@@ -187,6 +206,7 @@ def loss_and_metrics(
       - KL_fwd: KL(stopgrad(P_AR) || Q_Diff) - punishes Diff for missing AR mass
       - KL_rev: KL(Q_Diff || stopgrad(P_AR)) - punishes Diff for extra mass
       - L_hard: CE(onehot(argmax stopgrad(P_AR)), logits_diff) - greedy agreement
+      - L_distill: KL(softmax(AR/T) || softmax(Diff/T)) on drafted positions (AR stopgrad)
     
     All AR terms are stopgrad'd to prevent gradients flowing into AR from Diff losses.
     Terms with coefficient == 0 are skipped entirely (no compute).
@@ -199,9 +219,9 @@ def loss_and_metrics(
         attn_bias=batch["attn_bias"],
         position_ids=batch["position_ids"],
     )
-    labels = batch["labels"]
-    mask_ntp = batch["loss_mask_ntp"]
-    mask_diff = batch["loss_mask_diff"]
+    labels = jnp.asarray(batch["labels"])
+    mask_ntp = jnp.asarray(batch["loss_mask_ntp"])
+    mask_diff = jnp.asarray(batch["loss_mask_diff"])
 
     # ---------------------------------------------------------------------------
     # Term 1: AR NTP loss (alpha)
@@ -230,16 +250,24 @@ def loss_and_metrics(
         diff_loss = jnp.array(0.0, dtype=jnp.float32)
 
     # ---------------------------------------------------------------------------
-    # Terms 3-5: KL divergences and hard agreement
+    # Terms 3-6: KL divergences, hard agreement, and distillation
     # ---------------------------------------------------------------------------
-    if (rho > 0.0) or (chi > 0.0) or (delta > 0.0):
-        kl_fwd_loss, kl_rev_loss, hard_agree_loss = _compute_alignment_losses(
-            logits, mask_ntp, mask_diff, rho=rho, chi=chi, delta=delta
+    if (rho > 0.0) or (chi > 0.0) or (delta > 0.0) or (eta > 0.0):
+        kl_fwd_loss, kl_rev_loss, hard_agree_loss, distill_loss = _compute_alignment_losses(
+            logits,
+            mask_ntp,
+            mask_diff,
+            rho=rho,
+            chi=chi,
+            delta=delta,
+            eta=eta,
+            eta_T=eta_T,
         )
     else:
         kl_fwd_loss = jnp.array(0.0, dtype=jnp.float32)
         kl_rev_loss = jnp.array(0.0, dtype=jnp.float32)
         hard_agree_loss = jnp.array(0.0, dtype=jnp.float32)
+        distill_loss = jnp.array(0.0, dtype=jnp.float32)
 
     # ---------------------------------------------------------------------------
     # Total loss
@@ -250,6 +278,7 @@ def loss_and_metrics(
         + rho * kl_fwd_loss
         + chi * kl_rev_loss
         + delta * hard_agree_loss
+        + eta * distill_loss
     )
 
     # ---------------------------------------------------------------------------
@@ -281,7 +310,16 @@ def loss_and_metrics(
         operand=None,
     )
 
-    return total_loss, (ar_loss, diff_loss, kl_fwd_loss, kl_rev_loss, hard_agree_loss, accept_rate, greedy_accept_rate)
+    return total_loss, (
+        ar_loss,
+        diff_loss,
+        kl_fwd_loss,
+        kl_rev_loss,
+        hard_agree_loss,
+        distill_loss,
+        accept_rate,
+        greedy_accept_rate,
+    )
 
 
 def loss_and_grad(
@@ -295,6 +333,8 @@ def loss_and_grad(
     rho: float,
     chi: float,
     delta: float,
+    eta: float,
+    eta_T: float,
     compute_accept,
     accept_top_k: int,
     accept_max_positions: int,
@@ -310,6 +350,8 @@ def loss_and_grad(
             rho=rho,
             chi=chi,
             delta=delta,
+            eta=eta,
+            eta_T=eta_T,
             compute_accept=compute_accept,
             accept_top_k=accept_top_k,
             accept_max_positions=accept_max_positions,
@@ -328,6 +370,8 @@ def loss_and_grad(
         "rho",
         "chi",
         "delta",
+        "eta",
+        "eta_T",
         "accept_top_k",
         "accept_max_positions",
     ],
@@ -345,11 +389,25 @@ def train_step(
     rho: float = 0.0,
     chi: float = 0.0,
     delta: float = 0.0,
+    eta: float = 0.0,
+    eta_T: float = 1.0,
     compute_accept=False,
     accept_top_k: int = 64,
     accept_max_positions: int = 256,
 ):
-    (loss, (ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate, greedy_accept_rate)), grads = loss_and_grad(
+    (
+        loss,
+        (
+            ar_loss,
+            diff_loss,
+            kl_fwd,
+            kl_rev,
+            hard_agree,
+            distill_loss,
+            accept_rate,
+            greedy_accept_rate,
+        ),
+    ), grads = loss_and_grad(
         params,
         batch,
         model=model,
@@ -359,13 +417,27 @@ def train_step(
         rho=rho,
         chi=chi,
         delta=delta,
+        eta=eta,
+        eta_T=eta_T,
         compute_accept=compute_accept,
         accept_top_k=accept_top_k,
         accept_max_positions=accept_max_positions,
     )
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
-    return new_params, opt_state, loss, ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, accept_rate, greedy_accept_rate
+    return (
+        new_params,
+        opt_state,
+        loss,
+        ar_loss,
+        diff_loss,
+        kl_fwd,
+        kl_rev,
+        hard_agree,
+        distill_loss,
+        accept_rate,
+        greedy_accept_rate,
+    )
 
 
 __all__ = ["loss_and_metrics", "loss_and_grad", "train_step"]

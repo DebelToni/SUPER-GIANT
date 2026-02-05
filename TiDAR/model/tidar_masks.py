@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from functools import lru_cache
 
 import jax.numpy as jnp
 
@@ -54,4 +55,30 @@ def build_tidar_train_bias(
     return bias[:, None, :, :]
 
 
-__all__ = ["build_tidar_train_bias"]
+@lru_cache(maxsize=32)
+def build_tidar_train_bias_template(
+    seq_len: int,
+    block_len: int,
+    *,
+    bias_value: float = -1.0e10,
+) -> jnp.ndarray:
+    """Precompute the static TiDAR training bias (no padding mask).
+
+    Returns bias of shape [1, 1, 2*seq_len, 2*seq_len].
+    """
+    pos = jnp.arange(seq_len, dtype=jnp.int32)
+    position_ids = jnp.broadcast_to(pos[None, :], (1, seq_len))
+    position_ids = jnp.concatenate([position_ids, position_ids], axis=1)
+    token_types = jnp.concatenate(
+        [jnp.zeros(seq_len, dtype=jnp.int32), jnp.ones(seq_len, dtype=jnp.int32)]
+    )
+    return build_tidar_train_bias(
+        position_ids,
+        token_types,
+        block_len=block_len,
+        key_padding_mask=None,
+        bias_value=bias_value,
+    )
+
+
+__all__ = ["build_tidar_train_bias", "build_tidar_train_bias_template"]

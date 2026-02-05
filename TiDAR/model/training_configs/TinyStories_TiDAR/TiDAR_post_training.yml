@@ -60,6 +60,8 @@ training:
     delta: 0.0 # Hard agreement - disabled
     eta: 0.0 # Soft distillation - disabled
     eta_T: 0.0 # Distillation temperature
+    gamma: 0.0
+    gamma_topk: 0
 
 paths:
   checkpoints_root: "checkpoints/TinyStories_exp/tidar"

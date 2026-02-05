@@ -86,6 +86,8 @@ class StageConfig:
     loss_delta: float | None = None    # Hard agreement CE
     loss_eta: float | None = None      # Soft distillation KL
     loss_eta_T: float | None = None    # Distillation temperature
+    loss_gamma: float | None = None    # Top-K set distillation
+    loss_gamma_topk: int | None = None # Top-K size for set distillation
 
 
 @dataclass
@@ -145,6 +147,9 @@ def parse_stage_configs(cfg: TiDARConfig) -> List[StageConfig]:
         def get_float_or_none(value):
             return float(value) if value is not None else None
 
+        def get_int_or_none(value):
+            return int(value) if value is not None else None
+
         stage_cfgs.append(
             StageConfig(
                 name=stage.name,
@@ -161,6 +166,8 @@ def parse_stage_configs(cfg: TiDARConfig) -> List[StageConfig]:
                 loss_delta=get_float_or_none(get_loss_value("delta")),
                 loss_eta=get_float_or_none(get_loss_value("eta")),
                 loss_eta_T=get_float_or_none(get_loss_value("eta_T")),
+                loss_gamma=get_float_or_none(get_loss_value("gamma")),
+                loss_gamma_topk=get_int_or_none(get_loss_value("gamma_topk")),
             )
         )
     return stage_cfgs
@@ -517,6 +524,8 @@ def main() -> None:
         default_delta = float(getattr(loss_cfg, "delta", 0.0))
         default_eta = float(getattr(loss_cfg, "eta", 0.0))
         default_eta_T = float(getattr(loss_cfg, "eta_T", 1.0))
+        default_gamma = float(getattr(loss_cfg, "gamma", 0.0))
+        default_gamma_topk = int(getattr(loss_cfg, "gamma_topk", 8))
     else:
         default_alpha = 1.0
         default_beta = 1.0
@@ -525,10 +534,13 @@ def main() -> None:
         default_delta = 0.0
         default_eta = 0.0
         default_eta_T = 1.0
+        default_gamma = 0.0
+        default_gamma_topk = 8
     print(
         f"[loss] defaults: alpha={default_alpha}, beta={default_beta}, "
         f"rho={default_rho}, chi={default_chi}, delta={default_delta}, "
-        f"eta={default_eta}, eta_T={default_eta_T}"
+        f"eta={default_eta}, eta_T={default_eta_T}, gamma={default_gamma}, "
+        f"gamma_topk={default_gamma_topk}"
     )
 
     def _init_accum_grads(pytree):
@@ -537,7 +549,20 @@ def main() -> None:
     def _stack_batches(batches):
         return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *batches)
 
-    @partial(jax.jit, static_argnames=("alpha", "beta", "rho", "chi", "delta", "eta", "eta_T"))
+    @partial(
+        jax.jit,
+        static_argnames=(
+            "alpha",
+            "beta",
+            "rho",
+            "chi",
+            "delta",
+            "eta",
+            "eta_T",
+            "gamma",
+            "gamma_topk",
+        ),
+    )
     def _run_chunk(
         params,
         opt_state,
@@ -553,6 +578,8 @@ def main() -> None:
         delta,
         eta,
         eta_T,
+        gamma,
+        gamma_topk,
     ):
         grad_scale = jnp.asarray(1.0 / grad_accum, dtype=jnp.float32)
 
@@ -570,6 +597,7 @@ def main() -> None:
                     kl_rev,
                     hard_agree,
                     distill_loss,
+                    topk_loss,
                     accept_rate,
                     greedy_accept_rate,
                 ),
@@ -585,6 +613,8 @@ def main() -> None:
                 delta=delta,
                 eta=eta,
                 eta_T=eta_T,
+                gamma=gamma,
+                gamma_topk=gamma_topk,
                 compute_accept=compute_accept,
                 accept_top_k=accept_top_k,
                 accept_max_positions=accept_max_positions,
@@ -627,7 +657,18 @@ def main() -> None:
                 step + 1,
                 accum_grads,
                 accum_count,
-            ), (loss, ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, distill_loss, accept_rate, greedy_accept_rate)
+            ), (
+                loss,
+                ar_loss,
+                diff_loss,
+                kl_fwd,
+                kl_rev,
+                hard_agree,
+                distill_loss,
+                topk_loss,
+                accept_rate,
+                greedy_accept_rate,
+            )
 
         (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
             body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
@@ -657,6 +698,10 @@ def main() -> None:
         stage_delta = runtime.config.loss_delta if runtime.config.loss_delta is not None else default_delta
         stage_eta = runtime.config.loss_eta if runtime.config.loss_eta is not None else default_eta
         stage_eta_T = runtime.config.loss_eta_T if runtime.config.loss_eta_T is not None else default_eta_T
+        stage_gamma = runtime.config.loss_gamma if runtime.config.loss_gamma is not None else default_gamma
+        stage_gamma_topk = (
+            runtime.config.loss_gamma_topk if runtime.config.loss_gamma_topk is not None else default_gamma_topk
+        )
 
         print(
             f"→ Stage {runtime.config.name}: seq_len={runtime.config.seq_len} epochs={runtime.config.epochs} "
@@ -665,7 +710,8 @@ def main() -> None:
         print(
             f"[loss] stage={runtime.config.name} alpha={stage_alpha}, beta={stage_beta}, "
             f"rho={stage_rho}, chi={stage_chi}, delta={stage_delta}, "
-            f"eta={stage_eta}, eta_T={stage_eta_T}"
+            f"eta={stage_eta}, eta_T={stage_eta_T}, gamma={stage_gamma}, "
+            f"gamma_topk={stage_gamma_topk}"
         )
 
         pbar = tqdm(
@@ -724,6 +770,8 @@ def main() -> None:
                 delta=stage_delta,
                 eta=stage_eta,
                 eta_T=stage_eta_T,
+                gamma=stage_gamma,
+                gamma_topk=stage_gamma_topk,
             )
             losses_host = jax.device_get(losses)
             if isinstance(losses_host, tuple):
@@ -754,8 +802,9 @@ def main() -> None:
                 kl_rev_val = float(losses[offset, 4]) if losses.shape[1] > 4 else 0.0
                 hard_agree_val = float(losses[offset, 5]) if losses.shape[1] > 5 else 0.0
                 distill_val = float(losses[offset, 6]) if losses.shape[1] > 6 else 0.0
-                accept_val = float(losses[offset, 7]) if losses.shape[1] > 7 else 0.0
-                greedy_accept_val = float(losses[offset, 8]) if losses.shape[1] > 8 else 0.0
+                topk_val = float(losses[offset, 7]) if losses.shape[1] > 7 else 0.0
+                accept_val = float(losses[offset, 8]) if losses.shape[1] > 8 else 0.0
+                greedy_accept_val = float(losses[offset, 9]) if losses.shape[1] > 9 else 0.0
                 last_loss = loss_val
                 step_val = chunk_start + offset
                 if step_val == 1 or step_val % log_every == 0:
@@ -774,6 +823,8 @@ def main() -> None:
                         log_msg += f" hard {hard_agree_val:.4f}"
                     if stage_eta > 0.0:
                         log_msg += f" distill {distill_val:.4f}"
+                    if stage_gamma > 0.0:
+                        log_msg += f" topk {topk_val:.4f}"
                     log_msg += f" ({elapsed:.1f}s)"
                     print()
                     print(log_msg)

@@ -14,6 +14,7 @@ shapes, masking, cache semantics) rather than re‑explaining TiDAR theory.
   - Main Anchor-TiDAR decode loop and CLI.
 - `TiDAR/model/Training_step.py`
   - Shared training loss and acceptance metric logic.
+  - Includes Top-K set distillation loss (`gamma`, `gamma_topk`) to push Diff mass onto AR top-K.
 - `TiDAR/model/distributional_invariance_test.py`
   - Non‑greedy distributional invariance test vs pure AR baseline.
 

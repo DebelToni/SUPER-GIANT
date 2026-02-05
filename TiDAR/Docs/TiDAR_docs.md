@@ -43,12 +43,12 @@ Inference (paper-style):
 - Verify only positions 1..K-1; the anchor is never verified.
 - Guarantees at least +1 token progress per step.
 
-### 1.2 Six-term loss with configurable agreement + distillation (implemented)
+### 1.2 Seven-term loss with configurable agreement + distillation (implemented)
 Goal: flexible control over AR/Diff training balance and acceptance rate optimization.
 Each term can be independently enabled/disabled by setting its coefficient to 0.
 
 ```
-Loss = alpha * L_AR + beta * L_Diff + rho * KL_fwd + chi * KL_rev + delta * L_hard + eta * L_distill
+Loss = alpha * L_AR + beta * L_Diff + rho * KL_fwd + chi * KL_rev + delta * L_hard + eta * L_distill + gamma * L_topk
 ```
 
 Where:
@@ -58,11 +58,12 @@ Where:
 - `KL_rev`: Reverse KL `KL(Q_Diff || stopgrad(P_AR))` - punishes Diff for extra probability mass
 - `L_hard`: Hard agreement `CE(onehot(argmax stopgrad(P_AR)), logits_diff)` - greedy agreement loss
 - `L_distill`: Soft distillation `KL(softmax(AR/T) || softmax(Diff/T))` on drafted positions (AR stopgrad)
+- `L_topk`: Top-K set distillation `-log(sum(q_diff[ar_topk]))` on drafted positions (AR stopgrad)
 
 Key properties:
 - All agreement terms use `stopgrad` on AR logits, so gradients only update Diff parameters
 - Terms with coefficient == 0 are skipped entirely (no compute, different JIT traces)
-- The function returns `total_loss` plus 8 metrics: `(ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, distill, accept_rate, greedy_accept_rate)`
+- The function returns `total_loss` plus 9 metrics: `(ar_loss, diff_loss, kl_fwd, kl_rev, hard_agree, distill, topk_loss, accept_rate, greedy_accept_rate)`
 
 **Coefficient meanings:**
 - `alpha`: Weight on AR language modeling. Higher = stronger AR capability.
@@ -72,12 +73,14 @@ Key properties:
 - `delta`: Hard agreement weight. Forces Diff argmax to match AR argmax (greedy alignment).
 - `eta`: Distillation weight. Matches softened AR distribution at drafted positions.
 - `eta_T`: Distillation temperature. Higher = softer targets, scaled by T^2.
+- `gamma`: Top-K set distillation weight. Pushes Diff mass onto AR's top-K set.
+- `gamma_topk`: K value for the Top-K set distillation term.
 
 Config example (in `Config.yml` or model config):
 ```yaml
 training:
   loss:
-    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard + eta*L_distill
+    # Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev + delta*L_hard + eta*L_distill + gamma*L_topk
     # Each term with coefficient 0 is skipped entirely (no compute)
     alpha: 1.0    # AR next-token prediction CE loss
     beta: 1.0     # Diffusion denoising CE loss
@@ -86,6 +89,8 @@ training:
     delta: 0.0    # Hard agreement: CE(onehot(argmax P_AR), logits_diff) - greedy agreement
     eta: 0.0      # Soft distillation KL (AR->Diff)
     eta_T: 1.0    # Distillation temperature
+    gamma: 0.0    # Top-K set distillation
+    gamma_topk: 8 # Top-K size for set distillation
 ```
 
 Stage-level overrides (optional):
@@ -104,13 +109,15 @@ stages:
       delta: 0.0
       eta: 0.0
       eta_T: 1.0
+      gamma: 0.0
+      gamma_topk: 8
 ```
 
 When a stage defines its own `loss` subsection, those values replace the global
 defaults for that stage. If a field is omitted, it falls back to `training.loss.*`.
 
 Alignment note:
-- Agreement and distillation losses compare AR positions 0..S-2 to Diff positions S+1..2S-1
+- Agreement, distillation, and top-k set losses compare AR positions 0..S-2 to Diff positions S+1..2S-1
   so both sides predict the same token (t+1).
 
 **Suggested hyperparameters:**
@@ -120,6 +127,7 @@ Alignment note:
 - Hard greedy agreement: alpha=1.0, beta=1.0, rho=0, chi=0, delta=0.1-0.3
 - Speed-biased: alpha=0.5, beta=1.0, rho=0.2, chi=0, delta=0.1
 - Distill-only nudge: alpha=1.0, beta=1.0, eta=0.02-0.05, eta_T=2.0
+- Top-K set nudge: gamma=0.01, gamma_topk=8
 
 ---
 

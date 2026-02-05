@@ -9,6 +9,8 @@
 #let distill-color = rgb(156, 39, 176)     // Purple
 #let smallar-color = rgb(255, 152, 0)      // Orange
 #let biggerbeta-color = rgb(0, 150, 136)   // Teal
+#let topk-color = rgb(121, 85, 72)         // Brown
+#let biggamma-color = rgb(63, 81, 181)     // Indigo
 #let border-color = rgb(180, 180, 180)
 
 // Branch step
@@ -154,6 +156,8 @@
 #let distill-greedy = parse-metric("Training_logs/tidar_eta0p04_t2_logs.txt", "greedy_acc ")
 #let smallar-greedy = parse-metric("Training_logs/tidar_smallAR_big_greedy_eta_logs.txt", "greedy_acc ")
 #let biggerbeta-greedy = parse-metric("Training_logs/tidar_stable_bigger_beta_logs.txt", "greedy_acc ")
+#let topk-greedy = parse-metric("Training_logs/tidar_later_stage_topk_logs.txt", "greedy_acc ")
+#let biggamma-greedy = parse-metric("Training_logs/tidar_bigGamma_andDelta_logs.txt", "greedy_acc ")
 
 // 90k+ ranges
 #let stable-ar-90 = filter-range(stable-ar, min: cut-step)
@@ -172,6 +176,8 @@
 #let distill-greedy-90 = filter-range(distill-greedy, min: cut-step)
 #let smallar-greedy-90 = filter-range(smallar-greedy, min: cut-step)
 #let biggerbeta-greedy-90 = filter-range(biggerbeta-greedy, min: cut-step)
+#let topk-greedy-90 = filter-range(topk-greedy, min: cut-step)
+#let biggamma-greedy-90 = filter-range(biggamma-greedy, min: cut-step)
 
 #let stable-x-min = calc.min(..stable-greedy.map(d => d.at(0)))
 #let stable-x-max = calc.max(..stable-greedy.map(d => d.at(0)))
@@ -203,7 +209,7 @@
 #let greedy-y-max = greedy-max + greedy-pad
 
 // Greedy y-range (extended with smallAR big greedy eta + stable bigger beta, 90k+ zoom)
-#let greedy-all-ext-90 = stable-greedy-90 + kl-only-greedy-90 + kl-keep-greedy-90 + distill-greedy-90 + smallar-greedy-90 + biggerbeta-greedy-90
+#let greedy-all-ext-90 = stable-greedy-90 + kl-only-greedy-90 + kl-keep-greedy-90 + distill-greedy-90 + smallar-greedy-90 + biggerbeta-greedy-90 + topk-greedy-90 + biggamma-greedy-90
 #let greedy-ext-min = calc.min(..greedy-all-ext-90.map(d => d.at(1)))
 #let greedy-ext-max = calc.max(..greedy-all-ext-90.map(d => d.at(1)))
 #let greedy-ext-pad = (greedy-ext-max - greedy-ext-min) * 0.01
@@ -215,6 +221,8 @@
 #let delta-greedy-distill = delta-series(stable-greedy-90, distill-greedy-90)
 #let delta-greedy-smallar = delta-series(stable-greedy-90, smallar-greedy-90)
 #let delta-greedy-biggerbeta = delta-series(stable-greedy-90, biggerbeta-greedy-90)
+#let delta-greedy-topk = delta-series(stable-greedy-90, topk-greedy-90)
+#let delta-greedy-biggamma = delta-series(stable-greedy-90, biggamma-greedy-90)
 #let delta-greedy-all = delta-greedy-kl-only + delta-greedy-kl-keep + delta-greedy-distill
 #let delta-greedy-min = calc.min(..delta-greedy-all.map(d => d.at(1)))
 #let delta-greedy-max = calc.max(..delta-greedy-all.map(d => d.at(1)))
@@ -222,7 +230,7 @@
 #let delta-greedy-y-min = delta-greedy-min - delta-greedy-pad
 #let delta-greedy-y-max = delta-greedy-max + delta-greedy-pad
 
-#let delta-greedy-all-ext = delta-greedy-all + delta-greedy-smallar + delta-greedy-biggerbeta
+#let delta-greedy-all-ext = delta-greedy-all + delta-greedy-smallar + delta-greedy-biggerbeta + delta-greedy-topk + delta-greedy-biggamma
 #let delta-greedy-ext-min = calc.min(..delta-greedy-all-ext.map(d => d.at(1)))
 #let delta-greedy-ext-max = calc.max(..delta-greedy-all-ext.map(d => d.at(1)))
 #let delta-greedy-ext-pad = (delta-greedy-ext-max - delta-greedy-ext-min) * 0.01
@@ -243,12 +251,14 @@ All runs branch from the stable run at step 90,000:
 - *Distill (purple)*: `alpha=1, beta=1, eta=0.04, T=2` -- soft distillation AR->Diff
 - *Greedy Eta (orange)*: `alpha,beta=0.1, delta=3.0, eta=1.0, T=0.7` -- aggressive agreement + distill
 - *Stable bigger beta (teal)*: `alpha=1, beta=5` -- baseline with 5x diffusion weight
+- *Top-K set (brown)*: `gamma=0.01, gamma_topk=8` -- top-k set distillation (later-stage)
+- *Big Gamma+Delta (indigo)*: `gamma=5, gamma_topk=4, delta=1` -- strong top-k + hard agreement
 
 == Legend
 
 #box(width: 100%, inset: 8pt, stroke: 0.6pt + rgb(200, 200, 200), radius: 4pt)[
   #grid(
-    columns: (1fr, 1fr, 1fr),
+    columns: (1fr, 1fr, 1fr, 1fr),
     gutter: 12pt,
     [
       #legend-item("Stable (1, 1, 0, 0, 0, 0)", stable-color)
@@ -265,10 +275,15 @@ All runs branch from the stable run at step 90,000:
       #v(4pt)
       #legend-item("Stable bigger beta (1, 5, 0, 0, 0, 0)", biggerbeta-color)
     ],
+    [
+      #legend-item("Top-K set (gamma=0.01 K=8)", topk-color)
+      #v(4pt)
+      #legend-item("Big Gamma+Delta (gamma=5 K=4 delta=1)", biggamma-color)
+    ],
   )
 ]
 
-=== Total cost of the experiment so far: 22.40\$
+=== Total cost of the experiment so far: 28.40\$
 
 == AR loss (raw)
 
@@ -395,7 +410,7 @@ All runs branch from the stable run at step 90,000:
 
 #v(8pt)
 
-#text(size: 9pt, weight: "bold")[All runs 90k-121k (incl. smallAR big greedy eta + stable bigger beta)]
+#text(size: 9pt, weight: "bold")[All runs 90k-121k (incl. smallAR big greedy eta + stable bigger beta + top-k set + big gamma+delta)]
 #multi-line-chart(
   (
     (color: stable-color, data: stable-greedy-90),
@@ -404,6 +419,8 @@ All runs branch from the stable run at step 90,000:
     (color: distill-color, data: distill-greedy-90),
     (color: smallar-color, data: smallar-greedy-90),
     (color: biggerbeta-color, data: biggerbeta-greedy-90),
+    (color: topk-color, data: topk-greedy-90),
+    (color: biggamma-color, data: biggamma-greedy-90),
   ),
   width: 170mm,
   height: 45mm,
@@ -416,7 +433,7 @@ All runs branch from the stable run at step 90,000:
 
 #v(4pt)
 
-#text(size: 9pt, weight: "bold")[Delta vs stable (90k-121k) (incl. smallAR big greedy eta + stable bigger beta)]
+#text(size: 9pt, weight: "bold")[Delta vs stable (90k-121k) (incl. smallAR big greedy eta + stable bigger beta + top-k set + big gamma+delta)]
 #multi-line-chart(
   (
     (color: kl-only-color, data: delta-greedy-kl-only),
@@ -424,6 +441,8 @@ All runs branch from the stable run at step 90,000:
     (color: distill-color, data: delta-greedy-distill),
     (color: smallar-color, data: delta-greedy-smallar),
     (color: biggerbeta-color, data: delta-greedy-biggerbeta),
+    (color: topk-color, data: delta-greedy-topk),
+    (color: biggamma-color, data: delta-greedy-biggamma),
   ),
   width: 170mm,
   height: 60mm,

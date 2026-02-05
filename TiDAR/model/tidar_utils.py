@@ -4,7 +4,7 @@ from typing import Dict, Optional
 
 import jax.numpy as jnp
 
-from TiDAR.model.tidar_masks import build_tidar_train_bias
+from TiDAR.model.tidar_masks import build_tidar_train_bias_template
 
 IGNORE_INDEX = -100
 
@@ -54,16 +54,21 @@ def build_train_batch(
         loss_mask_ntp = loss_mask_ntp.at[:, : seq_len - 1].set(valid[:, 1:])
     loss_mask_diff = loss_mask_diff.at[:, seq_len:].set(valid)
 
-    token_types = jnp.concatenate(
-        [jnp.zeros(seq_len, dtype=jnp.int32), jnp.ones(seq_len, dtype=jnp.int32)]
-    )
     key_padding_mask = jnp.concatenate([valid, valid], axis=1) > 0
-    attn_bias = build_tidar_train_bias(
-        position_ids,
-        token_types,
+    base_bias = build_tidar_train_bias_template(
+        seq_len,
         block_len=block_len,
-        key_padding_mask=key_padding_mask,
         bias_value=bias_value,
+    )
+    if key_padding_mask.ndim == 1:
+        key_padding_mask = jnp.broadcast_to(
+            key_padding_mask[None, :],
+            (batch_size, key_padding_mask.shape[0]),
+        )
+    attn_bias = jnp.where(
+        key_padding_mask[:, None, None, :],
+        base_bias,
+        bias_value,
     )
 
     return {

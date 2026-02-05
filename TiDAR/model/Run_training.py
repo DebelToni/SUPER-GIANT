@@ -679,7 +679,11 @@ def main() -> None:
         last_loss = None
         non_finite_steps = 0
 
-        batch_iter = _prefetch_to_device(runtime.loader, size=2 if IS_GPU else 0)
+        prefetch_size = getattr(cfg.training, "prefetch_size", None)
+        if prefetch_size is None:
+            prefetch_size = 2 if IS_GPU else 0
+        prefetch_size = max(0, int(prefetch_size))
+        batch_iter = _prefetch_to_device(runtime.loader, size=prefetch_size)
         while completed_in_stage < stage_steps_target:
             batch_list = []
             for _ in range(chunk_size):

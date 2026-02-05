@@ -95,6 +95,7 @@ class TrainingConfig:
     mini_checkpoint_every: int = 100
     mini_max_to_keep: int = 2
     scan_chunk: int = 1
+    prefetch_size: Optional[int] = None
     loss: LossConfig = field(default_factory=LossConfig)
 
 

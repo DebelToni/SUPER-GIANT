@@ -2,11 +2,13 @@
 #set text(size: 11pt)
 #set heading(numbering: none)
 
-// Colors for the 4 runs
+// Colors for the runs
 #let stable-color = rgb(33, 150, 243)      // Blue
 #let kl-only-color = rgb(244, 67, 54)      // Red
 #let kl-keep-color = rgb(76, 175, 80)      // Green
 #let distill-color = rgb(156, 39, 176)     // Purple
+#let smallar-color = rgb(255, 152, 0)      // Orange
+#let biggerbeta-color = rgb(0, 150, 136)   // Teal
 #let border-color = rgb(180, 180, 180)
 
 // Branch step
@@ -150,6 +152,8 @@
 #let kl-only-greedy = parse-metric("Training_logs/tidar_0p2_0_0p5_0_0p3_logs.txt", "greedy_acc ")
 #let kl-keep-greedy = parse-metric("Training_logs/tidar_1_1_0p1_0_0p3_logs.txt", "greedy_acc ")
 #let distill-greedy = parse-metric("Training_logs/tidar_eta0p04_t2_logs.txt", "greedy_acc ")
+#let smallar-greedy = parse-metric("Training_logs/tidar_smallAR_big_greedy_eta_logs.txt", "greedy_acc ")
+#let biggerbeta-greedy = parse-metric("Training_logs/tidar_stable_bigger_beta_logs.txt", "greedy_acc ")
 
 // 90k+ ranges
 #let stable-ar-90 = filter-range(stable-ar, min: cut-step)
@@ -166,6 +170,8 @@
 #let kl-only-greedy-90 = filter-range(kl-only-greedy, min: cut-step)
 #let kl-keep-greedy-90 = filter-range(kl-keep-greedy, min: cut-step)
 #let distill-greedy-90 = filter-range(distill-greedy, min: cut-step)
+#let smallar-greedy-90 = filter-range(smallar-greedy, min: cut-step)
+#let biggerbeta-greedy-90 = filter-range(biggerbeta-greedy, min: cut-step)
 
 #let stable-x-min = calc.min(..stable-greedy.map(d => d.at(0)))
 #let stable-x-max = calc.max(..stable-greedy.map(d => d.at(0)))
@@ -196,9 +202,19 @@
 #let greedy-y-min = greedy-min - greedy-pad
 #let greedy-y-max = greedy-max + greedy-pad
 
+// Greedy y-range (extended with smallAR big greedy eta + stable bigger beta, 90k+ zoom)
+#let greedy-all-ext-90 = stable-greedy-90 + kl-only-greedy-90 + kl-keep-greedy-90 + distill-greedy-90 + smallar-greedy-90 + biggerbeta-greedy-90
+#let greedy-ext-min = calc.min(..greedy-all-ext-90.map(d => d.at(1)))
+#let greedy-ext-max = calc.max(..greedy-all-ext-90.map(d => d.at(1)))
+#let greedy-ext-pad = (greedy-ext-max - greedy-ext-min) * 0.01
+#let greedy-ext-y-min = greedy-ext-min - greedy-ext-pad
+#let greedy-ext-y-max = greedy-ext-max + greedy-ext-pad
+
 #let delta-greedy-kl-only = delta-series(stable-greedy-90, kl-only-greedy-90)
 #let delta-greedy-kl-keep = delta-series(stable-greedy-90, kl-keep-greedy-90)
 #let delta-greedy-distill = delta-series(stable-greedy-90, distill-greedy-90)
+#let delta-greedy-smallar = delta-series(stable-greedy-90, smallar-greedy-90)
+#let delta-greedy-biggerbeta = delta-series(stable-greedy-90, biggerbeta-greedy-90)
 #let delta-greedy-all = delta-greedy-kl-only + delta-greedy-kl-keep + delta-greedy-distill
 #let delta-greedy-min = calc.min(..delta-greedy-all.map(d => d.at(1)))
 #let delta-greedy-max = calc.max(..delta-greedy-all.map(d => d.at(1)))
@@ -206,26 +222,33 @@
 #let delta-greedy-y-min = delta-greedy-min - delta-greedy-pad
 #let delta-greedy-y-max = delta-greedy-max + delta-greedy-pad
 
+#let delta-greedy-all-ext = delta-greedy-all + delta-greedy-smallar + delta-greedy-biggerbeta
+#let delta-greedy-ext-min = calc.min(..delta-greedy-all-ext.map(d => d.at(1)))
+#let delta-greedy-ext-max = calc.max(..delta-greedy-all-ext.map(d => d.at(1)))
+#let delta-greedy-ext-pad = (delta-greedy-ext-max - delta-greedy-ext-min) * 0.01
+#let delta-greedy-ext-y-min = delta-greedy-ext-min - delta-greedy-ext-pad
+#let delta-greedy-ext-y-max = delta-greedy-ext-max + delta-greedy-ext-pad
+
 // ============================================================================
 // DOCUMENT
 // ============================================================================
 
 = TinyStories TiDAR Greedy Acceptance Comparison
 
-== Run Summary
-
-All 4 runs branch from the stable run at step 90,000:
+All runs branch from the stable run at step 90,000:
 
 - *Stable (blue)*: `alpha=1, beta=1` -- baseline AR+Diff training, continued to 121k
 - *KL-only (red)*: `alpha=0.2, beta=0, rho=0.5, delta=0.3` -- forward KL + greedy, no diff loss
 - *KL-keep (green)*: `alpha=1, beta=1, rho=0.1, delta=0.3` -- forward KL + greedy, keeps AR+Diff
 - *Distill (purple)*: `alpha=1, beta=1, eta=0.04, T=2` -- soft distillation AR->Diff
+- *Greedy Eta (orange)*: `alpha,beta=0.1, delta=3.0, eta=1.0, T=0.7` -- aggressive agreement + distill
+- *Stable bigger beta (teal)*: `alpha=1, beta=5` -- baseline with 5x diffusion weight
 
 == Legend
 
 #box(width: 100%, inset: 8pt, stroke: 0.6pt + rgb(200, 200, 200), radius: 4pt)[
   #grid(
-    columns: (1fr, 1fr),
+    columns: (1fr, 1fr, 1fr),
     gutter: 12pt,
     [
       #legend-item("Stable (1, 1, 0, 0, 0, 0)", stable-color)
@@ -237,8 +260,15 @@ All 4 runs branch from the stable run at step 90,000:
       #v(4pt)
       #legend-item("Distill (1, 1, 0, 0, 0, eta=0.04 T=2)", distill-color)
     ],
+    [
+      #legend-item("Greedy eta (0.1, 0.1, 0, 0, 3.0, eta=1.0 T=0.7)", smallar-color)
+      #v(4pt)
+      #legend-item("Stable bigger beta (1, 5, 0, 0, 0, 0)", biggerbeta-color)
+    ],
   )
 ]
+
+=== Total cost of the experiment so far: 22.40\$
 
 == AR loss (raw)
 
@@ -246,7 +276,7 @@ All 4 runs branch from the stable run at step 90,000:
 #multi-line-chart(
   ((color: stable-color, data: stable-ar),),
   width: 170mm,
-  height: 45mm,
+  height: 65mm,
   y_label: "AR loss",
   cut_x: cut-step,
   cut_label: "90k",
@@ -265,7 +295,7 @@ All 4 runs branch from the stable run at step 90,000:
     (color: distill-color, data: distill-ar-90),
   ),
   width: 170mm,
-  height: 45mm,
+  height: 50mm,
   y_label: "AR loss",
   x_min: branch-x-min,
   x_max: branch-x-max,
@@ -354,12 +384,54 @@ All 4 runs branch from the stable run at step 90,000:
     (color: distill-color, data: delta-greedy-distill),
   ),
   width: 170mm,
-  height: 30mm,
+  height: 45mm,
   y_label: "Delta",
   x_min: branch-x-min,
   x_max: branch-x-max,
   y_min: delta-greedy-y-min,
   y_max: delta-greedy-y-max,
+  baseline_y: 0.0,
+)
+
+#v(8pt)
+
+#text(size: 9pt, weight: "bold")[All runs 90k-121k (incl. smallAR big greedy eta + stable bigger beta)]
+#multi-line-chart(
+  (
+    (color: stable-color, data: stable-greedy-90),
+    (color: kl-only-color, data: kl-only-greedy-90),
+    (color: kl-keep-color, data: kl-keep-greedy-90),
+    (color: distill-color, data: distill-greedy-90),
+    (color: smallar-color, data: smallar-greedy-90),
+    (color: biggerbeta-color, data: biggerbeta-greedy-90),
+  ),
+  width: 170mm,
+  height: 45mm,
+  y_label: "Greedy acc",
+  x_min: branch-x-min,
+  x_max: branch-x-max,
+  y_min: greedy-ext-y-min,
+  y_max: greedy-ext-y-max,
+)
+
+#v(4pt)
+
+#text(size: 9pt, weight: "bold")[Delta vs stable (90k-121k) (incl. smallAR big greedy eta + stable bigger beta)]
+#multi-line-chart(
+  (
+    (color: kl-only-color, data: delta-greedy-kl-only),
+    (color: kl-keep-color, data: delta-greedy-kl-keep),
+    (color: distill-color, data: delta-greedy-distill),
+    (color: smallar-color, data: delta-greedy-smallar),
+    (color: biggerbeta-color, data: delta-greedy-biggerbeta),
+  ),
+  width: 170mm,
+  height: 60mm,
+  y_label: "Delta",
+  x_min: branch-x-min,
+  x_max: branch-x-max,
+  y_min: delta-greedy-ext-y-min,
+  y_max: delta-greedy-ext-y-max,
   baseline_y: 0.0,
 )
 
@@ -392,4 +464,180 @@ Prompts (10):
   [KL-only \@121k], [2.42 / 3.27 / 1.81], [2.30 / 2.68 / 1.80], [2.08 / 2.49 / 1.61],
   [KL-keep \@121k], [2.40 / 3.27 / 1.75], [2.29 / 2.83 / 1.80], [2.18 / 2.90 / 1.75],
   [Distill \@121k], [2.31 / 3.50 / 1.53], [2.26 / 3.09 / 1.87], [2.19 / 2.74 / 1.80],
+  [SmallAR big greedy eta \@105k], [2.15 / 2.88 / 1.75], [2.15 / 2.75 / 1.90], [2.00 / 2.43 / 1.74],
+  [Stable bigger beta \@121.5k], [2.37 / 3.27 / 1.63], [2.33 / 3.09 / 1.62], [1.96 / 2.27 / 1.74],
 )
+
+#pagebreak()
+
+== Inference Logits Histogram
+
+#let meta1 = (
+  prompt: "Once upon",
+  checkpoint_name: "step_0121566.npz",
+  checkpoint_path: "/proj/giant-data/TiDAR/checkpoints/TinyStories_exp/tidar_stable/params/step_0121566.npz",
+  target_position: 30,
+  block_start: 28,
+  block_end: 33,
+  draft_len: 6,
+  temperature: 0.0,
+  top_k: 0,
+  context_text: "One day, she saw a big, scary dog.",
+  context_start: 23,
+  context_end: 33,
+)
+
+#let data1 = (
+  (title: "pos 28", labels: (" a", " an", " her", " some", " some~"), ar: (0.939, 0.032, 0.012, 0.008, 0.004), diff: (0.831, 0.021, 0.013, 0.006, 0.002), diff_top: " a", accept: true),
+  (title: "pos 29", labels: (" big", " boy", " bird", " butt~", " shiny"), ar: (0.481, 0.041, 0.039, 0.035, 0.027), diff: (0.261, 0.019, 0.018, 0.031, 0.067), diff_top: " big", accept: true),
+  (title: "pos 30", labels: (",", " tree", " slide", " dog", " red"), ar: (0.144, 0.135, 0.089, 0.066, 0.020), diff: (0.048, 0.045, 0.023, 0.021, 0.014), diff_top: ",", accept: true),
+  (title: "pos 31", labels: (" scary", " red", " green", " brown", " white"), ar: (0.084, 0.074, 0.058, 0.046, 0.046), diff: (0.002, 0.005, 0.003, 0.001, 0.000), diff_top: " on", accept: false),
+  (title: "pos 32", labels: (" the", " a", " top", " her", " an"), ar: (0.567, 0.395, 0.012, 0.009, 0.003), diff: (0.208, 0.080, 0.000, 0.087, 0.002), diff_top: " the", accept: false),
+  (title: "pos 33", labels: (" grou~", " other", " slide", " swin~", " side"), ar: (0.577, 0.138, 0.037, 0.033, 0.028), diff: (0.565, 0.186, 0.023, 0.023, 0.031), diff_top: " grou~", accept: none),
+)
+
+#let meta2 = (
+  prompt: "In the forest, a tiny fox",
+  checkpoint_name: "step_0121566.npz",
+  checkpoint_path: "/proj/giant-data/TiDAR/checkpoints/TinyStories_exp/tidar_stable/params/step_0121566.npz",
+  target_position: 27,
+  block_start: 24,
+  block_end: 29,
+  draft_len: 6,
+  temperature: 0.0,
+  top_k: 0,
+  context_text: "Suddenly, he heard a loud noise.",
+  context_start: 22,
+  context_end: 29,
+)
+
+#let data2 = (
+  (title: "pos 24", labels: (" he", " the", " a", " it", " some~"), ar: (0.868, 0.079, 0.034, 0.004, 0.003), diff: (0.829, 0.057, 0.030, 0.003, 0.004), diff_top: " he", accept: true),
+  (title: "pos 25", labels: (" heard", " saw", " noti~", " spot~", " came"), ar: (0.405, 0.351, 0.072, 0.057, 0.019), diff: (0.300, 0.235, 0.069, 0.039, 0.012), diff_top: " heard", accept: true),
+  (title: "pos 26", labels: (" a", " some~", " some~", " some", " the"), ar: (0.886, 0.048, 0.016, 0.015, 0.010), diff: (0.499, 0.085, 0.002, 0.002, 0.013), diff_top: " a", accept: true),
+  (title: "pos 27", labels: (" loud", " voice", " noise", " stra~", " sound"), ar: (0.306, 0.234, 0.209, 0.045, 0.035), diff: (0.080, 0.036, 0.040, 0.016, 0.007), diff_top: " a", accept: false),
+  (title: "pos 28", labels: (" voice", " loud", " noise", " stra~", " sound"), ar: (0.352, 0.187, 0.148, 0.045, 0.030), diff: (0.013, 0.014, 0.070, 0.003, 0.015), diff_top: ".", accept: false),
+  (title: "pos 29", labels: (" He", " It", " The", " \"", " A"), ar: (0.434, 0.297, 0.122, 0.048, 0.034), diff: (0.439, 0.319, 0.115, 0.045, 0.028), diff_top: " He", accept: none),
+)
+
+#let meta3 = (
+  prompt: "One day, the teacher said",
+  checkpoint_name: "step_0121566.npz",
+  checkpoint_path: "/proj/giant-data/TiDAR/checkpoints/TinyStories_exp/tidar_stable/params/step_0121566.npz",
+  target_position: 29,
+  block_start: 25,
+  block_end: 30,
+  draft_len: 6,
+  temperature: 0.0,
+  top_k: 0,
+  context_text: "They ran to the park and saw a big slide.",
+  context_start: 25,
+  context_end: 35,
+)
+
+#let data3 = (
+  (title: "pos 25", labels: (" They", " The", " When", " At", " As"), ar: (0.705, 0.112, 0.079, 0.018, 0.013), diff: (0.370, 0.070, 0.034, 0.015, 0.006), diff_top: " They", accept: true),
+  (title: "pos 26", labels: (" ran", " all", " put", " quic~", " had"), ar: (0.241, 0.107, 0.094, 0.094, 0.042), diff: (0.157, 0.084, 0.031, 0.058, 0.012), diff_top: " ran", accept: true),
+  (title: "pos 27", labels: (" to", " outs~", " arou~", " out", " and"), ar: (0.442, 0.185, 0.131, 0.067, 0.027), diff: (0.111, 0.022, 0.023, 0.019, 0.015), diff_top: " to", accept: true),
+  (title: "pos 28", labels: (" the", " their", " get", " grab", " a"), ar: (0.904, 0.065, 0.021, 0.001, 0.001), diff: (0.134, 0.057, 0.003, 0.000, 0.006), diff_top: " the", accept: true),
+  (title: "pos 29", labels: (" park", " play~", " gate", " bus", " swin~"), ar: (0.755, 0.126, 0.016, 0.013, 0.013), diff: (0.032, 0.009, 0.001, 0.002, 0.004), diff_top: " the", accept: false),
+  (title: "pos 30", labels: (" park", " play~", " swin~", " gate", " big"), ar: (0.575, 0.250, 0.031, 0.015, 0.011), diff: (0.702, 0.161, 0.024, 0.009, 0.009), diff_top: " park", accept: none),
+)
+
+#let ar-hist-color = rgb(244, 67, 150)
+#let diff-hist-color = rgb(33, 150, 243)
+#let hist-width = 27mm
+#let hist-height = 18mm
+#let hist-label-height = 4mm
+#let hist-gap = 0.8pt
+
+#let hist-border(accept) = if accept == true { rgb(76, 175, 80) } else { rgb(190, 190, 190) }
+
+#let hist-cell(labels, values, color, border) = {
+  let n = labels.len()
+  let inner-width = hist-width - 4pt
+  let inner-height = hist-height - 4pt
+  let plot-height = inner-height - hist-label-height - hist-gap
+  let bar-width = (inner-width - hist-gap * (n - 1)) / n
+  let plot-cells = range(0, n).map(i => {
+    let value = values.at(i)
+    let bar-height = plot-height * value
+    align(bottom)[
+      #rect(width: bar-width, height: bar-height, fill: color, radius: 1pt)
+    ]
+  })
+  let label-cells = range(0, n).map(i => {
+    let label = labels.at(i)
+    box(width: bar-width, height: hist-label-height)[
+      #align(center)[#text(size: 4.5pt)[#(label)]]
+    ]
+  })
+  box(width: hist-width, height: hist-height, stroke: 0.6pt + border, radius: 2pt, inset: 2pt)[
+    #grid(
+      columns: (..range(0, n).map(i => bar-width)),
+      rows: (plot-height, hist-label-height),
+      gutter: hist-gap,
+      align: center,
+      ..plot-cells,
+      ..label-cells,
+    )
+  ]
+}
+
+#let hist-panel(title, labels, values, color, border) = grid(
+  columns: (auto),
+  rows: (auto, auto),
+  gutter: 2pt,
+  align: center,
+  text(size: 6pt, weight: "bold")[#(title)],
+  hist-cell(labels, values, color, border),
+)
+
+#let diff-panel(labels, values, top1, border) = grid(
+  columns: (auto),
+  rows: (auto, auto),
+  gutter: 2pt,
+  align: center,
+  hist-cell(labels, values, diff-hist-color, border),
+  text(size: 5.5pt)[top1: #(top1)],
+)
+
+#let hist-columns(n) = (..range(0, n).map(_ => auto))
+
+#let render-hist(meta, data) = [
+  #text(size: 8pt)[Prompt: "#(meta.prompt)" | Checkpoint: "#(meta.checkpoint_name)"]
+  #text(size: 8pt)[Target position: #(meta.target_position) | Block: #(meta.block_start)-#(meta.block_end) | Draft len: #(meta.draft_len)]
+
+  #v(3pt)
+
+  #text(size: 8pt, weight: "bold")[AR verify logits (top-5, sorted by AR)]
+  #grid(
+    columns: hist-columns(data.len()),
+    gutter: 6pt,
+    ..data.map(d => hist-panel(d.title, d.labels, d.ar, ar-hist-color, hist-border(d.accept))),
+  )
+
+  #v(3pt)
+
+  #text(size: 8pt, weight: "bold")[Diff draft logits (same tokens, AR order)]
+  #grid(
+    columns: hist-columns(data.len()),
+    gutter: 6pt,
+    ..data.map(d => diff-panel(d.labels, d.diff, d.diff_top, hist-border(d.accept))),
+  )
+
+  #v(4pt)
+
+  #text(size: 8pt, weight: "bold")[Sentence context]
+  #text(size: 8pt)[#(meta.context_text)]
+]
+
+#render-hist(meta1, data1)
+
+#v(6pt)
+
+#render-hist(meta2, data2)
+
+#v(6pt)
+
+#render-hist(meta3, data3)

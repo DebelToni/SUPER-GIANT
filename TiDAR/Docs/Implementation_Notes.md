@@ -26,8 +26,7 @@ shapes, masking, cache semantics) rather than re‑explaining TiDAR theory.
   - Returns offsets for the per‑step tokens:
     - Verify block: `0..K-1`
     - Predraft block: group `r` has positions `[r+1 .. r+K]`
-  - Actual positions are `prefix_len - 1 + offsets` in inference (anchor is at
-    `prefix_len - 1`).
+  - Actual positions are `prefix_len + offsets` in inference.
 
 ### Attention bias templates
 
@@ -53,8 +52,9 @@ shapes, masking, cache semantics) rather than re‑explaining TiDAR theory.
 ### Rejection sampling
 
 `anchor_rejection_sample` verifies tokens at positions `1..K-1` and returns:
-- `accepted_count` = number of **new** tokens to commit (min 1, max K)
-- `committed` = K tokens to write (last token is the bonus)
+- `accepted_count` = committed prefix length from `current_draft` (min 1, max K)
+- `committed` = helper tensor for legacy commit path (current inference does not
+  use it directly)
 - `selected_proposal` = next draft block (with new anchor at `[0]`)
 
 Important behavior:
@@ -69,27 +69,26 @@ Important behavior:
 ### High‑level flow
 
 1. **Prefill + initial draft** in one forward (`prefill_prompt_with_draft`).
-2. **Sample first anchor** from `prev_logit` and **commit** it immediately.
+2. **Sample first anchor** from `prev_logit` and place it at `current_draft[0]`.
 3. **Initial draft** comes from the same forward pass (K mask tokens with
    bidirectional mask block).
 4. **Iterative loop**:
    - Build `step_tokens = [current_draft | predraft_masks]`.
-   - Compute `step_pos_ids = prefix_len - 1 + position_template`.
-   - Run forward pass with `decode_prefix_len = prefix_len - 1` to **avoid
-     double‑conditioning the anchor** (anchor is already in `step_tokens[0]`).
+   - Compute `step_pos_ids = prefix_len + position_template`.
+   - Run one decode forward that also optimistically writes current_draft KVs
+     via `cache_write_len = K`.
     - Extract `verify_logits` (first K tokens) and `predraft_logits`.
     - Predraft groups are bidirectional within-group and do not attend to each other.
    - Sample predraft tokens, run rejection sampling.
-   - Commit accepted tokens to cache and output buffer.
+   - Commit by pointer only: advance `prefix_len` by accepted prefix length.
    - Choose next draft from the selected predraft group.
 
 ### Prefix/caching semantics
 
 - `prefix_len` always counts **committed tokens**.
-- The anchor is already committed; therefore, during decode we **exclude it from
-  the prefix cache** by passing `decode_prefix_len = prefix_len - 1`.
-- Cache writes are fixed-shape (always K tokens, padded), while `prefix_len`
-  advances by the actual accepted count.
+- Current decode pass writes K optimistic KVs at the current pointer.
+- Unaccepted suffix KVs are ignored by keeping `prefix_len` at the accepted
+  boundary (pointer rollback semantics).
 
 ### Prefill mask (single pass)
 ```

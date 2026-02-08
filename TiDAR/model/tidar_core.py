@@ -1,9 +1,8 @@
 """
 Anchor-TiDAR: Core utilities for speculative decoding with guaranteed progress.
 
-Key insight: Each decode step starts with an "anchor" token that's already committed
-via AR sampling. This anchor is NEVER verified - it's always accepted. Verification
-starts from position 1.
+Key insight: Each decode step starts with an anchor token at draft position 0.
+The anchor is NEVER verified; verification starts from position 1.
 
 Layout for K draft tokens:
   Verify block:   [ANCHOR | DRAFT_1 | DRAFT_2 | ... | DRAFT_{K-1}]  (K tokens)
@@ -291,7 +290,7 @@ def sample_tokens(
 def anchor_rejection_sample(
     key: jax.Array,
     *,
-    anchor_token: jnp.ndarray,           # [] scalar - the anchor (position 0, already committed!)
+    anchor_token: jnp.ndarray,           # [] scalar - the anchor token at draft position 0
     draft_tokens: jnp.ndarray,           # [K-1] - tokens at positions 1..K-1 to verify
     verify_logits: jnp.ndarray,          # [K, V] - logits from model (shifted: logits[i] predicts position i+1)
     draft_logits: jnp.ndarray,           # [K, V] - logits used to sample draft (for rejection ratio)
@@ -302,15 +301,16 @@ def anchor_rejection_sample(
     """
     Anchor-TiDAR rejection sampling.
     
-    IMPORTANT: The anchor is assumed to be ALREADY COMMITTED. This function only
-    handles verification of positions 1..K-1 and determines what additional tokens
-    to commit.
+    This function verifies positions 1..K-1 and returns:
+    - accepted_count: accepted prefix length from current_draft (min 1, max K)
+    - committed_tokens: legacy helper tensor used by immediate-commit variants
+    - selected_proposal: next-draft block with substituted anchor at [0]
     
     Returns:
         key: Updated RNG key
-        accepted_count: int32 scalar, number of NEW tokens to commit (not including anchor!)
-                       Minimum 1 (just resampled at pos 1), maximum K (all drafts + bonus)
-        committed_tokens: [K] tokens to commit after the anchor
+        accepted_count: int32 scalar, accepted prefix length from current draft
+                       Minimum 1, maximum K
+        committed_tokens: [K] helper tensor for immediate-commit variants
         selected_proposal: [K] next draft proposal (for next iteration)
     """
     k = draft_tokens.shape[0] + 1  # Total verify block size including anchor

@@ -1,17 +1,18 @@
 """
 Anchor-TiDAR Inference Script
 
-Clean implementation of speculative decoding with guaranteed +1 progress per step.
-Each iteration starts with an "anchor" token that's already AR-sampled and committed.
+Delayed-anchor implementation with optimistic KV writes + pointer rollback.
+Each iteration starts with an anchor token, but it is committed only if accepted.
 
 Algorithm (K=draft_len):
 1. Prefill: prompt → sample first K draft tokens from mask positions
 2. Each decode step:
    a. Build input: [anchor | draft[1:K]] + [K groups of K masks] 
    b. Forward pass → verify_logits + predraft_logits
-   c. Rejection sample: verify draft[1:K] against model, accept/reject
-   d. Select proposal based on accept count, substitute new anchor
-   e. Write accepted tokens to cache, advance prefix_len
+   c. Optimistically write K draft KVs in the same forward
+   d. Rejection sample: verify draft[1:K] against model, accept/reject
+   e. Select proposal based on accept count, substitute new anchor
+   f. Advance prefix_len by accepted prefix length (rollback by pointer only)
 """
 from __future__ import annotations
 
@@ -170,8 +171,6 @@ def make_anchor_tidar_generate_fn(
         generate(params, cache_vars, out_ids, prefix_len, max_steps, prev_logit, rng_key, initial_draft_logits)
         -> (out_ids, final_prefix_len, generated_count, stats_dict)
     """
-    q_len = draft_len + draft_len * draft_len
-    
     # Pre-build templates
     decode_bias = jax.device_put(build_decode_bias_template(cache_len, draft_len, bias_value))
     position_template = jax.device_put(build_decode_position_template(draft_len))
@@ -181,37 +180,30 @@ def make_anchor_tidar_generate_fn(
     predraft_masks = jax.device_put(predraft_masks)
     
     idx_k = jax.device_put(jnp.arange(draft_len, dtype=jnp.int32))
-    idx_kp1 = jax.device_put(jnp.arange(draft_len + 1, dtype=jnp.int32))
     
     def decode_apply(params, cache_vars, step_tokens, pos_ids, prefix_len):
-        """Forward pass for decode step."""
-        logits = model.apply(
+        """
+        Forward pass for decode step with optimistic KV write for current draft.
+
+        The first K step tokens (current_draft) are written to cache at `prefix_len`.
+        They are not visible to the current attention prefix because prefix validity
+        is still masked by the same `prefix_len`. Future steps commit/rollback by
+        moving the prefix pointer only.
+        """
+        logits, mutated = model.apply(
             {"params": params, "cache": cache_vars},
             step_tokens[None, :],  # [1, q_len]
             deterministic=True,
             use_kv_cache=True,
             write_to_cache=False,
             prefix_len=prefix_len,
+            cache_write_len=draft_len,
             attn_bias=decode_bias,
-            position_ids=pos_ids[None, :],
-            kv_cache_len=cache_len,
-        )
-        return logits[0]  # [q_len, V]
-    
-    def cache_write_apply(params, cache_vars, tokens, pos_ids, cur_index):
-        """Write tokens to KV cache and return logits."""
-        logits, mutated = model.apply(
-            {"params": params, "cache": cache_vars},
-            tokens[None, :],  # [1, N]
-            deterministic=True,
-            use_kv_cache=True,
-            write_to_cache=True,
-            cur_index=cur_index,
             position_ids=pos_ids[None, :],
             kv_cache_len=cache_len,
             mutable=["cache"],
         )
-        return logits[0], mutated["cache"]  # [N, V], cache
+        return logits[0], mutated["cache"]  # [q_len, V], cache
     
     @jax.jit
     def generate(
@@ -241,30 +233,13 @@ def make_anchor_tidar_generate_fn(
         # === Step 1: Sample first anchor from prev_logit ===
         rng_key, anchor = sample_tokens(rng_key, prev_logit, temperature, top_k)
         anchor = anchor.astype(jnp.int32)  # scalar
-        
-        # === Step 2: COMMIT first anchor immediately ===
-        # Write first anchor to cache and output
-        anchor_pos = jnp.array([prefix_len], dtype=jnp.int32)
-        _, cache_vars = cache_write_apply(
-            params, cache_vars, anchor[None], anchor_pos, prefix_len
-        )
-        out_ids = out_ids.at[prefix_len].set(anchor)
-        prefix_len = prefix_len + 1
-        generated = generated + 1
-        
-        # Check if we're already done
-        done = generated >= max_steps
-        if stop_on_eos and eos_id >= 0:
-            done = done | (anchor == eos_id)
-        
-        # === Step 3: Get initial draft via K mask tokens ===
+
+        # === Step 2: Get initial draft via K mask tokens ===
         init_logits = initial_draft_logits  # [K, V]
         rng_key, init_draft = sample_tokens(rng_key, init_logits, temperature, top_k)
         init_draft = init_draft.astype(jnp.int32)  # [K]
-        
-        # Set up current_draft with anchor at position 0
-        # The "anchor" for subsequent iterations comes from next_draft[0]
-        # For now, use the last committed token (our first anchor) as position 0
+
+        # Set up current_draft with sampled anchor at position 0.
         current_draft = init_draft.at[0].set(anchor)  # [K]
         current_draft_logits = init_logits  # [K, V]
         
@@ -276,19 +251,14 @@ def make_anchor_tidar_generate_fn(
             (rng, cache, out, prefix_len, current_draft, generated, 
              current_draft_logits, done, total_accepts, n_iters, max_acc) = state
             
-            # The anchor at current_draft[0] is ALREADY committed (in previous iteration)
-            # We only need to verify and commit positions 1..K-1 and possibly a bonus
-            
             # === Build decode input ===
             # Layout: [current_draft (K)] + [predraft_masks (K*K)]
             step_tokens = jnp.concatenate([current_draft, predraft_masks])  # [K + K*K]
-            step_pos_ids = (prefix_len - 1 + position_template).astype(jnp.int32)
-            # Note: prefix_len - 1 because current_draft[0] (anchor) is at position prefix_len - 1
+            step_pos_ids = (prefix_len + position_template).astype(jnp.int32)
             
-            # === Forward pass ===
-            # Anchor was already committed; exclude it from the prefix cache used in attention.
-            decode_prefix_len = prefix_len - 1
-            logits = decode_apply(params, cache, step_tokens, step_pos_ids, decode_prefix_len)
+            # === Forward pass + optimistic KV write ===
+            # Optimistically writes current_draft KVs at [prefix_len, ..., prefix_len+K-1].
+            logits, cache = decode_apply(params, cache, step_tokens, step_pos_ids, prefix_len)
             
             # Extract verify logits: positions 0..K-1 predict tokens at 1..K
             verify_logits = logits[:draft_len]  # [K, V]
@@ -306,10 +276,10 @@ def make_anchor_tidar_generate_fn(
             predraft_tokens = predraft_flat_tokens.reshape(draft_len, draft_len).astype(jnp.int32)
             
             # === Rejection sampling ===
-            anchor_tok = current_draft[0]  # Already committed!
+            anchor_tok = current_draft[0]
             draft_toks = current_draft[1:]  # [K-1] tokens to verify
             
-            rng, accept_count, committed, next_draft = anchor_rejection_sample(
+            rng, accept_count, _, next_draft = anchor_rejection_sample(
                 rng,
                 anchor_token=anchor_tok,
                 draft_tokens=draft_toks,
@@ -319,19 +289,18 @@ def make_anchor_tidar_generate_fn(
                 temperature=temperature,
                 top_k=top_k,
             )
-            # accept_count: number of NEW tokens to commit (not including anchor!)
-            #               Minimum 1 (just resampled), maximum K (all drafts + bonus)
-            # committed: [K] tokens to commit after the anchor
+            # accept_count: committed prefix length from current_draft.
+            #               Minimum 1 (anchor), maximum K (full draft accepted)
             # next_draft: [K] next iteration's draft (with new anchor at [0])
             
             # === Clamp accept_count to remaining budget ===
             remaining = (max_steps - generated).astype(jnp.int32)
             eff_accept = jnp.minimum(accept_count, remaining)
             
-            # === Check for EOS in committed tokens ===
+            # === Check for EOS in accepted prefix of current_draft ===
             has_eos = jnp.array(False)
             if stop_on_eos and eos_id >= 0:
-                eos_mask = (committed == eos_id) & (idx_k < eff_accept)
+                eos_mask = (current_draft == eos_id) & (idx_k < eff_accept)
                 first_eos = jnp.where(
                     jnp.any(eos_mask),
                     jnp.argmax(eos_mask.astype(jnp.int32)),
@@ -340,21 +309,14 @@ def make_anchor_tidar_generate_fn(
                 has_eos = first_eos < eff_accept
                 eff_accept = jnp.where(has_eos, first_eos + 1, eff_accept)
             
-            # === Write committed tokens to cache ===
-            # Pad committed to fixed size K for static shape
+            # === Commit by pointer only ===
+            # Cache already contains optimistic KVs for current_draft at prefix_len.
+            # We commit only the accepted prefix by advancing prefix_len.
             commit_padded = jnp.where(
                 idx_k < eff_accept,
-                committed,
+                current_draft,
                 pad_token_id
             ).astype(jnp.int32)
-            
-            # Write at positions starting at prefix_len (after the anchor)
-            commit_pos_ids = (prefix_len + idx_k).astype(jnp.int32)
-            
-            # Write K tokens (only first eff_accept are meaningful)
-            write_logits, cache = cache_write_apply(
-                params, cache, commit_padded, commit_pos_ids, prefix_len
-            )
             
             # === Update output buffer ===
             out = jax.lax.dynamic_update_slice(out, commit_padded[:draft_len], (prefix_len,))
@@ -367,9 +329,10 @@ def make_anchor_tidar_generate_fn(
             # Update draft logits for next iteration
             # Compute proposal_idx same way as in anchor_rejection_sample
             k_minus_1 = draft_len - 1
-            n_verified = accept_count - 1  # Number of tokens committed (= n_accepted + 1)
             stopped = accept_count < draft_len  # True if rejection occurred
-            proposal_idx = jnp.where(stopped, n_verified - 1, k_minus_1)
+            # Same mapping as anchor_rejection_sample: proposal_idx = n_accepted.
+            # Since accept_count = n_accepted + 1 on rejection, idx = accept_count - 1.
+            proposal_idx = jnp.where(stopped, accept_count - 1, k_minus_1)
             proposal_idx = jnp.clip(proposal_idx, 0, k_minus_1)
             
             next_draft_logits = predraft_logits[proposal_idx]  # [K, V]

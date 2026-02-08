@@ -21,3 +21,4 @@ agents.md
 *.safetensors
 *.egg-info/
 A-Logs.md
+TiDAR/Docs/Benchmark_logs/

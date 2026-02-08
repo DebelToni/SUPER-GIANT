@@ -39,9 +39,46 @@ Inference (paper-style):
 ## 1) Repo additions (Anchor + agreement loss)
 
 ### 1.1 Anchor-TiDAR inference change (implemented)
-- Sample an anchor token from the previous AR logit and commit it immediately.
+- Sample an anchor token from the previous AR logit and place it at `draft[0]`.
 - Verify only positions 1..K-1; the anchor is never verified.
+- Optimistically write K draft KVs during the decode forward and commit via
+  prefix-pointer advance/rollback (no separate full commit pass).
 - Guarantees at least +1 token progress per step.
+
+#### How Anchor TiDAR does a forward pass:
+  
+```
+Example of how my TiDAR variant would work in decode
+
+Prefill Input -> Output after sample
+ABC MMM  -> BCD* DEF
+Current KV cache: A B C
+
+Decode step 1 input:
+D*EF MMM MMM MMM
+
+Decode step 1 output after sampling:
+E*F'G' EFG FGH GHI
+Current KV cache: A B C D* E F
+
+Now we check if E* is E from the draft on the input (assume success). Then we check F' to F of the input (assume success). That means we accept the last proposal GHI.
+
+Decode step 2 input:
+(note here we will take G' that we sampled form F on last step and replace it in the GHI block)
+G'HI MMM MMM MMM
+
+Decode step 2 output after sampling:
+H*I'J' HIJ IJK JKL
+Current KV cache: A B C D* E F G' H I
+
+Now we check that I' matches the output from I in the input but for example I'!=I at the input. So we select proposal 2 which is IJK
+
+! Here we did not accept the full draft so we need ot move the pointer that says up to where we have KV cache. Right now it says we have 9 KV caches written but because we did not accept I!=I' we need to bring back the pointer 1 step back. So its current value will be 8 and the cache would contain A B C D* E F G' H
+
+Decode step 3 input:
+(Here we take I' from the sampled from last step instead of the I that is in the IJK block).
+I*JK
+```
 
 ### 1.2 Seven-term loss with configurable agreement + distillation (implemented)
 Goal: flexible control over AR/Diff training balance and acceptance rate optimization.
@@ -141,12 +178,13 @@ attention regimes in a single forward pass:
 
 At inference time, each decode iteration runs one forward pass that:
 
-- verifies the current draft (AR style), skipping the already committed anchor,
+- verifies the current draft (AR style), skipping anchor verification,
+- optimistically writes K draft KVs,
 - produces K predraft candidates for the next iteration.
 
-Anchor-TiDAR differs from the paper baseline by guaranteeing a committed
-anchor every step (sampled from the previous AR logit). This removes the
-worst-case no-progress scenario without extra passes.
+Anchor-TiDAR differs from the paper baseline by guaranteeing at least +1 token
+progress every step (under normal budget), while avoiding a separate K-token
+commit forward by using pointer-based cache commit/rollback.
 
 ---
 
@@ -254,8 +292,8 @@ Files: `TiDAR/model/inference.py`, `TiDAR/model/tidar_core.py`
 
 ### 6.1 Prefill + first anchor
 1) Prefill prompt and initial draft in one forward (`prefill_prompt_with_draft`).
-2) Sample first anchor from `prev_logit` (AR distribution) and commit it
-   immediately.
+2) Sample first anchor from `prev_logit` (AR distribution) and place it at
+   `current_draft[0]` for the first decode step.
 3) Initial draft comes from the same forward pass (K mask tokens with
    bidirectional mask block). The anchor is inserted at position 0 of the draft.
 
@@ -285,7 +323,7 @@ Anchor sampling note:
 K = draft_len, q_len = K + K*K.
 
 - `step_tokens = [current_draft (K)] + [predraft_masks (K*K)]`.
-- `position_ids = prefix_len - 1 + decode_position_template`.
+- `position_ids = prefix_len + decode_position_template`.
   - Position template in `build_decode_position_template`:
     - Verify block: 0..K-1
     - Predraft group r: positions [r+1 .. r+K]
@@ -365,21 +403,24 @@ bidiretionally:
 ### 6.4 Rejection sampling (anchor aware)
 Function: `anchor_rejection_sample` in `TiDAR/model/tidar_core.py`
 
-- The anchor (draft[0]) is already committed and never verified.
+- The anchor (draft[0]) is not pre-committed and is never verified.
 - Draft positions 1..K-1 are verified using standard speculative acceptance:
   - greedy: accept iff `draft == argmax(verify_logits)`
   - sampling: accept with `min(1, p/q)` ratio
 - On the first rejection, the resampled token becomes the new anchor.
 - A bonus token is sampled from `verify_logits[K-1]`.
-- `accepted_count` counts new tokens committed after the anchor, min 1 max K.
+- `accepted_count` counts committed prefix length from current_draft, min 1 max K.
 - Next draft is selected from the predraft group corresponding to the accept
   count, and its slot [0] is overwritten with the new anchor.
 
 ### 6.5 Cache writes
-Committed tokens are written into KV cache with fixed-shape padding:
+Decode uses optimistic cache writes plus pointer commit:
 
-- `cache_write_len = K` (always write K tokens; unused slots padded)
-- `prefix_len` advances by the actual accepted count.
+- In the decode forward (`write_to_cache=False`), `cache_write_len = K` writes
+  current_draft KVs at `[prefix_len .. prefix_len+K-1]`.
+- `prefix_len` advances only by the accepted prefix length.
+- Rejections are handled by pointer rollback (unaccepted optimistic KVs remain
+  physically present but are masked out by prefix validity).
 
 ---
 

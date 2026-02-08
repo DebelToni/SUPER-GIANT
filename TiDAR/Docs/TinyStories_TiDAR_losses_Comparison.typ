@@ -283,7 +283,7 @@ All runs branch from the stable run at step 90,000:
   )
 ]
 
-=== Total cost of the experiment so far: 28.40\$
+=== Total cost of the experiment so far: 30.25\$
 
 == AR loss (raw)
 

@@ -149,6 +149,91 @@ def build_decode_bias_template(cache_len: int, draft_len: int, bias_value: float
 
 
 @lru_cache(maxsize=32)
+def build_decode_bias_template_step_prefix(cache_len: int, draft_len: int, bias_value: float = -1e10) -> jnp.ndarray:
+    """
+    Build decode attention bias with STEP keys first and PREFIX keys last.
+
+    Query layout: [VERIFY(K) | PREDRAFT(K*K)]
+    Key layout:   [STEP_TOKENS(K + K*K) | PREFIX_CACHE(cache_len)]
+
+    This key ordering makes valid keys contiguous as [STEP | PREFIX[:prefix_len]],
+    enabling key_value_seq_lengths masking in a single attention call.
+    """
+    q_len = draft_len + draft_len * draft_len
+    key_len = q_len + cache_len
+
+    q_idx = jnp.arange(q_len)[:, None]
+    k_idx = jnp.arange(key_len)[None, :]
+
+    is_verify_q = q_idx < draft_len
+    is_predraft_q = q_idx >= draft_len
+
+    is_step_k = k_idx < q_len
+    step_k_idx = k_idx
+    is_prefix_k = k_idx >= q_len
+
+    is_verify_k = is_step_k & (step_k_idx < draft_len)
+    is_predraft_k = is_step_k & (step_k_idx >= draft_len)
+
+    allow_verify_prefix = is_verify_q & is_prefix_k
+    allow_verify_verify = is_verify_q & is_verify_k & (step_k_idx <= q_idx)
+
+    predraft_q_offset = q_idx - draft_len
+    predraft_q_group = predraft_q_offset // draft_len
+    predraft_k_offset = step_k_idx - draft_len
+    predraft_k_group = predraft_k_offset // draft_len
+
+    allow_predraft_prefix = is_predraft_q & is_prefix_k
+    allow_predraft_verify = is_predraft_q & is_verify_k & (step_k_idx <= predraft_q_group)
+    allow_predraft_predraft = is_predraft_q & is_predraft_k & (predraft_q_group == predraft_k_group)
+
+    allow = (
+        allow_verify_prefix
+        | allow_verify_verify
+        | allow_predraft_prefix
+        | allow_predraft_verify
+        | allow_predraft_predraft
+    )
+
+    bias = jnp.where(allow, 0.0, bias_value)
+    return bias[None, None, :, :].astype(jnp.float32)
+
+
+@lru_cache(maxsize=32)
+def build_decode_step_bias_template(draft_len: int, bias_value: float = -1e10) -> jnp.ndarray:
+    """
+    Build step-only attention bias for Anchor-TiDAR decode.
+
+    Query/key layout is step tokens only: [VERIFY(K) | PREDRAFT(K*K)].
+    Returns shape [1, 1, q_len, q_len].
+    """
+    q_len = draft_len + draft_len * draft_len
+
+    q_idx = jnp.arange(q_len)[:, None]
+    k_idx = jnp.arange(q_len)[None, :]
+
+    is_verify_q = q_idx < draft_len
+    is_predraft_q = q_idx >= draft_len
+    is_verify_k = k_idx < draft_len
+    is_predraft_k = k_idx >= draft_len
+
+    allow_verify_verify = is_verify_q & is_verify_k & (k_idx <= q_idx)
+
+    predraft_q_offset = q_idx - draft_len
+    predraft_q_group = predraft_q_offset // draft_len
+
+    allow_predraft_verify = is_predraft_q & is_verify_k & (k_idx <= predraft_q_group)
+
+    predraft_k_offset = k_idx - draft_len
+    predraft_k_group = predraft_k_offset // draft_len
+    allow_predraft_predraft = is_predraft_q & is_predraft_k & (predraft_q_group == predraft_k_group)
+
+    allow = allow_verify_verify | allow_predraft_verify | allow_predraft_predraft
+    bias = jnp.where(allow, 0.0, bias_value)
+    return bias[None, None, :, :].astype(jnp.float32)
+
+
+@lru_cache(maxsize=32)
 def build_prefill_draft_bias_template(cache_len: int, draft_len: int) -> jnp.ndarray:
     """
     Build attention bias for initial draft prefill.
@@ -203,6 +288,36 @@ def build_prefill_prompt_draft_bias_template(
     allow = allow_prompt_prompt | allow_mask_prompt | allow_mask_mask
     allow = allow & (~is_prefix_k)
 
+    bias = jnp.where(allow, 0.0, bias_value)
+    return bias[None, None, :, :].astype(jnp.float32)
+
+
+@lru_cache(maxsize=64)
+def build_prefill_prompt_draft_step_bias_template(
+    prompt_len: int,
+    draft_len: int,
+    bias_value: float = -1e10,
+) -> jnp.ndarray:
+    """
+    Build step-only attention bias for a single-pass prefill + initial draft.
+
+    Layout: [prompt | mask*draft_len] as both queries and keys.
+    Shape: [1, 1, prompt_len + draft_len, prompt_len + draft_len].
+    """
+    q_len = int(prompt_len) + int(draft_len)
+    q_idx = jnp.arange(q_len)[:, None]
+    k_idx = jnp.arange(q_len)[None, :]
+
+    is_prompt_q = q_idx < prompt_len
+    is_mask_q = q_idx >= prompt_len
+    is_prompt_k = k_idx < prompt_len
+    is_mask_k = k_idx >= prompt_len
+
+    allow_prompt_prompt = is_prompt_q & is_prompt_k & (k_idx <= q_idx)
+    allow_mask_prompt = is_mask_q & is_prompt_k
+    allow_mask_mask = is_mask_q & is_mask_k
+
+    allow = allow_prompt_prompt | allow_mask_prompt | allow_mask_mask
     bias = jnp.where(allow, 0.0, bias_value)
     return bias[None, None, :, :].astype(jnp.float32)
 
@@ -537,8 +652,7 @@ def prefill_prompt_with_draft(
     position_ids = jnp.arange(step_len, dtype=jnp.int32)[None, :]
     position_ids = jnp.broadcast_to(position_ids, (batch_size, step_len))
 
-    attn_bias = build_prefill_prompt_draft_bias_template(
-        kv_cache_len,
+    attn_bias = build_prefill_prompt_draft_step_bias_template(
         prompt_len,
         draft_len,
         bias_value=bias_value,

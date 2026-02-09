@@ -214,24 +214,101 @@ class NativeJaxSelfAttention(nn.Module):
 
                 k_step = k if kv_indices is None else jnp.take(k, kv_indices, axis=2)
                 v_step = v if kv_indices is None else jnp.take(v, kv_indices, axis=2)
-                k_full = jnp.concatenate([k_prefix, k_step], axis=1)
-                v_full = jnp.concatenate([v_prefix, v_step], axis=1)
                 prefix_len_safe = jnp.minimum(jnp.asarray(prefix_len, dtype=jnp.int32), prefix_capacity)
                 prefix_valid = jnp.arange(prefix_capacity) < prefix_len_safe
-                prefix_bias = jnp.where(prefix_valid, 0.0, -1e10).astype(self.dtype)
-                prefix_bias = prefix_bias[None, None, None, :]
-                step_bias = jnp.zeros((1, 1, 1, l), dtype=self.dtype)
-                key_valid_bias = jnp.concatenate([prefix_bias, step_bias], axis=-1)
-                full_bias = attn_bias.astype(self.dtype) + key_valid_bias
-                y = jax.nn.dot_product_attention(
-                    q,
-                    k_full,
-                    v_full,
-                    bias=full_bias,
-                    is_causal=False,
-                    implementation=impl,
-                )
-                y = y.reshape(b, l, self.qkv_features)
+                prefix_bias_row = jnp.where(prefix_valid, 0.0, -1e10).astype(self.dtype)
+                prefix_bias_row = prefix_bias_row[None, None, None, :]
+                is_full_width_bias = (attn_bias.ndim == 4) and (attn_bias.shape[-2] == l) and (attn_bias.shape[-1] == (prefix_capacity + l))
+                is_step_only_bias = (attn_bias.ndim == 4) and (attn_bias.shape[-2] == l) and (attn_bias.shape[-1] == l)
+
+                if is_full_width_bias:
+                    # Detect key layout from bias pattern:
+                    # - step-prefix layout has blocked entries inside the first l key columns.
+                    # - prefix-step layout keeps the first cache columns fully allowed.
+                    is_step_prefix_layout = jnp.any(attn_bias[:, :, :, :l] < 0.0)
+
+                    def _step_prefix_attn(_):
+                        # Layout: [STEP | PREFIX]. Valid keys are contiguous:
+                        # q_len + prefix_len.
+                        k_full = jnp.concatenate([k_step, k_prefix], axis=1)
+                        v_full = jnp.concatenate([v_step, v_prefix], axis=1)
+                        kv_len = jnp.minimum(
+                            prefix_len_safe + jnp.asarray(l, dtype=jnp.int32),
+                            jnp.asarray(k_full.shape[1], dtype=jnp.int32),
+                        )
+                        key_value_seq_lengths = jnp.full((b,), kv_len, dtype=jnp.int32)
+                        return jax.nn.dot_product_attention(
+                            q,
+                            k_full,
+                            v_full,
+                            bias=attn_bias.astype(self.dtype),
+                            is_causal=False,
+                            key_value_seq_lengths=key_value_seq_lengths,
+                            implementation=impl,
+                        )
+
+                    def _prefix_step_attn(_):
+                        # Legacy layout: [PREFIX | STEP]. Needs explicit prefix-valid bias.
+                        k_full = jnp.concatenate([k_prefix, k_step], axis=1)
+                        v_full = jnp.concatenate([v_prefix, v_step], axis=1)
+                        step_bias = jnp.zeros((1, 1, 1, l), dtype=self.dtype)
+                        key_valid_bias = jnp.concatenate([prefix_bias_row, step_bias], axis=-1)
+                        full_bias = attn_bias.astype(self.dtype) + key_valid_bias
+                        return jax.nn.dot_product_attention(
+                            q,
+                            k_full,
+                            v_full,
+                            bias=full_bias,
+                            is_causal=False,
+                            implementation=impl,
+                        )
+
+                    y = jax.lax.cond(is_step_prefix_layout, _step_prefix_attn, _prefix_step_attn, operand=None)
+                    y = y.reshape(b, l, self.qkv_features)
+                elif is_step_only_bias:
+                    # Step-only bias path: compute prefix and step attentions separately,
+                    # then merge exactly via logsumexp residuals.
+                    has_prefix = prefix_len_safe > 0
+                    prefix_bias = jnp.broadcast_to(prefix_bias_row, (1, 1, l, prefix_capacity))
+
+                    def _prefix_attn(_):
+                        return jax.nn.dot_product_attention(
+                            q,
+                            k_prefix,
+                            v_prefix,
+                            bias=prefix_bias,
+                            is_causal=False,
+                            implementation=impl,
+                            return_residual=True,
+                        )
+
+                    def _prefix_empty(_):
+                        y0 = jnp.zeros_like(q)
+                        lse0 = jnp.full(q.shape[:-1], -jnp.inf, dtype=q.dtype)
+                        return y0, lse0
+
+                    y_prefix, lse_prefix = jax.lax.cond(has_prefix, _prefix_attn, _prefix_empty, operand=None)
+                    y_step, lse_step = jax.nn.dot_product_attention(
+                        q,
+                        k_step,
+                        v_step,
+                        bias=attn_bias.astype(self.dtype),
+                        is_causal=False,
+                        implementation=impl,
+                        return_residual=True,
+                    )
+
+                    lse_prefix = lse_prefix.astype(jnp.float32)
+                    lse_step = lse_step.astype(jnp.float32)
+                    lse = jnp.logaddexp(lse_prefix, lse_step)
+                    finite_lse = jnp.isfinite(lse)
+
+                    w_prefix = jnp.where(finite_lse, jnp.exp(lse_prefix - lse), 0.0).astype(self.dtype)
+                    w_step = jnp.where(finite_lse, jnp.exp(lse_step - lse), 0.0).astype(self.dtype)
+                    y = (w_prefix[..., None] * y_prefix) + (w_step[..., None] * y_step)
+                    y = y.reshape(b, l, self.qkv_features)
+                else:
+                    raise ValueError(f"Unexpected attn_bias shape for decode path: {attn_bias.shape}")
         else:
             k_full = k if kv_indices is None else jnp.take(k, kv_indices, axis=2)
             v_full = v if kv_indices is None else jnp.take(v, kv_indices, axis=2)

@@ -32,7 +32,7 @@ from TiDAR.model.inference import (
 )
 from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embedding_params
 from TiDAR.model.tidar_core import (
-    build_decode_bias_template,
+    build_decode_bias_template_step_prefix,
     build_decode_position_template,
     init_kv_cache,
     prefill_prompt_with_draft,
@@ -99,7 +99,7 @@ def make_generate_fn(
     bias_value: float,
 ):
     """Build JIT decode function that uses an externally supplied acceptance fn."""
-    decode_bias = jax.device_put(build_decode_bias_template(cache_len, draft_len, bias_value))
+    decode_bias = jax.device_put(build_decode_bias_template_step_prefix(cache_len, draft_len, bias_value))
     position_template = jax.device_put(build_decode_position_template(draft_len))
     predraft_masks = jax.device_put(jnp.full((draft_len * draft_len,), mask_id, dtype=jnp.int32))
     idx_k = jax.device_put(jnp.arange(draft_len, dtype=jnp.int32))

@@ -39,7 +39,7 @@ from TiDAR.model.GiantTiDAR import TiDAR
 from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embedding_params
 from TiDAR.model.config_schema import TiDARConfig, load_typed_config
 from TiDAR.model.tidar_core import (
-    build_decode_bias_template,
+    build_decode_bias_template_step_prefix,
     build_decode_position_template,
     init_kv_cache,
     prefill_prompt_with_draft,
@@ -172,7 +172,7 @@ def make_anchor_tidar_generate_fn(
         -> (out_ids, final_prefix_len, generated_count, stats_dict)
     """
     # Pre-build templates
-    decode_bias = jax.device_put(build_decode_bias_template(cache_len, draft_len, bias_value))
+    decode_bias = jax.device_put(build_decode_bias_template_step_prefix(cache_len, draft_len, bias_value))
     position_template = jax.device_put(build_decode_position_template(draft_len))
     
     # Pre-build mask token arrays

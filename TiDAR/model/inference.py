@@ -44,9 +44,11 @@ from TiDAR.model.tidar_core import (
     init_kv_cache,
     prefill_prompt_with_draft,
     sample_tokens,
-    anchor_rejection_sample,
+    anchor_rejection_sample_meta,
 )
 from GIANT.v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
+
+_VALID_DECODE_PREDRAFT_SAMPLING_MODES = {"staged", "single_pass"}
 
 
 # =============================================================================
@@ -58,6 +60,16 @@ def load_configs(
     global_config_path: str | None = None,
 ) -> TiDARConfig:
     return load_typed_config(model_config_path, global_config_path)
+
+
+def resolve_decode_predraft_sampling_mode(cfg: TiDARConfig) -> str:
+    mode = str(getattr(cfg.tidar, "decode_predraft_sampling_mode", "staged")).strip().lower()
+    if mode not in _VALID_DECODE_PREDRAFT_SAMPLING_MODES:
+        raise ValueError(
+            f"Invalid tidar.decode_predraft_sampling_mode='{mode}'. "
+            f"Expected one of: {sorted(_VALID_DECODE_PREDRAFT_SAMPLING_MODES)}"
+        )
+    return mode
 
 
 def resolve_params_dir(root: Path) -> Path:
@@ -162,6 +174,7 @@ def make_anchor_tidar_generate_fn(
     temperature: float,
     top_k: int,
     bias_value: float,
+    decode_predraft_sampling_mode: str = "staged",
     verbose_stats: bool = False,
 ):
     """
@@ -205,6 +218,8 @@ def make_anchor_tidar_generate_fn(
         )
         return logits[0], mutated["cache"]  # [q_len, V], cache
     
+    use_single_pass_predraft_sampling = decode_predraft_sampling_mode == "single_pass"
+
     @jax.jit
     def generate(
         params,
@@ -266,32 +281,48 @@ def make_anchor_tidar_generate_fn(
             # Extract predraft logits: reshape to [K, K, V]
             predraft_logits = logits[draft_len:].reshape(draft_len, draft_len, -1)
             
-            # === Sample from predraft groups ===
-            rng, predraft_flat_tokens = sample_tokens(
-                rng, 
-                predraft_logits.reshape(-1, predraft_logits.shape[-1]),
-                temperature, 
-                top_k
-            )
-            predraft_tokens = predraft_flat_tokens.reshape(draft_len, draft_len).astype(jnp.int32)
-            
             # === Rejection sampling ===
             anchor_tok = current_draft[0]
             draft_toks = current_draft[1:]  # [K-1] tokens to verify
-            
-            rng, accept_count, _, next_draft = anchor_rejection_sample(
-                rng,
-                anchor_token=anchor_tok,
-                draft_tokens=draft_toks,
-                verify_logits=verify_logits,
-                draft_logits=current_draft_logits,
-                predraft_tokens=predraft_tokens,
-                temperature=temperature,
-                top_k=top_k,
-            )
+
+            if use_single_pass_predraft_sampling:
+                # Legacy path: sample all K predraft rows in one pass, then choose row after rejection.
+                rng, predraft_flat_tokens = sample_tokens(
+                    rng,
+                    predraft_logits.reshape(-1, predraft_logits.shape[-1]),
+                    temperature,
+                    top_k,
+                )
+                predraft_tokens = predraft_flat_tokens.reshape(draft_len, draft_len).astype(jnp.int32)
+
+                rng, accept_count, _, proposal_idx, next_anchor = anchor_rejection_sample_meta(
+                    rng,
+                    anchor_token=anchor_tok,
+                    draft_tokens=draft_toks,
+                    verify_logits=verify_logits,
+                    draft_logits=current_draft_logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                )
+                proposal_logits = predraft_logits[proposal_idx]  # [K, V]
+                next_draft = predraft_tokens[proposal_idx].at[0].set(next_anchor)
+            else:
+                # Staged path (default): do rejection first, then sample only selected row.
+                rng, accept_count, _, proposal_idx, next_anchor = anchor_rejection_sample_meta(
+                    rng,
+                    anchor_token=anchor_tok,
+                    draft_tokens=draft_toks,
+                    verify_logits=verify_logits,
+                    draft_logits=current_draft_logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                )
+                proposal_logits = predraft_logits[proposal_idx]  # [K, V]
+                rng, next_draft = sample_tokens(rng, proposal_logits, temperature, top_k)
+                next_draft = next_draft.astype(jnp.int32).at[0].set(next_anchor)
+
             # accept_count: committed prefix length from current_draft.
             #               Minimum 1 (anchor), maximum K (full draft accepted)
-            # next_draft: [K] next iteration's draft (with new anchor at [0])
             
             # === Clamp accept_count to remaining budget ===
             remaining = (max_steps - generated).astype(jnp.int32)
@@ -327,15 +358,7 @@ def make_anchor_tidar_generate_fn(
             done2 = done | (generated2 >= max_steps) | has_eos
             
             # Update draft logits for next iteration
-            # Compute proposal_idx same way as in anchor_rejection_sample
-            k_minus_1 = draft_len - 1
-            stopped = accept_count < draft_len  # True if rejection occurred
-            # Same mapping as anchor_rejection_sample: proposal_idx = n_accepted.
-            # Since accept_count = n_accepted + 1 on rejection, idx = accept_count - 1.
-            proposal_idx = jnp.where(stopped, accept_count - 1, k_minus_1)
-            proposal_idx = jnp.clip(proposal_idx, 0, k_minus_1)
-            
-            next_draft_logits = predraft_logits[proposal_idx]  # [K, V]
+            next_draft_logits = proposal_logits
             
             # Stats
             total_accepts2 = total_accepts + eff_accept
@@ -405,6 +428,7 @@ def main():
     draft_len = args.draft_len if args.draft_len is not None else int(cfg.tidar.draft_length)
     max_steps = args.steps if args.steps is not None else int(cfg.inference.max_decode_steps)
     bias_value = float(cfg.tidar.attn_bias_value)
+    decode_predraft_sampling_mode = resolve_decode_predraft_sampling_mode(cfg)
     
     if args.stop_on_eos is not None:
         stop_on_eos = args.stop_on_eos.lower() in ("true", "1", "yes")
@@ -508,11 +532,16 @@ def main():
         temperature=float(temperature),
         top_k=int(top_k),
         bias_value=bias_value,
+        decode_predraft_sampling_mode=decode_predraft_sampling_mode,
         verbose_stats=args.verbose,
     )
     
     # Run generation
-    print(f"Generating {max_steps} tokens with draft_len={draft_len}, temp={temperature}, top_k={top_k}...")
+    print(
+        "Generating "
+        f"{max_steps} tokens with draft_len={draft_len}, temp={temperature}, top_k={top_k}, "
+        f"decode_predraft_sampling_mode={decode_predraft_sampling_mode}..."
+    )
     assert prefix_len > 0, "prefix_len must be > 0 before starting the decode loop"
     start_time = time.perf_counter()
     

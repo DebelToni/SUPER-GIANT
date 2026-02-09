@@ -42,6 +42,10 @@ class TiDARSpecificConfig:
     """TiDAR-specific configuration (draft tokens, attention)."""
     draft_length: int = 8
     attn_bias_value: float = -1.0e10
+    # Decode-time predraft sampling mode:
+    # - "staged": sample only selected predraft row after rejection metadata (default)
+    # - "single_pass": sample all K predraft rows before rejection (legacy)
+    decode_predraft_sampling_mode: str = "staged"
 
 
 @dataclass

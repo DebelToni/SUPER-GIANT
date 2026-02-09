@@ -27,6 +27,7 @@ from TiDAR.model.inference import (
     load_configs,
     load_params,
     load_tokenizer,
+    resolve_decode_predraft_sampling_mode,
     resolve_checkpoint_path,
     tokenize_prompt,
 )
@@ -47,7 +48,6 @@ def controlled_accept(
     draft_tokens: jnp.ndarray,     # [K-1]
     verify_logits: jnp.ndarray,    # [K, V]
     draft_logits: jnp.ndarray,     # [K, V]
-    predraft_tokens: jnp.ndarray,  # [K, K]
     temperature: float,
     top_k: int,
     accept_rate: jnp.ndarray,      # scalar float32 in [0, 1]
@@ -77,12 +77,10 @@ def controlled_accept(
 
     accepted_count = jnp.where(accept_all, jnp.asarray(k, dtype=jnp.int32), jnp.asarray(1, dtype=jnp.int32))
     proposal_idx = jnp.where(accept_all, jnp.asarray(k_minus_1, dtype=jnp.int32), jnp.asarray(0, dtype=jnp.int32))
-    selected_proposal = predraft_tokens[proposal_idx]
 
     next_anchor = jnp.where(accept_all, bonus_token, first_token)
-    selected_proposal = selected_proposal.at[0].set(next_anchor)
 
-    return key, accepted_count, committed, selected_proposal
+    return key, accepted_count, committed, proposal_idx, next_anchor
 
 
 def make_generate_fn(
@@ -97,12 +95,14 @@ def make_generate_fn(
     temperature: float,
     top_k: int,
     bias_value: float,
+    decode_predraft_sampling_mode: str = "staged",
 ):
     """Build JIT decode function that uses an externally supplied acceptance fn."""
     decode_bias = jax.device_put(build_decode_bias_template(cache_len, draft_len, bias_value))
     position_template = jax.device_put(build_decode_position_template(draft_len))
     predraft_masks = jax.device_put(jnp.full((draft_len * draft_len,), mask_id, dtype=jnp.int32))
     idx_k = jax.device_put(jnp.arange(draft_len, dtype=jnp.int32))
+    use_single_pass_predraft_sampling = decode_predraft_sampling_mode == "single_pass"
 
     def decode_apply(params, cache_vars, step_tokens, pos_ids, prefix_len):
         logits, mutated = model.apply(
@@ -161,25 +161,33 @@ def make_generate_fn(
             verify_logits = logits[:draft_len]
             predraft_logits = logits[draft_len:].reshape(draft_len, draft_len, -1)
 
-            rng, predraft_flat_tokens = sample_tokens(
-                rng,
-                predraft_logits.reshape(-1, predraft_logits.shape[-1]),
-                temperature,
-                top_k,
-            )
-            predraft_tokens = predraft_flat_tokens.reshape(draft_len, draft_len).astype(jnp.int32)
-
-            rng, accept_count, _, next_draft = controlled_accept(
+            rng, accept_count, _, proposal_idx, next_anchor = controlled_accept(
                 rng,
                 anchor_token=current_draft[0],
                 draft_tokens=current_draft[1:],
                 verify_logits=verify_logits,
                 draft_logits=current_draft_logits,
-                predraft_tokens=predraft_tokens,
                 temperature=temperature,
                 top_k=top_k,
                 accept_rate=accept_rate,
             )
+
+            if use_single_pass_predraft_sampling:
+                # Legacy path: sample all K predraft rows before selecting proposal row.
+                rng, predraft_flat_tokens = sample_tokens(
+                    rng,
+                    predraft_logits.reshape(-1, predraft_logits.shape[-1]),
+                    temperature,
+                    top_k,
+                )
+                predraft_tokens = predraft_flat_tokens.reshape(draft_len, draft_len).astype(jnp.int32)
+                proposal_logits = predraft_logits[proposal_idx]
+                next_draft = predraft_tokens[proposal_idx].at[0].set(next_anchor)
+            else:
+                # Staged path (default): sample only selected proposal row.
+                proposal_logits = predraft_logits[proposal_idx]
+                rng, next_draft = sample_tokens(rng, proposal_logits, temperature, top_k)
+                next_draft = next_draft.astype(jnp.int32).at[0].set(next_anchor)
 
             remaining = max_steps - generated
             eff_accept = jnp.minimum(accept_count, remaining)
@@ -202,11 +210,7 @@ def make_generate_fn(
             generated2 = generated + eff_accept
             done2 = done | (generated2 >= max_steps) | has_eos
 
-            k_minus_1 = draft_len - 1
-            stopped = accept_count < draft_len
-            proposal_idx = jnp.where(stopped, accept_count - 1, k_minus_1)
-            proposal_idx = jnp.clip(proposal_idx, 0, k_minus_1)
-            next_draft_logits = predraft_logits[proposal_idx]
+            next_draft_logits = proposal_logits
 
             total_accepts2 = total_accepts + eff_accept
             n_iters2 = n_iters + 1
@@ -333,6 +337,7 @@ def main():
     draft_len = args.draft_len if args.draft_len is not None else int(cfg.tidar.draft_length)
     max_steps = args.steps if args.steps is not None else int(cfg.inference.max_decode_steps)
     bias_value = float(cfg.tidar.attn_bias_value)
+    decode_predraft_sampling_mode = resolve_decode_predraft_sampling_mode(cfg)
     stop_on_eos = _resolve_stop_on_eos(args.stop_on_eos, bool(cfg.inference.stop_on_eos))
 
     model_context_length = int(cfg.model.context_length)
@@ -420,6 +425,7 @@ def main():
         temperature=float(temperature),
         top_k=int(top_k),
         bias_value=bias_value,
+        decode_predraft_sampling_mode=decode_predraft_sampling_mode,
     )
 
     decode_start = time.perf_counter()
@@ -461,6 +467,7 @@ def main():
     print(f"  observed_avg_accept_per_iter:  {avg_accept:.6f}")
     print(f"  observed_max_accept_per_iter:  {max_accept}")
     print(f"  observed_accept_prob_proxy:    {accept_prob_proxy:.6f}")
+    print(f"  decode_predraft_sampling_mode: {decode_predraft_sampling_mode}")
     print(f"  decode_time_s:                 {decode_time:.6f}")
     print(f"  tokens_per_second_decode_only: {toks_per_s:.6f}")
 

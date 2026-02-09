@@ -18,6 +18,7 @@ model:
 tidar:
   draft_length: 8
   attn_bias_value: -1.0e10
+  decode_predraft_sampling_mode: staged  # options: staged (default), single_pass (legacy)
 
 inference:
   stop_on_eos: true

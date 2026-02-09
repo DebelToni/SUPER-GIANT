@@ -15,10 +15,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from TiDAR.model.Transformer_block import NativeJaxSelfAttention
-from TiDAR.model.tidar_core import (
-    build_decode_bias_template_step_prefix,
-    build_decode_position_template,
-)
+from TiDAR.model.tidar_core import build_decode_position_template
+
+try:
+    from TiDAR.model.tidar_core import build_decode_bias_template_step_prefix as _build_decode_bias
+except ImportError:
+    from TiDAR.model.tidar_core import build_decode_bias_template as _build_decode_bias
 
 
 def _parse_dtype(name: str) -> jnp.dtype:
@@ -311,7 +313,7 @@ def main() -> None:
     v_full = jax.random.normal(v_key, kv_shape, dtype=dtype)
     x_bank = jax.random.normal(x_key, x_shape, dtype=dtype)
 
-    structured_bias = build_decode_bias_template_step_prefix(
+    structured_bias = _build_decode_bias(
         cache_len=int(args.prefix_len),
         draft_len=k,
         bias_value=float(args.bias_value),

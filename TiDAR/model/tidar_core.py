@@ -287,32 +287,34 @@ def sample_tokens(
 # Anchor-TiDAR Rejection Sampling
 # =============================================================================
 
-def anchor_rejection_sample(
+def anchor_rejection_sample_meta(
     key: jax.Array,
     *,
     anchor_token: jnp.ndarray,           # [] scalar - the anchor token at draft position 0
     draft_tokens: jnp.ndarray,           # [K-1] - tokens at positions 1..K-1 to verify
     verify_logits: jnp.ndarray,          # [K, V] - logits from model (shifted: logits[i] predicts position i+1)
     draft_logits: jnp.ndarray,           # [K, V] - logits used to sample draft (for rejection ratio)
-    predraft_tokens: jnp.ndarray,        # [K, K] - sampled proposals from predraft groups
     temperature: float,
     top_k: int,
-) -> Tuple[jax.Array, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jax.Array, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Anchor-TiDAR rejection sampling.
-    
+    Anchor-TiDAR rejection sampling metadata.
+
     This function verifies positions 1..K-1 and returns:
     - accepted_count: accepted prefix length from current_draft (min 1, max K)
     - committed_tokens: legacy helper tensor used by immediate-commit variants
-    - selected_proposal: next-draft block with substituted anchor at [0]
+    - proposal_idx: which predraft row to use for the next draft proposal
+    - next_anchor: token to substitute at proposal[0]
     
     Returns:
         key: Updated RNG key
         accepted_count: int32 scalar, accepted prefix length from current draft
                        Minimum 1, maximum K
         committed_tokens: [K] helper tensor for immediate-commit variants
-        selected_proposal: [K] next draft proposal (for next iteration)
+        proposal_idx: int32 scalar in [0, K-1]
+        next_anchor: int32 scalar
     """
+    del anchor_token
     k = draft_tokens.shape[0] + 1  # Total verify block size including anchor
     k_minus_1 = draft_tokens.shape[0]
     
@@ -419,16 +421,12 @@ def anchor_rejection_sample(
         k,               # all K-1 drafts + bonus
     )
     
-    # Select next draft proposal
-    # If all accepted: use predraft[K-1], bonus becomes next anchor
-    # If rejected at position j: use predraft[j-1], resampled becomes next anchor
-    #   where j = n_accepted + 1 (1-indexed position of rejection)
-    #   so proposal_idx = n_accepted
-    
+    # Select next draft row index.
+    # If all accepted: use predraft[K-1].
+    # If rejected at position j: use predraft[j-1], where j = n_accepted + 1.
     proposal_idx = jnp.where(stopped_final, n_accepted, k_minus_1)
     proposal_idx = jnp.clip(proposal_idx, 0, k_minus_1)
-    selected_proposal = predraft_tokens[proposal_idx]  # [K]
-    
+
     # Next anchor = resampled token at rejection point, or bonus if all accepted
     resamp_idx = jnp.clip(n_accepted, 0, k_minus_1 - 1)
     next_anchor = jnp.where(
@@ -437,9 +435,37 @@ def anchor_rejection_sample(
         bonus_token,            # Bonus token if all accepted
     )
     
-    # Put next_anchor as position 0 of selected_proposal
+    return key, accepted_count, committed, proposal_idx, next_anchor
+
+
+def anchor_rejection_sample(
+    key: jax.Array,
+    *,
+    anchor_token: jnp.ndarray,           # [] scalar - the anchor token at draft position 0
+    draft_tokens: jnp.ndarray,           # [K-1] - tokens at positions 1..K-1 to verify
+    verify_logits: jnp.ndarray,          # [K, V] - logits from model (shifted: logits[i] predicts position i+1)
+    draft_logits: jnp.ndarray,           # [K, V] - logits used to sample draft (for rejection ratio)
+    predraft_tokens: jnp.ndarray,        # [K, K] - sampled proposals from predraft groups
+    temperature: float,
+    top_k: int,
+) -> Tuple[jax.Array, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Backward-compatible rejection sampler that also materializes next draft tokens.
+
+    This wraps `anchor_rejection_sample_meta` and uses `predraft_tokens[proposal_idx]`
+    with substituted anchor at position 0.
+    """
+    key, accepted_count, committed, proposal_idx, next_anchor = anchor_rejection_sample_meta(
+        key,
+        anchor_token=anchor_token,
+        draft_tokens=draft_tokens,
+        verify_logits=verify_logits,
+        draft_logits=draft_logits,
+        temperature=temperature,
+        top_k=top_k,
+    )
+    selected_proposal = predraft_tokens[proposal_idx]
     selected_proposal = selected_proposal.at[0].set(next_anchor)
-    
     return key, accepted_count, committed, selected_proposal
 
 

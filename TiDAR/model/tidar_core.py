@@ -318,88 +318,79 @@ def anchor_rejection_sample_meta(
     k = draft_tokens.shape[0] + 1  # Total verify block size including anchor
     k_minus_1 = draft_tokens.shape[0]
     
-    # Prepare probabilities for rejection ratio
-    # We verify draft_tokens which are at positions 1..K-1
-    # verify_logits[i] predicts position i+1, so verify_logits[0:K-1] predict positions 1..K-1
-    # draft_logits[i] predicted position i when sampling, so draft_logits[1:K] predicted positions 1..K-1
-    verify_lgts_for_ratio = verify_logits[:-1]  # [K-1, V] - predicts positions 1..K-1
-    draft_lgts_for_ratio = draft_logits[1:]     # [K-1, V] - predicted positions 1..K-1 when draft was sampled
-    
-    p_logits = prepare_logits(verify_lgts_for_ratio, temperature, top_k)
-    q_logits = prepare_logits(draft_lgts_for_ratio, temperature, top_k)
-    
-    p_log = jax.nn.log_softmax(p_logits, axis=-1)
-    q_log = jax.nn.log_softmax(q_logits, axis=-1)
-    
-    # Get log probs for the draft tokens
-    idx = jnp.arange(k_minus_1, dtype=jnp.int32)
-    p_log_tok = p_log[idx, draft_tokens]
-    q_log_tok = q_log[idx, draft_tokens]
-    
-    # Acceptance probability: min(1, p/q)
-    # For greedy decoding (temperature=0), we use exact match instead
-    ratio = jnp.exp(p_log_tok - q_log_tok)
-    accept_prob_sampling = jnp.minimum(1.0, ratio)
-    
-    # For greedy mode: accept only if draft_token == argmax(verify_logits)
-    greedy_argmax = jnp.argmax(verify_lgts_for_ratio, axis=-1)  # [K-1]
-    greedy_match = (draft_tokens == greedy_argmax).astype(jnp.float32)  # 1.0 if match, 0.0 otherwise
-    
-    # Choose acceptance probability based on temperature
-    is_greedy = jnp.asarray(temperature) <= 0.0
-    accept_prob = jnp.where(is_greedy, greedy_match, accept_prob_sampling)
-    
-    # Sample uniform for rejection decisions
-    key, key_u, key_resample = jax.random.split(key, 3)
-    u = jax.random.uniform(key_u, (k_minus_1,), dtype=jnp.float32)
-    
-    # For greedy mode, set u to 0.5 so that accept_prob >= 1.0 accepts, accept_prob = 0.0 rejects
-    u = jnp.where(is_greedy, 0.5, u)
-    
-    # Pre-sample replacement tokens from p for each position
-    # Use argmax for greedy (temperature=0), categorical otherwise
-    def do_categorical(k):
-        return jax.random.categorical(k, p_logits, axis=-1).astype(jnp.int32)
-    
-    def do_argmax(_k):
-        return jnp.argmax(p_logits, axis=-1).astype(jnp.int32)
-    
-    resampled = jax.lax.cond(
-        jnp.asarray(temperature) > 0.0,
-        do_categorical,
-        do_argmax,
-        key_resample,
-    )
-    
-    # Sequential rejection sampling
-    def step_fn(carry, inputs):
-        stopped, accept_count = carry
-        draft_tok, resamp_tok, u_i, ap_i = inputs
-        
-        accept = u_i < ap_i
-        do_accept = (~stopped) & accept
-        do_reject = (~stopped) & (~accept)
-        
-        # Output token: draft if accepted, resampled if rejected (first rejection only)
-        out_tok = jnp.where(stopped, draft_tok, jnp.where(accept, draft_tok, resamp_tok))
-        
-        stopped2 = stopped | do_reject
-        accept_count2 = accept_count + do_accept.astype(jnp.int32)
-        
-        return (stopped2, accept_count2), out_tok
-    
-    init = (jnp.array(False), jnp.array(0, dtype=jnp.int32))
-    (stopped_final, n_accepted), verified_tokens = jax.lax.scan(
-        step_fn,
-        init,
-        (draft_tokens, resampled, u, accept_prob),
-    )
-    
-    # Sample bonus token from verify_logits[K-1]
-    key, key_bonus = jax.random.split(key)
-    bonus_logits = verify_logits[-1:]  # [1, V]
-    _, bonus_token = sample_tokens(key_bonus, bonus_logits, temperature, top_k)
-    bonus_token = bonus_token[0]  # scalar
+    # We verify draft_tokens at positions 1..K-1.
+    # verify_logits[0:K-1] predicts positions 1..K-1.
+    verify_lgts_for_ratio = verify_logits[:-1]  # [K-1, V]
+
+    # In greedy mode, acceptance is exact-match against argmax and no p/q ratio is needed.
+    # Keep this as a Python branch so JIT only traces/compiles the selected path for a run.
+    if temperature <= 0.0:
+        greedy_argmax = jnp.argmax(verify_lgts_for_ratio, axis=-1).astype(jnp.int32)  # [K-1]
+        reject_mask = draft_tokens != greedy_argmax  # [K-1]
+        stopped_final = jnp.any(reject_mask)
+        first_reject = jnp.where(
+            stopped_final,
+            jnp.argmax(reject_mask.astype(jnp.int32)),
+            k_minus_1,
+        ).astype(jnp.int32)
+        n_accepted = first_reject
+
+        # Replace only the first rejected token with argmax; tail remains draft tokens.
+        rej_pos = jnp.arange(k_minus_1, dtype=jnp.int32)
+        verified_tokens = jnp.where(
+            (rej_pos == n_accepted) & stopped_final,
+            greedy_argmax,
+            draft_tokens,
+        )
+
+        # Bonus token for the all-accepted path is also greedy argmax.
+        bonus_token = jnp.argmax(verify_logits[-1], axis=-1).astype(jnp.int32)
+        resampled = greedy_argmax
+    else:
+        # Sampling mode: standard speculative acceptance ratio min(1, p/q).
+        # draft_logits[1:K] predicted positions 1..K-1 when current draft was sampled.
+        draft_lgts_for_ratio = draft_logits[1:]  # [K-1, V]
+        p_logits = prepare_logits(verify_lgts_for_ratio, temperature, top_k)
+        q_logits = prepare_logits(draft_lgts_for_ratio, temperature, top_k)
+
+        p_log = jax.nn.log_softmax(p_logits, axis=-1)
+        q_log = jax.nn.log_softmax(q_logits, axis=-1)
+
+        idx = jnp.arange(k_minus_1, dtype=jnp.int32)
+        p_log_tok = p_log[idx, draft_tokens]
+        q_log_tok = q_log[idx, draft_tokens]
+        accept_prob = jnp.minimum(1.0, jnp.exp(p_log_tok - q_log_tok))
+
+        key, key_u, key_resample = jax.random.split(key, 3)
+        u = jax.random.uniform(key_u, (k_minus_1,), dtype=jnp.float32)
+        resampled = jax.random.categorical(key_resample, p_logits, axis=-1).astype(jnp.int32)
+
+        def step_fn(carry, inputs):
+            stopped, accept_count = carry
+            draft_tok, resamp_tok, u_i, ap_i = inputs
+
+            accept = u_i < ap_i
+            do_accept = (~stopped) & accept
+            do_reject = (~stopped) & (~accept)
+
+            # Output token: draft if accepted, resampled if rejected (first rejection only)
+            out_tok = jnp.where(stopped, draft_tok, jnp.where(accept, draft_tok, resamp_tok))
+
+            stopped2 = stopped | do_reject
+            accept_count2 = accept_count + do_accept.astype(jnp.int32)
+            return (stopped2, accept_count2), out_tok
+
+        init = (jnp.array(False), jnp.array(0, dtype=jnp.int32))
+        (stopped_final, n_accepted), verified_tokens = jax.lax.scan(
+            step_fn,
+            init,
+            (draft_tokens, resampled, u, accept_prob),
+        )
+
+        key, key_bonus = jax.random.split(key)
+        bonus_logits = verify_logits[-1:]  # [1, V]
+        _, bonus_token = sample_tokens(key_bonus, bonus_logits, temperature, top_k)
+        bonus_token = bonus_token[0]  # scalar
     
     # Build committed tokens array: [verified[0], ..., verified[K-2], bonus]
     # Length K (without the anchor!)

@@ -101,8 +101,7 @@ class NativeJaxSelfAttention(nn.Module):
         kv_cache_len: Optional[int] = None,
     ):
         b, l, _ = x.shape
-        use_cudnn = IS_GPU and l % 2 == 0 and l >= 2
-        impl = "cudnn" if use_cudnn else "xla"
+        impl = "cudnn" if IS_GPU else "xla"
 
         head_dim = self.head_dim
         q_size = self.num_heads * head_dim
@@ -114,10 +113,9 @@ class NativeJaxSelfAttention(nn.Module):
         k = k_chunk.reshape(b, l, self.num_kv, head_dim)
         v = v_chunk.reshape(b, l, self.num_kv, head_dim)
 
-        group = max(1, self.num_heads // self.num_kv)
+        # Use native GQA path in JAX attention: keep K/V at num_kv heads
+        # instead of expanding to num_heads.
         kv_indices = None
-        if self.num_kv != self.num_heads:
-            kv_indices = jnp.arange(self.num_heads) // group
 
         if position_ids is not None:
             sin, cos = self._rope_from_position_ids(position_ids)

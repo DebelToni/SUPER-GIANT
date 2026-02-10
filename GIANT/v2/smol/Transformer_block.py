@@ -108,8 +108,7 @@ class NativeJaxSelfAttention(nn.Module):
     @nn.compact
     def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
         b, l, _ = x.shape
-        # Flash attention (cuDNN) supports bias only when sequence length is even; fall back otherwise.
-        impl = "cudnn" if (IS_GPU and l >= 128 and l % 2 == 0) else "xla"
+        impl = "cudnn" if IS_GPU else "xla"
 
         head_dim = self.head_dim
         q_size   = self.num_heads * head_dim

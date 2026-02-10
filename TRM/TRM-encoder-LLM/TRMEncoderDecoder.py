@@ -235,8 +235,7 @@ class NativeJaxSelfAttention(nn.Module):
     @nn.compact
     def __call__(self, x, *, deterministic: bool):
         b, l, _ = x.shape
-        use_cudnn = IS_GPU and l >= 128 and l % 2 == 0 and self.dtype in (jnp.float16, jnp.bfloat16)
-        impl = "cudnn" if use_cudnn else "xla"
+        impl = "cudnn" if IS_GPU else "xla"
 
         head_dim = self.head_dim
         q_size = self.num_heads * head_dim
@@ -312,8 +311,7 @@ class CrossAttention(nn.Module):
     ) -> jnp.ndarray:
         b, q_len, _ = q_in.shape
         kv_len = kv_in.shape[1]
-        use_cudnn = IS_GPU and q_len % 2 == 0 and kv_len % 2 == 0 and self.dtype in (jnp.float16, jnp.bfloat16)
-        impl = "cudnn" if use_cudnn else "xla"
+        impl = "cudnn" if IS_GPU else "xla"
 
         q = self.q_proj(q_in).reshape(b, q_len, self.num_heads, self.head_dim)
         kv = self.kv_proj(kv_in)

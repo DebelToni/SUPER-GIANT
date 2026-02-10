@@ -66,6 +66,7 @@ class NativeJaxSelfAttention(nn.Module):
 
     num_heads: int
     qkv_features: int
+    context_length: int = MODEL_CFG.context_length
     dropout_rate: float = 0.0
     num_kv: int = 1
     dtype: jnp.dtype = COMPUTE_DTYPE
@@ -101,7 +102,7 @@ class NativeJaxSelfAttention(nn.Module):
         self.dropout = nn.Dropout(rate=self.dropout_rate)
         # Precompute rotary embeddings once and slice per call.
         self._rope_sin, self._rope_cos = _build_rope_cache(
-            MODEL_CFG.context_length, self.rotary_dim, self.dtype
+            self.context_length, self.rotary_dim, self.dtype
         )
 
     @nn.compact
@@ -114,8 +115,7 @@ class NativeJaxSelfAttention(nn.Module):
         cur_index: Optional[jnp.ndarray | int] = None,
     ):
         b, l, _ = x.shape
-        # Flash attention (cuDNN) supports bias only when sequence length is even; fall back otherwise.
-        impl = "cudnn" if (IS_GPU and l >= 128 and l % 2 == 0) else "xla"
+        impl = "cudnn" if IS_GPU else "xla"
 
         head_dim = self.head_dim
         q_size   = self.num_heads * head_dim
@@ -158,7 +158,7 @@ class NativeJaxSelfAttention(nn.Module):
 
         if use_kv_cache:
             assert cur_index is not None, "Need cur_index when use_kv_cache=True"
-            cache_shape = (b, self.num_kv, MODEL_CFG.context_length, head_dim)
+            cache_shape = (b, self.num_kv, self.context_length, head_dim)
             cached_k = self.variable(
                 "cache",
                 "k",
@@ -200,13 +200,13 @@ class NativeJaxSelfAttention(nn.Module):
             if cur_index.ndim == 0:
                 new_k, new_v = _update_scalar(cached_k.value, cached_v.value, cur_index)
                 cur_max = cur_index + (l - 1)
-                valid = jnp.arange(MODEL_CFG.context_length) <= cur_max
+                valid = jnp.arange(self.context_length) <= cur_max
                 attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
                 attn_bias = attn_bias[None, None, None, :]
             else:
                 new_k, new_v = _update_vector(cached_k.value, cached_v.value, cur_index)
                 cur_max = cur_index + (l - 1)
-                valid = jnp.arange(MODEL_CFG.context_length)[None, :] <= cur_max[:, None]
+                valid = jnp.arange(self.context_length)[None, :] <= cur_max[:, None]
                 attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
                 attn_bias = attn_bias[:, None, None, :]
 
@@ -241,6 +241,7 @@ class TinyTransformerBlock(nn.Module):
     d_model: int
     n_heads: int
     d_ff: int
+    context_length: int = MODEL_CFG.context_length
     dropout_rate: float = 0.1
     num_kv_heads: Optional[int] = None  # If None, uses num_heads (MHA)
     rotary_dim: Optional[int] = None  # If None, uses MODEL_CFG.rope_dim
@@ -258,6 +259,7 @@ class TinyTransformerBlock(nn.Module):
                 num_heads=module.n_heads,
                 num_kv=num_kv,
                 qkv_features=module.d_model,
+                context_length=module.context_length,
                 dropout_rate=module.dropout_rate,
                 dtype=module.dtype,
                 rotary_dim=rotary_dim,

@@ -158,6 +158,19 @@ def load_params(path: Path):
     return jax.tree_util.tree_map(lambda x: jnp.asarray(x), params)
 
 
+def parse_bool_flag(value: Optional[str], *, default: bool) -> bool:
+    if value is None:
+        return default
+    lowered = value.strip().lower()
+    if lowered in {"1", "true", "yes", "y", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(
+        f"Invalid boolean value '{value}'. Use one of: true/false, yes/no, 1/0."
+    )
+
+
 # =============================================================================
 # Anchor-TiDAR Generation
 # =============================================================================
@@ -393,6 +406,91 @@ def make_anchor_tidar_generate_fn(
     return generate
 
 
+def make_anchor_tidar_component_profile_fns(
+    model: TiDAR,
+    *,
+    cache_len: int,
+    draft_len: int,
+    mask_id: int,
+    temperature: float,
+    top_k: int,
+    bias_value: float,
+    decode_predraft_sampling_mode: str = "staged",
+):
+    """
+    Build JIT-compiled component fns for decode breakdown profiling.
+
+    Returns:
+      decode_forward(params, cache_vars, current_draft, prefix_len) -> (logits, cache)
+      postprocess(rng, current_draft, current_draft_logits, logits) -> (rng, accept_count, next_draft, next_draft_logits)
+    """
+    decode_bias = jax.device_put(build_decode_bias_template(cache_len, draft_len, bias_value))
+    position_template = jax.device_put(build_decode_position_template(draft_len))
+    predraft_masks = jax.device_put(jnp.full((draft_len * draft_len,), mask_id, dtype=jnp.int32))
+    use_single_pass_predraft_sampling = decode_predraft_sampling_mode == "single_pass"
+
+    @jax.jit
+    def decode_forward(
+        params,
+        cache_vars,
+        current_draft: jnp.ndarray,   # [K]
+        prefix_len: jnp.ndarray,      # scalar
+    ):
+        step_tokens = jnp.concatenate([current_draft, predraft_masks])  # [K + K*K]
+        step_pos_ids = (prefix_len + position_template).astype(jnp.int32)
+        logits, mutated = model.apply(
+            {"params": params, "cache": cache_vars},
+            step_tokens[None, :],
+            deterministic=True,
+            use_kv_cache=True,
+            write_to_cache=False,
+            prefix_len=prefix_len,
+            cache_write_len=draft_len,
+            attn_bias=decode_bias,
+            position_ids=step_pos_ids[None, :],
+            kv_cache_len=cache_len,
+            mutable=["cache"],
+        )
+        return logits[0], mutated["cache"]
+
+    @jax.jit
+    def postprocess(
+        rng: jax.Array,
+        current_draft: jnp.ndarray,         # [K]
+        current_draft_logits: jnp.ndarray,  # [K, V]
+        logits: jnp.ndarray,                # [K + K*K, V]
+    ):
+        verify_logits = logits[:draft_len]
+        predraft_logits = logits[draft_len:].reshape(draft_len, draft_len, -1)
+        rng, accept_count, _, proposal_idx, next_anchor = anchor_rejection_sample_meta(
+            rng,
+            anchor_token=current_draft[0],
+            draft_tokens=current_draft[1:],
+            verify_logits=verify_logits,
+            draft_logits=current_draft_logits,
+            temperature=temperature,
+            top_k=top_k,
+        )
+
+        proposal_logits = predraft_logits[proposal_idx]
+        if use_single_pass_predraft_sampling:
+            rng, predraft_flat_tokens = sample_tokens(
+                rng,
+                predraft_logits.reshape(-1, predraft_logits.shape[-1]),
+                temperature,
+                top_k,
+            )
+            predraft_tokens = predraft_flat_tokens.reshape(draft_len, draft_len).astype(jnp.int32)
+            next_draft = predraft_tokens[proposal_idx].at[0].set(next_anchor)
+        else:
+            rng, next_draft = sample_tokens(rng, proposal_logits, temperature, top_k)
+            next_draft = next_draft.astype(jnp.int32).at[0].set(next_anchor)
+
+        return rng, accept_count, next_draft, proposal_logits
+
+    return decode_forward, postprocess
+
+
 # =============================================================================
 # CLI
 # =============================================================================
@@ -413,6 +511,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--strip_eos", action="store_true")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--warmup_runs", type=int, default=1)
+    parser.add_argument("--bench_runs", type=int, default=3)
+    parser.add_argument("--report_compile_time", type=str, default="true")
+    parser.add_argument("--report_run_only_time", type=str, default="true")
+    parser.add_argument("--component_breakdown_iters", type=int, default=0)
     return parser.parse_args()
 
 
@@ -429,6 +532,8 @@ def main():
     max_steps = args.steps if args.steps is not None else int(cfg.inference.max_decode_steps)
     bias_value = float(cfg.tidar.attn_bias_value)
     decode_predraft_sampling_mode = resolve_decode_predraft_sampling_mode(cfg)
+    report_compile_time = parse_bool_flag(args.report_compile_time, default=True)
+    report_run_only_time = parse_bool_flag(args.report_run_only_time, default=True)
     
     if args.stop_on_eos is not None:
         stop_on_eos = args.stop_on_eos.lower() in ("true", "1", "yes")
@@ -447,6 +552,12 @@ def main():
         raise ValueError("draft_len must be > 1")
     if context_length > model_context_length:
         raise ValueError(f"context_length {context_length} exceeds model max {model_context_length}")
+    if args.warmup_runs < 0:
+        raise ValueError("warmup_runs must be >= 0")
+    if args.bench_runs < 0:
+        raise ValueError("bench_runs must be >= 0")
+    if args.component_breakdown_iters < 0:
+        raise ValueError("component_breakdown_iters must be >= 0")
     
     # Load checkpoint
     checkpoint_path = resolve_checkpoint_path(cfg, args.checkpoint, args.checkpoint_dir)
@@ -466,8 +577,8 @@ def main():
     if required_len > context_length:
         raise ValueError(f"Required length {required_len} exceeds context_length {context_length}")
     
-    # Use context_length as cache_len for simplicity
-    cache_len = context_length
+    # Keep decode KV window tight to the actual request budget.
+    cache_len = required_len
     
     # Setup mask token
     base_token = getattr(cfg.tokenizer, "mask_token_override", None) or "[MASK]"
@@ -543,9 +654,7 @@ def main():
         f"decode_predraft_sampling_mode={decode_predraft_sampling_mode}..."
     )
     assert prefix_len > 0, "prefix_len must be > 0 before starting the decode loop"
-    start_time = time.perf_counter()
-    
-    out_ids_final, final_len, generated, stats = generate_fn(
+    generate_call_args = (
         params,
         cache_vars,
         out_ids,
@@ -555,9 +664,29 @@ def main():
         rng,
         initial_draft_logits,
     )
-    out_ids_final.block_until_ready()
-    
-    decode_time = time.perf_counter() - start_time
+
+    def run_generate_once():
+        out = generate_fn(*generate_call_args)
+        out[0].block_until_ready()
+        return out
+
+    compile_start = time.perf_counter()
+    out_first = run_generate_once()
+    compile_and_first_run_s = time.perf_counter() - compile_start
+
+    for _ in range(args.warmup_runs):
+        _ = run_generate_once()
+
+    steady_run_times: list[float] = []
+    out_last = out_first
+    if report_run_only_time and args.bench_runs > 0:
+        for _ in range(args.bench_runs):
+            t0 = time.perf_counter()
+            out_last = run_generate_once()
+            steady_run_times.append(time.perf_counter() - t0)
+
+    out_ids_final, final_len, generated, stats = out_last
+    decode_time = compile_and_first_run_s
     
     # Extract output
     final_len = int(np.asarray(final_len))
@@ -581,6 +710,22 @@ def main():
         avg_accept = float(np.asarray(stats["avg_accept_per_iter"]))
         max_accept = int(np.asarray(stats["max_accept_per_iter"]))
         toks_per_s = gen_count / decode_time if decode_time > 0 else float("inf")
+        steady_decode_time_mean = float(np.mean(steady_run_times)) if steady_run_times else None
+        steady_decode_time_std = float(np.std(steady_run_times)) if steady_run_times else None
+        steady_toks_per_s = (
+            gen_count / steady_decode_time_mean
+            if steady_decode_time_mean is not None and steady_decode_time_mean > 0
+            else None
+        )
+        steady_toks_per_s_std = (
+            (gen_count * steady_decode_time_std) / (steady_decode_time_mean ** 2)
+            if (
+                steady_decode_time_mean is not None
+                and steady_decode_time_std is not None
+                and steady_decode_time_mean > 0
+            )
+            else None
+        )
         
         print("\n[stats]")
         print(f"  prompt_tokens:     {prompt_len}")
@@ -590,6 +735,97 @@ def main():
         print(f"  max_accept/iter:   {max_accept}")
         print(f"  decode_time_s:     {decode_time:.4f}")
         print(f"  tokens_per_second: {toks_per_s:.2f}")
+        print("\n[benchmark]")
+        print(f"  warmup_runs:       {args.warmup_runs}")
+        print(f"  bench_runs:        {args.bench_runs}")
+        print(f"  report_compile:    {report_compile_time}")
+        print(f"  report_run_only:   {report_run_only_time}")
+        if report_compile_time:
+            print(f"  compile_and_first_run_s:            {compile_and_first_run_s:.6f}")
+            print(f"  compile_and_first_run_tokens_per_s: {toks_per_s:.6f}")
+        if report_run_only_time and steady_decode_time_mean is not None:
+            print(f"  steady_decode_time_s_mean:          {steady_decode_time_mean:.6f}")
+            print(f"  steady_decode_time_s_std:           {steady_decode_time_std:.6f}")
+            print(f"  steady_tokens_per_second_mean:      {steady_toks_per_s:.6f}")
+            print(f"  steady_tokens_per_second_std:       {steady_toks_per_s_std:.6f}")
+
+    if args.component_breakdown_iters > 0:
+        decode_forward_fn, postprocess_fn = make_anchor_tidar_component_profile_fns(
+            model,
+            cache_len=cache_len,
+            draft_len=draft_len,
+            mask_id=int(mask_id),
+            temperature=float(temperature),
+            top_k=int(top_k),
+            bias_value=bias_value,
+            decode_predraft_sampling_mode=decode_predraft_sampling_mode,
+        )
+
+        profile_rng = jax.random.PRNGKey(args.seed + 17)
+        profile_rng, profile_anchor = sample_tokens(profile_rng, prev_logit, float(temperature), int(top_k))
+        profile_rng, profile_init_draft = sample_tokens(
+            profile_rng, initial_draft_logits, float(temperature), int(top_k)
+        )
+        profile_current_draft = profile_init_draft.astype(jnp.int32).at[0].set(
+            profile_anchor.astype(jnp.int32)
+        )
+        profile_current_draft_logits = initial_draft_logits
+        profile_prefix_len = jnp.asarray(prefix_len, dtype=jnp.int32)
+        profile_cache = cache_vars
+
+        # Warmup compile and stabilize.
+        for _ in range(2):
+            warm_logits, profile_cache = decode_forward_fn(
+                params, profile_cache, profile_current_draft, profile_prefix_len
+            )
+            (
+                profile_rng,
+                _,
+                profile_current_draft,
+                profile_current_draft_logits,
+            ) = postprocess_fn(
+                profile_rng,
+                profile_current_draft,
+                profile_current_draft_logits,
+                warm_logits,
+            )
+
+        comp_iters = args.component_breakdown_iters
+
+        t0 = time.perf_counter()
+        for _ in range(comp_iters):
+            warm_logits, profile_cache = decode_forward_fn(
+                params, profile_cache, profile_current_draft, profile_prefix_len
+            )
+        warm_logits.block_until_ready()
+        decode_forward_s = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        for _ in range(comp_iters):
+            (
+                profile_rng,
+                _,
+                profile_current_draft,
+                profile_current_draft_logits,
+            ) = postprocess_fn(
+                profile_rng,
+                profile_current_draft,
+                profile_current_draft_logits,
+                warm_logits,
+            )
+        profile_current_draft_logits.block_until_ready()
+        postprocess_s = time.perf_counter() - t0
+
+        decode_ms = (decode_forward_s / comp_iters) * 1000.0
+        post_ms = (postprocess_s / comp_iters) * 1000.0
+        total = decode_forward_s + postprocess_s
+        post_share = (postprocess_s / total) * 100.0 if total > 0 else 0.0
+
+        print("\n[component_breakdown]")
+        print(f"  component_breakdown_iters:           {comp_iters}")
+        print(f"  decode_forward_ms_per_iter:          {decode_ms:.6f}")
+        print(f"  reject_sample_postprocess_ms_per_iter:{post_ms:.6f}")
+        print(f"  postprocess_share_pct:               {post_share:.4f}")
 
 
 if __name__ == "__main__":

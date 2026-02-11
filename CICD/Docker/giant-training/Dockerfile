@@ -159,7 +159,7 @@ if [[ ! -f "$SYNC_MARKER" ]]; then
       else
         _dst_dir="${DATA_DIR}/$(dirname "$_p")"
         mkdir -p "$_dst_dir"
-        "${S5CMD_CP[@]}" --size-only "s3://${BUCKET}/${_p}" "${_dst_dir}/"
+        "${S5CMD_CP[@]}" --if-size-differ "s3://${BUCKET}/${_p}" "${_dst_dir}/"
       fi
     done
   fi

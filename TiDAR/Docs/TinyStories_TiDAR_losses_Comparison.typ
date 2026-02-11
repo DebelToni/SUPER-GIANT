@@ -11,6 +11,8 @@
 #let biggerbeta-color = rgb(0, 150, 136)   // Teal
 #let topk-color = rgb(121, 85, 72)         // Brown
 #let biggamma-color = rgb(63, 81, 181)     // Indigo
+#let maskedlater-color = rgb(233, 30, 99)  // Magenta
+#let deltamasked-color = rgb(0, 188, 212)  // Cyan
 #let border-color = rgb(180, 180, 180)
 
 // Branch step
@@ -158,6 +160,11 @@
 #let biggerbeta-greedy = parse-metric("Training_logs/tidar_stable_bigger_beta_logs.txt", "greedy_acc ")
 #let topk-greedy = parse-metric("Training_logs/tidar_later_stage_topk_logs.txt", "greedy_acc ")
 #let biggamma-greedy = parse-metric("Training_logs/tidar_bigGamma_andDelta_logs.txt", "greedy_acc ")
+#let maskedlater-greedy = parse-metric("Training_logs/tidar_masked_delta_later_logs.txt", "greedy_acc ")
+
+// Early masked-delta run (short run, <30k)
+#let deltamasked-diff = parse-metric("Training_logs/tidar_delta_masked_logs.txt", " diff ")
+#let deltamasked-greedy = parse-metric("Training_logs/tidar_delta_masked_logs.txt", "greedy_acc ")
 
 // 90k+ ranges
 #let stable-ar-90 = filter-range(stable-ar, min: cut-step)
@@ -178,6 +185,7 @@
 #let biggerbeta-greedy-90 = filter-range(biggerbeta-greedy, min: cut-step)
 #let topk-greedy-90 = filter-range(topk-greedy, min: cut-step)
 #let biggamma-greedy-90 = filter-range(biggamma-greedy, min: cut-step)
+#let maskedlater-greedy-90 = filter-range(maskedlater-greedy, min: cut-step)
 
 #let stable-x-min = calc.min(..stable-greedy.map(d => d.at(0)))
 #let stable-x-max = calc.max(..stable-greedy.map(d => d.at(0)))
@@ -209,7 +217,7 @@
 #let greedy-y-max = greedy-max + greedy-pad
 
 // Greedy y-range (extended with smallAR big greedy eta + stable bigger beta, 90k+ zoom)
-#let greedy-all-ext-90 = stable-greedy-90 + kl-only-greedy-90 + kl-keep-greedy-90 + distill-greedy-90 + smallar-greedy-90 + biggerbeta-greedy-90 + topk-greedy-90 + biggamma-greedy-90
+#let greedy-all-ext-90 = stable-greedy-90 + kl-only-greedy-90 + kl-keep-greedy-90 + distill-greedy-90 + smallar-greedy-90 + biggerbeta-greedy-90 + topk-greedy-90 + biggamma-greedy-90 + maskedlater-greedy-90
 #let greedy-ext-min = calc.min(..greedy-all-ext-90.map(d => d.at(1)))
 #let greedy-ext-max = calc.max(..greedy-all-ext-90.map(d => d.at(1)))
 #let greedy-ext-pad = (greedy-ext-max - greedy-ext-min) * 0.01
@@ -223,6 +231,7 @@
 #let delta-greedy-biggerbeta = delta-series(stable-greedy-90, biggerbeta-greedy-90)
 #let delta-greedy-topk = delta-series(stable-greedy-90, topk-greedy-90)
 #let delta-greedy-biggamma = delta-series(stable-greedy-90, biggamma-greedy-90)
+#let delta-greedy-maskedlater = delta-series(stable-greedy-90, maskedlater-greedy-90)
 #let delta-greedy-all = delta-greedy-kl-only + delta-greedy-kl-keep + delta-greedy-distill
 #let delta-greedy-min = calc.min(..delta-greedy-all.map(d => d.at(1)))
 #let delta-greedy-max = calc.max(..delta-greedy-all.map(d => d.at(1)))
@@ -230,7 +239,7 @@
 #let delta-greedy-y-min = delta-greedy-min - delta-greedy-pad
 #let delta-greedy-y-max = delta-greedy-max + delta-greedy-pad
 
-#let delta-greedy-all-ext = delta-greedy-all + delta-greedy-smallar + delta-greedy-biggerbeta + delta-greedy-topk + delta-greedy-biggamma
+#let delta-greedy-all-ext = delta-greedy-all + delta-greedy-smallar + delta-greedy-biggerbeta + delta-greedy-topk + delta-greedy-biggamma + delta-greedy-maskedlater
 #let delta-greedy-ext-min = calc.min(..delta-greedy-all-ext.map(d => d.at(1)))
 #let delta-greedy-ext-max = calc.max(..delta-greedy-all-ext.map(d => d.at(1)))
 #let delta-greedy-ext-pad = (delta-greedy-ext-max - delta-greedy-ext-min) * 0.01
@@ -243,7 +252,7 @@
 
 = TinyStories TiDAR Greedy Acceptance Comparison
 
-All runs branch from the stable run at step 90,000:
+90k+ branch runs from stable (plus one short early run overlay):
 
 - *Stable (blue)*: `alpha=1, beta=1` -- baseline AR+Diff training, continued to 121k
 - *KL-only (red)*: `alpha=0.2, beta=0, rho=0.5, delta=0.3` -- forward KL + greedy, no diff loss
@@ -253,12 +262,14 @@ All runs branch from the stable run at step 90,000:
 - *Stable bigger beta (teal)*: `alpha=1, beta=5` -- baseline with 5x diffusion weight
 - *Top-K set (brown)*: `gamma=0.01, gamma_topk=8` -- top-k set distillation (later-stage)
 - *Big Gamma+Delta (indigo)*: `gamma=5, gamma_topk=4, delta=1` -- strong top-k + hard agreement
+- *Masked Delta later (magenta)*: partial 90k+ run, plotted up to available checkpoints
+- *Delta masked early (cyan)*: short run (under 30k), overlaid on stable full-range Diff/Greedy charts
 
 == Legend
 
 #box(width: 100%, inset: 8pt, stroke: 0.6pt + rgb(200, 200, 200), radius: 4pt)[
   #grid(
-    columns: (1fr, 1fr, 1fr, 1fr),
+    columns: (1fr, 1fr, 1fr, 1fr, 1fr),
     gutter: 12pt,
     [
       #legend-item("Stable (1, 1, 0, 0, 0, 0)", stable-color)
@@ -279,6 +290,11 @@ All runs branch from the stable run at step 90,000:
       #legend-item("Top-K set (gamma=0.01 K=8)", topk-color)
       #v(4pt)
       #legend-item("Big Gamma+Delta (gamma=5 K=4 delta=1)", biggamma-color)
+    ],
+    [
+      #legend-item("Masked Delta later (90k+ partial)", maskedlater-color)
+      #v(4pt)
+      #legend-item("Delta masked early (under 30k)", deltamasked-color)
     ],
   )
 ]
@@ -320,9 +336,12 @@ All runs branch from the stable run at step 90,000:
 
 === Diff loss (raw)
 
-#text(size: 9pt, weight: "bold")[Stable 0-121k]
+#text(size: 9pt, weight: "bold")[Stable 0-121k + Delta masked early]
 #multi-line-chart(
-  ((color: stable-color, data: stable-diff),),
+  (
+    (color: stable-color, data: stable-diff),
+    (color: deltamasked-color, data: deltamasked-diff),
+  ),
   width: 170mm,
   height: 45mm,
   y_label: "Diff loss",
@@ -356,9 +375,12 @@ All runs branch from the stable run at step 90,000:
 
 #text(size: 9pt)[Greedy acceptance = fraction of positions where argmax(AR) == argmax(Diff).]
 
-#text(size: 9pt, weight: "bold")[Stable 0-121k]
+#text(size: 9pt, weight: "bold")[Stable 0-121k + Delta masked early]
 #multi-line-chart(
-  ((color: stable-color, data: stable-greedy),),
+  (
+    (color: stable-color, data: stable-greedy),
+    (color: deltamasked-color, data: deltamasked-greedy),
+  ),
   width: 170mm,
   height: 45mm,
   y_label: "Greedy acc",
@@ -410,7 +432,7 @@ All runs branch from the stable run at step 90,000:
 
 #v(8pt)
 
-#text(size: 9pt, weight: "bold")[All runs 90k-121k (incl. smallAR big greedy eta + stable bigger beta + top-k set + big gamma+delta)]
+#text(size: 9pt, weight: "bold")[All runs 90k-121k (incl. smallAR + bigger beta + top-k + big gamma+delta + masked delta later)]
 #multi-line-chart(
   (
     (color: stable-color, data: stable-greedy-90),
@@ -421,6 +443,7 @@ All runs branch from the stable run at step 90,000:
     (color: biggerbeta-color, data: biggerbeta-greedy-90),
     (color: topk-color, data: topk-greedy-90),
     (color: biggamma-color, data: biggamma-greedy-90),
+    (color: maskedlater-color, data: maskedlater-greedy-90),
   ),
   width: 170mm,
   height: 45mm,
@@ -433,7 +456,7 @@ All runs branch from the stable run at step 90,000:
 
 #v(4pt)
 
-#text(size: 9pt, weight: "bold")[Delta vs stable (90k-121k) (incl. smallAR big greedy eta + stable bigger beta + top-k set + big gamma+delta)]
+#text(size: 9pt, weight: "bold")[Delta vs stable (90k-121k) (incl. smallAR + bigger beta + top-k + big gamma+delta + masked delta later)]
 #multi-line-chart(
   (
     (color: kl-only-color, data: delta-greedy-kl-only),
@@ -443,6 +466,7 @@ All runs branch from the stable run at step 90,000:
     (color: biggerbeta-color, data: delta-greedy-biggerbeta),
     (color: topk-color, data: delta-greedy-topk),
     (color: biggamma-color, data: delta-greedy-biggamma),
+    (color: maskedlater-color, data: delta-greedy-maskedlater),
   ),
   width: 170mm,
   height: 60mm,
@@ -452,6 +476,23 @@ All runs branch from the stable run at step 90,000:
   y_min: delta-greedy-ext-y-min,
   y_max: delta-greedy-ext-y-max,
   baseline_y: 0.0,
+)
+
+#v(4pt)
+
+#text(size: 9pt, weight: "bold")[Masked Delta later focus vs Stable (90k-121k, partial run)]
+#multi-line-chart(
+  (
+    (color: stable-color, data: stable-greedy-90),
+    (color: maskedlater-color, data: maskedlater-greedy-90),
+  ),
+  width: 170mm,
+  height: 45mm,
+  y_label: "Greedy acc",
+  x_min: branch-x-min,
+  x_max: branch-x-max,
+  y_min: greedy-ext-y-min,
+  y_max: greedy-ext-y-max,
 )
 
 #pagebreak()

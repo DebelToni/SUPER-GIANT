@@ -71,10 +71,10 @@ class OptimizerConfig:
 
 @dataclass
 class LossConfig:
-    """Loss function coefficients for 7-term loss.
+    """Loss function coefficients for 8-term loss.
     
     Loss = alpha*L_AR + beta*L_Diff + rho*KL_fwd + chi*KL_rev
-           + delta*L_hard + eta*L_distill + gamma*L_topk
+           + delta*L_hard + delta_masked*L_hard_prefix + eta*L_distill + gamma*L_topk
     
     Each term with coefficient=0 is skipped entirely (no compute, different JIT trace).
     """
@@ -83,6 +83,7 @@ class LossConfig:
     rho: float = 0.0      # Forward KL: KL(P_AR || Q_Diff)
     chi: float = 0.0      # Reverse KL: KL(Q_Diff || P_AR)
     delta: float = 0.0    # Hard agreement: CE(onehot(argmax P_AR), logits_diff)
+    delta_masked: float = 0.0  # Hard agreement capped up to first AR/Diff argmax mismatch (inclusive)
     eta: float = 0.0      # Soft distillation: KL(softmax(AR/T) || softmax(Diff/T))
     eta_T: float = 1.0    # Distillation temperature
     gamma: float = 0.0    # Top-K set distillation loss
@@ -114,6 +115,7 @@ class StageLossConfig:
     rho: Optional[float] = None
     chi: Optional[float] = None
     delta: Optional[float] = None
+    delta_masked: Optional[float] = None
     eta: Optional[float] = None
     eta_T: Optional[float] = None
     gamma: Optional[float] = None

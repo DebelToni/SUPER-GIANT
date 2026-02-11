@@ -99,13 +99,14 @@ def _compute_alignment_losses(
     rho: float,
     chi: float,
     delta: float,
+    delta_masked: float,
     eta: float,
     eta_T: float,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Compute KL, hard-agreement, and distillation losses between AR and Diff distributions.
     
-    Returns: (kl_fwd_loss, kl_rev_loss, hard_agree_loss, distill_loss)
+    Returns: (kl_fwd_loss, kl_rev_loss, hard_agree_loss, hard_agree_masked_loss, distill_loss)
     """
     S = logits.shape[1] // 2
     
@@ -147,16 +148,33 @@ def _compute_alignment_losses(
     else:
         kl_rev_loss = jnp.array(0.0, dtype=jnp.float32)
     
-    # Hard agreement: CE(onehot(argmax P_AR), logits_diff)
-    if delta > 0.0:
+    # Hard agreement losses: full and prefix-capped-to-first-mismatch variants.
+    if (delta > 0.0) or (delta_masked > 0.0):
         ar_argmax = jnp.argmax(ar_logits_sg, axis=-1)  # [B, S-1]
+        diff_argmax = jnp.argmax(diff_logits_aligned, axis=-1)  # [B, S-1]
         hard_ce = optax.softmax_cross_entropy_with_integer_labels(
             diff_logits_aligned, ar_argmax
         )  # [B, S-1]
-        hard_ce = jnp.where(joint_mask > 0, hard_ce, 0.0)
-        hard_agree_loss = hard_ce.sum() / joint_denom
+
+        if delta > 0.0:
+            hard_ce_full = jnp.where(joint_mask > 0, hard_ce, 0.0)
+            hard_agree_loss = hard_ce_full.sum() / joint_denom
+        else:
+            hard_agree_loss = jnp.array(0.0, dtype=jnp.float32)
+
+        if delta_masked > 0.0:
+            # Keep only positions up to the first mismatch (inclusive) per row.
+            mismatch = (ar_argmax != diff_argmax) & (joint_mask > 0)
+            mismatch_count_before = jnp.cumsum(mismatch.astype(jnp.int32), axis=-1) - mismatch.astype(jnp.int32)
+            prefix_mask = (mismatch_count_before == 0) & (joint_mask > 0)
+            prefix_denom = jnp.maximum(prefix_mask.sum(), 1.0)
+            hard_ce_prefix = jnp.where(prefix_mask, hard_ce, 0.0)
+            hard_agree_masked_loss = hard_ce_prefix.sum() / prefix_denom
+        else:
+            hard_agree_masked_loss = jnp.array(0.0, dtype=jnp.float32)
     else:
         hard_agree_loss = jnp.array(0.0, dtype=jnp.float32)
+        hard_agree_masked_loss = jnp.array(0.0, dtype=jnp.float32)
     
     # Soft distillation: KL(softmax(AR/T) || softmax(Diff/T)) with AR stopgrad
     # Uses the same aligned positions as greedy acceptance (AR 0..S-2 vs Diff S+1..2S-1).
@@ -173,7 +191,7 @@ def _compute_alignment_losses(
     else:
         distill_loss = jnp.array(0.0, dtype=jnp.float32)
     
-    return kl_fwd_loss, kl_rev_loss, hard_agree_loss, distill_loss
+    return kl_fwd_loss, kl_rev_loss, hard_agree_loss, hard_agree_masked_loss, distill_loss
 
 
 def _compute_topk_set_distill_loss(
@@ -231,12 +249,13 @@ def loss_and_metrics(
     compute_accept,
     accept_top_k: int,
     accept_max_positions: int,
+    delta_masked: float = 0.0,  # Hard agreement capped to first mismatch (inclusive)
 ) -> Tuple:
     """
-    Compute TiDAR training loss with 7 configurable terms:
+    Compute TiDAR training loss with 8 configurable terms:
     
     Loss = alpha * L_AR + beta * L_Diff + rho * KL_fwd + chi * KL_rev
-           + delta * L_hard + eta * L_distill + gamma * L_topk
+           + delta * L_hard + delta_masked * L_hard_prefix + eta * L_distill + gamma * L_topk
     
     Where:
       - L_AR: AR next-token prediction CE loss (clean half, shifted)
@@ -244,6 +263,7 @@ def loss_and_metrics(
       - KL_fwd: KL(stopgrad(P_AR) || Q_Diff) - punishes Diff for missing AR mass
       - KL_rev: KL(Q_Diff || stopgrad(P_AR)) - punishes Diff for extra mass
       - L_hard: CE(onehot(argmax stopgrad(P_AR)), logits_diff) - greedy agreement
+      - L_hard_prefix: L_hard on positions up to first AR/Diff argmax mismatch (inclusive)
       - L_distill: KL(softmax(AR/T) || softmax(Diff/T)) on drafted positions (AR stopgrad)
       - L_topk: -log(sum(q_diff[ar_topk])) on drafted positions (AR stopgrad)
     
@@ -291,14 +311,21 @@ def loss_and_metrics(
     # ---------------------------------------------------------------------------
     # Terms 3-6: KL divergences, hard agreement, and distillation
     # ---------------------------------------------------------------------------
-    if (rho > 0.0) or (chi > 0.0) or (delta > 0.0) or (eta > 0.0):
-        kl_fwd_loss, kl_rev_loss, hard_agree_loss, distill_loss = _compute_alignment_losses(
+    if (rho > 0.0) or (chi > 0.0) or (delta > 0.0) or (delta_masked > 0.0) or (eta > 0.0):
+        (
+            kl_fwd_loss,
+            kl_rev_loss,
+            hard_agree_loss,
+            hard_agree_masked_loss,
+            distill_loss,
+        ) = _compute_alignment_losses(
             logits,
             mask_ntp,
             mask_diff,
             rho=rho,
             chi=chi,
             delta=delta,
+            delta_masked=delta_masked,
             eta=eta,
             eta_T=eta_T,
         )
@@ -306,6 +333,7 @@ def loss_and_metrics(
         kl_fwd_loss = jnp.array(0.0, dtype=jnp.float32)
         kl_rev_loss = jnp.array(0.0, dtype=jnp.float32)
         hard_agree_loss = jnp.array(0.0, dtype=jnp.float32)
+        hard_agree_masked_loss = jnp.array(0.0, dtype=jnp.float32)
         distill_loss = jnp.array(0.0, dtype=jnp.float32)
 
     # ---------------------------------------------------------------------------
@@ -330,9 +358,13 @@ def loss_and_metrics(
         + rho * kl_fwd_loss
         + chi * kl_rev_loss
         + delta * hard_agree_loss
+        + delta_masked * hard_agree_masked_loss
         + eta * distill_loss
         + gamma * topk_loss
     )
+
+    # Report a single hard-agreement metric (full + masked) for logging.
+    hard_agree_report = hard_agree_loss + hard_agree_masked_loss
 
     # ---------------------------------------------------------------------------
     # Acceptance metric (optional, for logging)
@@ -368,7 +400,7 @@ def loss_and_metrics(
         diff_loss,
         kl_fwd_loss,
         kl_rev_loss,
-        hard_agree_loss,
+        hard_agree_report,
         distill_loss,
         topk_loss,
         accept_rate,
@@ -394,6 +426,7 @@ def loss_and_grad(
     compute_accept,
     accept_top_k: int,
     accept_max_positions: int,
+    delta_masked: float = 0.0,
 ):
     def loss_fn(p):
         return loss_and_metrics(
@@ -406,6 +439,7 @@ def loss_and_grad(
             rho=rho,
             chi=chi,
             delta=delta,
+            delta_masked=delta_masked,
             eta=eta,
             eta_T=eta_T,
             gamma=gamma,
@@ -428,6 +462,7 @@ def loss_and_grad(
         "rho",
         "chi",
         "delta",
+        "delta_masked",
         "eta",
         "eta_T",
         "gamma",
@@ -449,6 +484,7 @@ def train_step(
     rho: float = 0.0,
     chi: float = 0.0,
     delta: float = 0.0,
+    delta_masked: float = 0.0,
     eta: float = 0.0,
     eta_T: float = 1.0,
     gamma: float = 0.0,
@@ -480,6 +516,7 @@ def train_step(
         rho=rho,
         chi=chi,
         delta=delta,
+        delta_masked=delta_masked,
         eta=eta,
         eta_T=eta_T,
         gamma=gamma,

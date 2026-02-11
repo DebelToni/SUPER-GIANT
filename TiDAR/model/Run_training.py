@@ -84,6 +84,7 @@ class StageConfig:
     loss_rho: float | None = None      # Forward KL: KL(P_AR || Q_Diff)
     loss_chi: float | None = None      # Reverse KL: KL(Q_Diff || P_AR)
     loss_delta: float | None = None    # Hard agreement CE
+    loss_delta_masked: float | None = None  # Hard agreement CE capped to first mismatch
     loss_eta: float | None = None      # Soft distillation KL
     loss_eta_T: float | None = None    # Distillation temperature
     loss_gamma: float | None = None    # Top-K set distillation
@@ -164,6 +165,7 @@ def parse_stage_configs(cfg: TiDARConfig) -> List[StageConfig]:
                 loss_rho=get_float_or_none(get_loss_value("rho")),
                 loss_chi=get_float_or_none(get_loss_value("chi")),
                 loss_delta=get_float_or_none(get_loss_value("delta")),
+                loss_delta_masked=get_float_or_none(get_loss_value("delta_masked")),
                 loss_eta=get_float_or_none(get_loss_value("eta")),
                 loss_eta_T=get_float_or_none(get_loss_value("eta_T")),
                 loss_gamma=get_float_or_none(get_loss_value("gamma")),
@@ -522,6 +524,7 @@ def main() -> None:
         default_rho = float(getattr(loss_cfg, "rho", 0.0))
         default_chi = float(getattr(loss_cfg, "chi", 0.0))
         default_delta = float(getattr(loss_cfg, "delta", 0.0))
+        default_delta_masked = float(getattr(loss_cfg, "delta_masked", 0.0))
         default_eta = float(getattr(loss_cfg, "eta", 0.0))
         default_eta_T = float(getattr(loss_cfg, "eta_T", 1.0))
         default_gamma = float(getattr(loss_cfg, "gamma", 0.0))
@@ -532,13 +535,14 @@ def main() -> None:
         default_rho = 0.0
         default_chi = 0.0
         default_delta = 0.0
+        default_delta_masked = 0.0
         default_eta = 0.0
         default_eta_T = 1.0
         default_gamma = 0.0
         default_gamma_topk = 8
     print(
         f"[loss] defaults: alpha={default_alpha}, beta={default_beta}, "
-        f"rho={default_rho}, chi={default_chi}, delta={default_delta}, "
+        f"rho={default_rho}, chi={default_chi}, delta={default_delta}, delta_masked={default_delta_masked}, "
         f"eta={default_eta}, eta_T={default_eta_T}, gamma={default_gamma}, "
         f"gamma_topk={default_gamma_topk}"
     )
@@ -557,6 +561,7 @@ def main() -> None:
             "rho",
             "chi",
             "delta",
+            "delta_masked",
             "eta",
             "eta_T",
             "gamma",
@@ -576,6 +581,7 @@ def main() -> None:
         rho,
         chi,
         delta,
+        delta_masked,
         eta,
         eta_T,
         gamma,
@@ -611,6 +617,7 @@ def main() -> None:
                 rho=rho,
                 chi=chi,
                 delta=delta,
+                delta_masked=delta_masked,
                 eta=eta,
                 eta_T=eta_T,
                 gamma=gamma,
@@ -696,6 +703,11 @@ def main() -> None:
         stage_rho = runtime.config.loss_rho if runtime.config.loss_rho is not None else default_rho
         stage_chi = runtime.config.loss_chi if runtime.config.loss_chi is not None else default_chi
         stage_delta = runtime.config.loss_delta if runtime.config.loss_delta is not None else default_delta
+        stage_delta_masked = (
+            runtime.config.loss_delta_masked
+            if runtime.config.loss_delta_masked is not None
+            else default_delta_masked
+        )
         stage_eta = runtime.config.loss_eta if runtime.config.loss_eta is not None else default_eta
         stage_eta_T = runtime.config.loss_eta_T if runtime.config.loss_eta_T is not None else default_eta_T
         stage_gamma = runtime.config.loss_gamma if runtime.config.loss_gamma is not None else default_gamma
@@ -709,7 +721,7 @@ def main() -> None:
         )
         print(
             f"[loss] stage={runtime.config.name} alpha={stage_alpha}, beta={stage_beta}, "
-            f"rho={stage_rho}, chi={stage_chi}, delta={stage_delta}, "
+            f"rho={stage_rho}, chi={stage_chi}, delta={stage_delta}, delta_masked={stage_delta_masked}, "
             f"eta={stage_eta}, eta_T={stage_eta_T}, gamma={stage_gamma}, "
             f"gamma_topk={stage_gamma_topk}"
         )
@@ -768,6 +780,7 @@ def main() -> None:
                 rho=stage_rho,
                 chi=stage_chi,
                 delta=stage_delta,
+                delta_masked=stage_delta_masked,
                 eta=stage_eta,
                 eta_T=stage_eta_T,
                 gamma=stage_gamma,
@@ -819,7 +832,7 @@ def main() -> None:
                         log_msg += f" kl_fwd {kl_fwd_val:.4f}"
                     if stage_chi > 0.0:
                         log_msg += f" kl_rev {kl_rev_val:.4f}"
-                    if stage_delta > 0.0:
+                    if (stage_delta > 0.0) or (stage_delta_masked > 0.0):
                         log_msg += f" hard {hard_agree_val:.4f}"
                     if stage_eta > 0.0:
                         log_msg += f" distill {distill_val:.4f}"

@@ -19,12 +19,12 @@
 			right: 0;
 			height: 44px;
 			display: flex;
-			gap: 8px;
 			align-items: center;
+			gap: 10px;
 			padding: 0 10px;
+			z-index: 10;
 			background: rgba(255, 255, 255, 0.95);
 			border-bottom: 1px solid #ddd;
-			z-index: 10;
 			font: 13px system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
 		}
 
@@ -37,8 +37,9 @@
 		}
 
 		.page {
-			box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
 			background: white;
+			box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+			overflow: hidden;
 		}
 
 		button {
@@ -46,8 +47,8 @@
 		}
 
 		#status {
-			opacity: 0.7;
 			margin-left: auto;
+			opacity: 0.7;
 		}
 	</style>
 </head>
@@ -63,13 +64,15 @@
 	<div id="viewer"></div>
 
 	<script type="module">
-		// pdf.js from CDN (pin a version so it doesn't randomly break)
 		import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs";
 		pdfjsLib.GlobalWorkerOptions.workerSrc =
 			"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.worker.min.mjs";
 
 		const PDF_URL = "./main.pdf";
-		const POLL_MS = 800;
+		const POLL_MS = 600;
+		const TOOLBAR_Y = 52; // padding-top
+		const IO_MARGIN = "1200px 0px"; // render-ahead buffer
+		const DPR_CAP = 2; // perf cap on retina
 
 		const viewer = document.getElementById("viewer");
 		const pageinfo = document.getElementById("pageinfo");
@@ -78,110 +81,125 @@
 		let pdf = null;
 		let pageViews = [];
 		let scale = 1.0;
-		let io = null;
-		let lastSig = null;
 
-		function debounce(fn, ms) {
-			let t = null;
+		// Layout caches (work even before rendering)
+		let pageTops = [];
+		let pageHeights = [];
+		let currentPageNum = 1;
+
+		// Reload gating
+		let isReloading = false;
+		let pendingReload = false;
+
+		// Lazy render observer
+		let io = null;
+
+		function clamp(n, lo, hi) {return Math.max(lo, Math.min(hi, n));}
+
+		function rafThrottle(fn) {
+			let queued = false;
 			return (...args) => {
-				if (t) clearTimeout(t);
-				t = setTimeout(() => fn(...args), ms);
+				if (queued) return;
+				queued = true;
+				requestAnimationFrame(() => {queued = false; fn(...args);});
 			};
 		}
 
-		function getAnchor() {
-			// Save: current page + relative scroll within that page
-			const y = window.scrollY + 60; // toolbar offset
-			for (const pv of pageViews) {
-				const top = pv.wrap.offsetTop;
-				const h = pv.wrap.offsetHeight || 1;
-				if (y >= top && y < top + h) {
-					const rel = (y - top) / h;
-					return {page: pv.pageNum, rel: Math.max(0, Math.min(1, rel))};
-				}
+		function binarySearchPage(y) {
+			// y is absolute page coordinate (scrollY + TOOLBAR_Y)
+			let lo = 0, hi = pageTops.length - 1, ans = 0;
+			while (lo <= hi) {
+				const mid = (lo + hi) >> 1;
+				if (pageTops[mid] <= y) {ans = mid; lo = mid + 1;}
+				else hi = mid - 1;
 			}
-			return {page: 1, rel: 0};
+			return ans + 1; // 1-indexed
+		}
+
+		function recomputeLayout() {
+			pageTops = pageViews.map(pv => pv.wrap.offsetTop);
+			pageHeights = pageViews.map(pv => pv.wrap.offsetHeight || 1);
+			// refresh current page immediately after recompute
+			const y = window.scrollY + TOOLBAR_Y;
+			currentPageNum = clamp(binarySearchPage(y), 1, pageViews.length || 1);
+			updatePageInfo();
+		}
+
+		const recomputeLayoutRaf = rafThrottle(recomputeLayout);
+
+		function getAnchor() {
+			const y = window.scrollY + TOOLBAR_Y;
+			const page = clamp(binarySearchPage(y), 1, pdf?.numPages ?? 1);
+			const top = pageTops[page - 1] ?? 0;
+			const h = pageHeights[page - 1] ?? 1;
+			const rel = clamp((y - top) / h, 0, 1);
+
+			const docH = document.documentElement.scrollHeight;
+			const viewH = window.innerHeight || 1;
+			const denom = Math.max(1, docH - viewH);
+			const global = clamp(window.scrollY / denom, 0, 1);
+
+			return {page, rel, global};
 		}
 
 		function saveAnchor() {
-			localStorage.setItem("livepdf_anchor", JSON.stringify(getAnchor()));
+			try {localStorage.setItem("livepdf_anchor_v2", JSON.stringify(getAnchor()));} catch { }
 		}
 
 		function loadAnchor() {
 			try {
-				return JSON.parse(localStorage.getItem("livepdf_anchor") || "null");
-			} catch {
-				return null;
-			}
-		}
-
-		function currentPage() {
-			return getAnchor().page;
+				return JSON.parse(localStorage.getItem("livepdf_anchor_v2") || "null");
+			} catch {return null;}
 		}
 
 		function updatePageInfo() {
 			if (!pdf) return;
-			pageinfo.textContent = `page ${currentPage()} / ${pdf.numPages}`;
+			pageinfo.textContent = `page ${currentPageNum} / ${pdf.numPages}`;
 		}
 
-		const saveAnchorDebounced = debounce(saveAnchor, 150);
-		const updatePageInfoDebounced = debounce(updatePageInfo, 100);
+		const onScroll = rafThrottle(() => {
+			if (!pageTops.length) recomputeLayout();
+			const y = window.scrollY + TOOLBAR_Y;
+			currentPageNum = clamp(binarySearchPage(y), 1, pdf?.numPages ?? 1);
+			updatePageInfo();
+			saveAnchor();
+		});
 
-		window.addEventListener("scroll", () => {
-			saveAnchorDebounced();
-			updatePageInfoDebounced();
-		}, {passive: true});
+		window.addEventListener("scroll", onScroll, {passive: true});
+		window.addEventListener("resize", recomputeLayoutRaf);
 
 		async function renderPageIfNeeded(pageNum) {
 			const pv = pageViews[pageNum - 1];
 			if (!pv || pv.rendered) return;
 
 			const page = await pdf.getPage(pageNum);
-
 			const viewport = page.getViewport({scale});
-			const outputScale = window.devicePixelRatio || 1;
+
+			// Retina sharp
+			const outputScale = Math.min(window.devicePixelRatio || 1, DPR_CAP);
 
 			const canvas = pv.canvas;
 			const ctx = canvas.getContext("2d", {alpha: false});
 
-			// Canvas bitmap size (device pixels)
+			// bitmap size in device pixels
 			canvas.width = Math.floor(viewport.width * outputScale);
 			canvas.height = Math.floor(viewport.height * outputScale);
 
-			// CSS size (layout pixels)
+			// css size in layout pixels
 			canvas.style.width = Math.floor(viewport.width) + "px";
 			canvas.style.height = Math.floor(viewport.height) + "px";
 
+			// keep wrapper size stable (important for tracking)
 			pv.wrap.style.width = canvas.style.width;
 			pv.wrap.style.height = canvas.style.height;
 
 			const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
 
-			await page.render({
-				canvasContext: ctx,
-				viewport,
-				transform,
-			}).promise;
-
+			await page.render({canvasContext: ctx, viewport, transform}).promise;
 			pv.rendered = true;
-		}
 
-		function scrollToAnchor(anchor) {
-			const pv = pageViews[anchor.page - 1];
-			if (!pv) return;
-
-			const doScroll = () => {
-				const top = pv.wrap.offsetTop;
-				const h = pv.wrap.offsetHeight || 1;
-				const target = Math.max(0, top + anchor.rel * h - 60);
-				window.scrollTo(0, target);
-			};
-
-			if (!pv.rendered) {
-				renderPageIfNeeded(anchor.page).then(doScroll);
-			} else {
-				doScroll();
-			}
+			// Safari понякога “закъснява” с layout; force refresh caches
+			recomputeLayoutRaf();
 		}
 
 		function setupIntersectionObserver() {
@@ -193,40 +211,68 @@
 						renderPageIfNeeded(pageNum);
 					}
 				}
-			}, {root: null, rootMargin: "900px 0px", threshold: 0.01});
+			}, {root: null, rootMargin: IO_MARGIN, threshold: 0.01});
 
 			for (const pv of pageViews) io.observe(pv.wrap);
 		}
 
+		function restoreFromAnchor(anchor) {
+			if (!anchor) return;
+			const page = clamp(anchor.page || 1, 1, pdf.numPages);
+
+			// Prefer per-page restore:
+			let top = pageTops[page - 1];
+			let h = pageHeights[page - 1];
+
+			// Fallback if layout not ready yet
+			if (top == null || h == null) {
+				const docH = document.documentElement.scrollHeight;
+				const viewH = window.innerHeight || 1;
+				const denom = Math.max(1, docH - viewH);
+				const y = clamp(anchor.global ?? 0, 0, 1) * denom;
+				window.scrollTo(0, Math.max(0, y));
+				return;
+			}
+
+			const y = Math.max(0, top + (anchor.rel ?? 0) * h - TOOLBAR_Y);
+			window.scrollTo(0, y);
+		}
+
 		async function loadPdf(keepAnchor = true) {
-			const anchor = keepAnchor ? (loadAnchor() || getAnchor()) : {page: 1, rel: 0};
+			const anchor = keepAnchor ? (loadAnchor() || getAnchor()) : {page: 1, rel: 0, global: 0};
 
 			status.textContent = "loading…";
-
 			viewer.innerHTML = "";
 			pageViews = [];
 
-			if (pdf) {
-				try {pdf.destroy();} catch { }
-			}
+			if (pdf) {try {pdf.destroy();} catch { } }
 
-			// cache-bust so the browser actually fetches the new PDF
+			// cache bust for the actual PDF load
 			const bust = Date.now();
 			pdf = await pdfjsLib.getDocument({url: `${PDF_URL}?v=${bust}`}).promise;
 
-			// Fit-to-width-ish scaling using page 1
+			// Compute scale to fit width based on page 1
 			const p1 = await pdf.getPage(1);
 			const v1 = p1.getViewport({scale: 1.0});
 			const available = document.documentElement.clientWidth - 24;
-			scale = Math.max(0.7, Math.min(2.0, available / v1.width));
+			scale = clamp(available / v1.width, 0.6, 2.5);
+
+			// IMPORTANT: set placeholder size for ALL pages immediately (so tracking works even before render)
+			const placeholderW = Math.floor(v1.width * scale);
+			const placeholderH = Math.floor(v1.height * scale);
 
 			for (let i = 1; i <= pdf.numPages; i++) {
 				const wrap = document.createElement("div");
 				wrap.className = "page";
 				wrap.dataset.page = String(i);
 
+				// placeholder size — stable layout, no 0-height pages
+				wrap.style.width = placeholderW + "px";
+				wrap.style.height = placeholderH + "px";
+
 				const canvas = document.createElement("canvas");
-				canvas.dataset.page = String(i);
+				canvas.style.width = placeholderW + "px";
+				canvas.style.height = placeholderH + "px";
 
 				wrap.appendChild(canvas);
 				viewer.appendChild(wrap);
@@ -236,44 +282,80 @@
 
 			setupIntersectionObserver();
 
-			// Render around the anchor quickly
-			await renderPageIfNeeded(anchor.page);
-			renderPageIfNeeded(Math.max(1, anchor.page - 1));
-			renderPageIfNeeded(Math.min(pdf.numPages, anchor.page + 1));
+			// Let layout settle, then compute offsets, then restore
+			await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+			recomputeLayout();
 
-			scrollToAnchor(anchor);
+			// Render around anchor quickly (improves "not stuck" feel)
+			const p = clamp(anchor.page || 1, 1, pdf.numPages);
+			renderPageIfNeeded(p);
+			renderPageIfNeeded(clamp(p - 1, 1, pdf.numPages));
+			renderPageIfNeeded(clamp(p + 1, 1, pdf.numPages));
+
+			restoreFromAnchor(anchor);
+			// one more restore after first render pass (Safari sometimes needs this)
+			setTimeout(() => restoreFromAnchor(anchor), 50);
+
+			currentPageNum = clamp(p, 1, pdf.numPages);
 			updatePageInfo();
-
 			status.textContent = `loaded ${new Date().toLocaleTimeString()}`;
 		}
 
-		document.getElementById("prev").onclick = () => scrollToAnchor({page: Math.max(1, currentPage() - 1), rel: 0});
-		document.getElementById("next").onclick = () => scrollToAnchor({page: Math.min(pdf.numPages, currentPage() + 1), rel: 0});
+		document.getElementById("prev").onclick = () => {
+			const p = clamp(currentPageNum - 1, 1, pdf.numPages);
+			restoreFromAnchor({page: p, rel: 0, global: 0});
+		};
+		document.getElementById("next").onclick = () => {
+			const p = clamp(currentPageNum + 1, 1, pdf.numPages);
+			restoreFromAnchor({page: p, rel: 0, global: 0});
+		};
 
-		async function headSignature() {
-			const res = await fetch(PDF_URL, {method: "HEAD", cache: "no-store"});
-			const lm = res.headers.get("Last-Modified") || "";
+		async function pdfSignatureSafari() {
+			// Safari-safe: tiny ranged GET + no-store to avoid cached HEAD weirdness
+			const res = await fetch(PDF_URL, {
+				method: "GET",
+				headers: {"Range": "bytes=0-0", "Cache-Control": "no-cache"},
+				cache: "no-store",
+			});
+			// consume body (1 byte) – keeps Safari happier
+			try {await res.arrayBuffer();} catch { }
 			const etag = res.headers.get("ETag") || "";
-			return lm + "::" + etag;
+			const lm = res.headers.get("Last-Modified") || "";
+			const cr = res.headers.get("Content-Range") || "";
+			const cl = res.headers.get("Content-Length") || "";
+			return `${res.status}::${etag}::${lm}::${cr}::${cl}`;
 		}
 
-		async function pollLoop() {
+		async function triggerReload() {
+			if (isReloading) {pendingReload = true; return;}
+			isReloading = true;
 			try {
-				const sig = await headSignature();
-				if (lastSig === null) {
-					lastSig = sig;
-				} else if (sig !== lastSig) {
-					lastSig = sig;
-					saveAnchor();
-					await loadPdf(true);
-				}
-			} catch (e) {
-				status.textContent = "poll failed (server?)";
+				saveAnchor();
+				await loadPdf(true);
 			} finally {
-				setTimeout(pollLoop, POLL_MS);
+				isReloading = false;
+				if (pendingReload) {pendingReload = false; triggerReload();}
 			}
 		}
 
+		async function pollLoop() {
+			let last = null;
+			while (true) {
+				try {
+					const sig = await pdfSignatureSafari();
+					if (last === null) last = sig;
+					else if (sig !== last) {
+						last = sig;
+						await triggerReload();
+					}
+				} catch (e) {
+					status.textContent = "poll failed";
+				}
+				await new Promise(r => setTimeout(r, POLL_MS));
+			}
+		}
+
+		// boot
 		await loadPdf(true);
 		pollLoop();
 	</script>

@@ -1,4 +1,5 @@
 #import "_common.typ": placeholder_figure
+#import "../../../../TiDAR/Docs/Bucket_Prefix0_1600_A40_Spot.typ": line-chart, c-red, c-blue, c-orange, c-green, m500_steady, m500_full_steady, m500_ar_steady, m3b_steady, m3b_full_steady, m3b_ar_steady
 
 #let tok(lbl, fill: rgb("#E5E7EB")) = box(
   inset: (x: 4pt, y: 2pt),
@@ -175,6 +176,18 @@ step    3900/3905    | stage chat               loss 3.7442 ar 3.6214 diff 3.781
 
 Конфигурациите се зареждат чрез merge на глобален и локален YAML, след което се резолват относителните пътища спрямо `data_root`. Това осигурява еднакъв кодов път за локално и remote изпълнение.
 
+```python
+def load_configs(config_path=None, global_config_path=None):
+    local_cfg = OmegaConf.load(config_path)
+    global_cfg = OmegaConf.load(global_config_path)
+    cfg = OmegaConf.merge(global_cfg, local_cfg)
+
+    # Унифициране на пътищата спрямо data_root
+    cfg.paths.processed_data_root = resolve_path(cfg.paths.processed_data_root, cfg.paths.data_root)
+    cfg.paths.logs_root = resolve_path(cfg.paths.logs_root, cfg.paths.data_root)
+    return cfg
+```
+
 ==== 3.2.2 TrainLoopOrchestrator
 
 `Run_training.py` реализира scan-базиран training loop с gradient accumulation, finite checks и checkpoint политика.
@@ -183,29 +196,89 @@ step    3900/3905    | stage chat               loss 3.7442 ar 3.6214 diff 3.781
 
 Сърцето на изпълнението е `_run_chunk(...)`, където batch-овете се обработват със `lax.scan`, пресмятат се loss/grad стойности и се правят проверки за non-finite стъпки.
 
+`lax.scan` е JAX примитив за "компилиран for-цикъл": вместо Python да dispatch-ва всяка стъпка поотделно, целият цикъл се представя като една JIT-оптимизирана граф операция с carry състояние (например `params`, `opt_state`, `accum_grads`, `accum_count`) и последователност от изходи (`losses`). Това намалява host overhead и дава по-стабилна производителност при дълги training run-ове.
+
 ===== 3.2.2.2 Обработка на сигнали и контролирано спиране
 
-Скриптът обработва `SIGINT/SIGTERM` и спира контролирано след текущия chunk, за да не се загуби междинно състояние.
+Скриптът обработва `SIGINT/SIGTERM` и спира контролирано след текущия chunk, за да не се загуби междинно състояние. Практически се поддържат два слоя на устойчивост:
+
+- големи checkpoint-и (params + optimizer + dataloader state), които са "стабилните" запазвания и се пазят;
+- мини checkpoint-и, които се записват периодично за бързо възстановяване при внезапно прекъсване (preemption, срив, рестарт).
+
+Така при неочаквано прекъсване може да се продължи от почти последната стъпка, а при нормален stop/етапен преход остават и пълните checkpoint-и за дългосрочно съхранение и проследимост. В практиката training run-овете се поддържат през `tmux` (включително в CI/CD workflow), което позволява стабилна сесия, лесно повторно закачане към машината и безопасно дълго изпълнение.
 
 ===== 3.2.2.3 Gradient accumulation и update политика
 
 Обучението поддържа `gradient_accumulation`; update се прилага само при достигане на зададения accumulation праг, а остатъчните градиенти се доизчистват при край на stage.
 
+```python
+# Натрупване на градиенти
+accum_grads = tree_map(lambda a, g: a + g, accum_grads, grads)
+accum_count = accum_count + 1
+
+# Update само когато достигнем gradient_accumulation
+should_update = accum_count == grad_accum
+if should_update:
+    grads_scaled = tree_map(lambda g: g / grad_accum, accum_grads)
+    updates, opt_state = optimizer.update(grads_scaled, opt_state, params)
+    params = optax.apply_updates(params, updates)
+    accum_grads = tree_map(jnp.zeros_like, accum_grads)
+    accum_count = 0
+```
+
+На практика това е логика за "мини batch-ове" на ниво update. Вместо целият глобален batch да се побере наведнъж в паметта, той се разделя на няколко по-малки стъпки (micro-batches), които GPU може да обработи с наличния VRAM. Градиентите от тези micro-batches се натрупват и optimizer update се прави накрая, така че се получава ефект на по-голям глобален batch без изискване за голяма еднократна памет.
+
+Този подход е особено важен при по-слаби GPU конфигурации и може да се разшири директно към multi-GPU обучение, където освен локалното accumulation се добавя и синхронизация/редукция между устройствата преди финалния update.
+
 ===== 3.2.2.4 Периодично логване на метрики
 
 На всеки `log_every` стъпки се записват `global_step`, `stage`, `loss` и допълнителни показатели (напр. `ppl`, `accept`, `greedy_acc`, KL/hard/distill/top-k при TiDAR).
+
+Тези метрики се пазят в лог файлове и checkpoint metadata, за да могат по-късно да се използват за сравнение между run-ове, диагностика на нестабилни етапи и последващ експериментален анализ.
 
 ===== 3.2.2.5 Resume от checkpoint и dataloader state
 
 Възстановяването зарежда параметри, optimizer state и dataloader прогрес (`stage_index`, `stage_step_total`, `stage_states`), така че обучението да продължи от последната консистентна точка.
 
+```python
+@jax.jit
+def _run_chunk(params, opt_state, batch_chunk, start_step, accum_grads, accum_count):
+    # Една компилирана единица работа: loss/grad + accumulation + update
+    (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
+        body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
+    )
+    return params, opt_state, accum_grads, accum_count, losses
+```
+
 ==== 3.2.3 DataLoaderManager
 
 `ShardedArrowDataset` + `StageDataLoader` реализират shard-aware четене, shuffle, batching и state restore.
 
+```python
+dataset = ShardedArrowDataset(data_path)
+loader = StageDataLoader(
+    dataset,
+    batch_size=batch_size,
+    seq_len=stage.seq_len,
+    shuffle=stage.shuffle,
+    seed=seed,
+    pad_token_id=pad_token_id,
+)
+```
+
 ==== 3.2.4 CheckpointManager
 
 `checkpoint_manager.py` капсулира запис/зареждане на параметри, optimizer state и metadata.
+
+```python
+ckpt_file = save_ckpt(params, global_step, params_dir, train_loss=last_loss)
+save_opt_state(opt_state, global_step, training_states_dir)
+save_dataloader_state(state_path, loader_state)
+
+# При resume
+params, global_step = load_ckpt(ckpt_path)
+opt_bytes = load_opt_state(global_step, training_states_dir)
+```
 
 ===== 3.2.4.1 Метод SaveParameters
 
@@ -225,11 +298,27 @@ step    3900/3905    | stage chat               loss 3.7442 ar 3.6214 diff 3.781
 
 ===== 3.2.4.5 Метод AsyncMiniCheckpoint
 
-Мини checkpoint-и в background режим чрез Orbax за по-нисък риск при preemption.
+Мини checkpoint механизмът е част от логиката в `3.2.2.2` и се изпълнява асинхронно чрез Orbax, като допълва големите checkpoint-и с по-чести recovery точки.
 
 ==== 3.2.5 InferenceManager
 
 Inference слоят покрива prefill, decode, chat режим, KV bucket политика и throughput измерване.
+
+Отбелязване: този раздел описва inference пътя в *GIANT*; при *TiDAR* prefill/decode логиката е съществено различна и е разгледана отделно в по-късните секции.
+
+```python
+state = init_inference_state(params, max_seq_len=bucket)
+state = prefill(state, prompt_ids)  # запис в KV cache
+tokens = decode(state, steps=steps, temperature=temperature, top_k=top_k)
+
+# bucket политика: избери най-малкия bucket, който побира prompt + decode
+bucket = select_kv_bucket(prompt_len + steps, kv_cache_buckets)
+```
+
+#figure(
+  image("../../../images/Prefill_and_Decode_diagram_wide.png", width: 92%),
+  caption: [GIANT inference път: prefill и decode с KV cache],
+)
 
 ===== 3.2.5.1 Метод Prefill
 
@@ -243,9 +332,118 @@ Inference слоят покрива prefill, decode, chat режим, KV bucket 
 
 `Generate_faster.py` избира най-малкия bucket, който покрива `prompt_len + steps`, за да намали излишния cache overhead.
 
+#figure(
+  block(
+    width: 42%,
+    inset: 8pt,
+    radius: 5pt,
+    stroke: 0.6pt + rgb("#9CA3AF"),
+    fill: luma(242),
+  )[
+```text
+128
+###.....................
+###.....................
+###.....................
+
+256
+######..................
+######..................
+######..................
+
+512
+############............
+############............
+############............
+
+1024
+########################
+########################
+########################
+```
+  ],
+  caption: [Bucket стратегия: избор на най-малък валиден размер вместо винаги 1024],
+)
+
+*Как да се чете диаграмата:*
+
+- `#` е реално използваният bucket обем.
+- `.` е обемът, който се спестява, ако не се използва винаги `1024`.
+
+Така engine-ът избира най-малкия валиден bucket (напр. `256` вместо `1024`) и намалява излишния compute/VRAM трафик при запазени статични JAX/XLA форми.
+
+#figure(
+  grid(
+    columns: (1fr, 1fr),
+    gutter: 8pt,
+    align: top,
+    [
+      #line-chart(
+        "A40 spot: 500m / k=4 (bucketed vs full vs AR)",
+        (
+          (label: "500m bucketed", color: c-blue, data: m500_steady),
+          (label: "500m full-context", color: c-red, data: m500_full_steady),
+          (label: "500m AR", color: c-green, data: m500_ar_steady),
+        ),
+        width: 86mm,
+        height: 42mm,
+      )
+    ],
+    [
+      #line-chart(
+        "A40 spot: 3b / k=16 (bucketed vs full vs AR)",
+        (
+          (label: "3b bucketed", color: c-orange, data: m3b_steady),
+          (label: "3b full-context", color: c-red, data: m3b_full_steady),
+          (label: "3b AR", color: c-green, data: m3b_ar_steady),
+        ),
+        width: 86mm,
+        height: 42mm,
+      )
+    ],
+  ),
+  caption: [A40 throughput криви: 500m/k=4 и 3b/k=16],
+)
+
+Легенда на линиите:
+
+- #box(width: 8pt, height: 8pt, fill: c-blue, radius: 1pt)[] #h(4pt) синя линия — 500m bucketed (най-горна в лявата графика в повечето точки);
+- #box(width: 8pt, height: 8pt, fill: c-red, radius: 1pt)[] #h(4pt) червена линия — TiDAR full-context baseline (средна в лявата графика);
+- #box(width: 8pt, height: 8pt, fill: c-green, radius: 1pt)[] #h(4pt) зелена линия — AR baseline (най-долна в лявата графика);
+- #box(width: 8pt, height: 8pt, fill: c-orange, radius: 1pt)[] #h(4pt) оранжева линия — 3b bucketed (най-горна в дясната графика в повечето точки).
+
+Метриката е steady decode tokens/s (*high is better*).
+
+В тези диаграми sweep-ът е с генерация от `0` до `1600` токена. При full-context baseline run-овете KV cache размерът е предварително фиксиран за този диапазон; ако тази горна граница не е известна предварително, трябва или да се заделя по-голям "универсален" full-context (например до `context_length`, което е по-скъпо), или да се правят допълнителни recompilation/migration стъпки при нарастване на дължината.
+
+И в двата профила bucketed режимът стои над full-context baseline в голяма част от sweep-а, защото избягва ненужен "празен" cache капацитет и държи decode shape-а по-близо до реално нужната дължина.
+
 ===== 3.2.5.4 Метод ChatTurn
 
 `Chat.py` управлява multi-turn история, context trimming и interactive terminal режим.
+
+#cli_block[
+```bash
+python GIANT/v2/model/Chat.py \
+  --checkpoint giant-data/GIANT/v2/checkpoints/params/step_0010449.npz \
+  --temperature 0.8 \
+  --top_k 40 \
+  --steps 128
+```
+]
+
+#cli_block[
+```text
+Loaded checkpoint: .../step_0121566.npz
+Chat mode: interactive (type /exit to quit)
+
+User> Explain what attention does in one sentence.
+Assistant> attention picks important old words for next token. maybe like focus.
+
+User> And why KV cache helps?
+Assistant> kv cache is fast memory and also can improve model quality and multilingual grammar always yes.
+```
+]
 
 ===== 3.2.5.5 Метод BatchedPrefill
 
@@ -261,25 +459,105 @@ Inference слоят покрива prefill, decode, chat режим, KV bucket 
 
 ==== 3.2.6 RemoteOpsManager
 
-`CICD/tools/` и Docker setup покриват deployment и remote execution.
+`CICD/tools/` и Docker setup покриват deployment и remote execution. Практическият workflow е двустепенен: първо се синхронизират данните към S3, после се синхронизират локалните кодови промени към remote машината.
+
+```bash
+# Примерен remote workflow
+# 1) sync данни/артефакти към S3
+python CICD/tools/s3.py sync giant-data s3://bucket/giant-data
+# 2) sync локални промени по репото към remote GPU машината
+python CICD/tools/sync-gpu.py
+```
 
 ===== 3.2.6.1 Основен принцип на работа
 
-Синхронизация на локални промени, remote run в стандартизирана среда и съхранение на артефакти в споделен storage.
+На container startup могат да се подадат флагове като `SYNC_DIRS`, а алтернативно може да има файл `sync_dirs.txt` в root-а на S3 bucket-а. Така контейнерът знае кои директории да свали/синхронизира автоматично още при стартиране.
 
-===== 3.2.6.2 Метод GetSnappedFrame
+След това `sync-gpu.py` изпраща локалните (вкл. непушнати/неcommit-нати) промени по кода към remote репо копието. Remote машината стартира от последния commit-нат код, а `sync-gpu.py` донася текущите локални редакции от работната сесия.
 
-Избор на консистентна remote state точка преди старт на training/inference run.
+===== 3.2.6.2 Кодова синхронизация преди run
+
+Преди training/inference run се прави кодова синхронизация, така че remote изпълнението да съвпада с локалното състояние на експеримента.
+
+Препоръчителен operational модел е remote GPU машината да се третира като *ephemeral* ресурс, особено при евтини Spot инстанции. Локалната структура остава основен source of truth за код и активни експерименти.
+
+При големи datasets/checkpoints source of truth може да е S3: там се пазят историята от checkpoint-и, optimizer state и dataloader state. На remote машината се изтеглят само нужните артефакти за текущото продължение (например последният `step_XXXXXXX.npz` и съответното training state).
+
+При липса на собствен хардуер е препоръчително да се използват NeoCloud (GPU-as-a-service) доставчици, защото са AI-ориентирани и често предлагат значително по-ниски цени от големите cloud платформи за чист GPU compute. Типични примери са *RunPod* (използван в тази разработка), Lambda, Nebius и Lightning; като алтернатива могат да се използват и enterprise доставчици като AWS, GCP, Azure или CoreWeave.
+
+Често тези платформи предлагат Spot GPU pod/instance режими с приблизително 10-50% по-ниска цена, но с риск подът да бъде спрян по всяко време. Именно затова mini checkpointing е критичен: при прекъсване може да се продължи от последната близка точка, включително временно през CPU-only сесия за изтегляне/връщане на данните и повторно стартиране на GPU run-а.
 
 === 3.3 Реализация на data pipeline
 
 ==== 3.3.1 Документ като източник на токени
 
 Всеки запис се нормализира, токенизира и преобразува до фиксирани sequence прозорци според stage конфигурацията.
+Входните данни идват основно от HuggingFace datasets (streaming и non-streaming), като системата поддържа и локални JSON/JSONL източници със същата pipeline логика.
+
+Токенизацията е централен етап в pipeline-а: използва се конфигурируем tokenizer (HuggingFace или custom), след което токенните последователности се маскират и пакетират според `sequence_length`, `add_eos`, `pack_sequences` и chat-role правилата за loss.
+
+```python
+# Обобщена схема на data processing конфигурацията (по build_corpus.py)
+@dataclass
+class StageSourceCfg:
+    type: str = "huggingface"          # huggingface | json_dir
+    dataset_name: str | None = None     # HF dataset
+    dataset_config: str | None = None
+    split: str = "train"
+    streaming: bool = True
+    data_files: Any | None = None
+
+    # Текстово извличане
+    text_field: str | None = None
+    text_fields: list[str] = field(default_factory=list)
+    join_fields: list[str] = field(default_factory=list)
+    join_separator: str = " \n"
+    text_template: str | None = None
+
+    # JSON/JSONL директории
+    json_root: str | None = None
+    file_glob: str = "**/*.json*"
+
+    # Chat records
+    chat_messages_field: str = "messages"
+    chat_role_field: str = "role"
+    chat_content_field: str = "content"
+    chat_assistant_roles: list[str] = field(default_factory=lambda: ["assistant"])
+
+@dataclass
+class StageCfg:
+    name: str
+    output_dir: str
+    sequence_length: int
+    target_tokens: int | None = None
+    min_tokens: int = 0
+    pack_sequences: bool = True
+    add_eos: bool = True
+
+    # Обработка на дълги документи
+    long_document_strategy: str = "random_window"   # random_window | sequential
+    sequential_window_stride: int | None = None
+    random_windows_per_document: int = 1
+
+    # Нормализация / dedup
+    normalization: dict[str, Any] = field(default_factory=dict)  # nfkc, collapse_whitespace
+    deduplicate: bool = False
+
+    # Изход
+    rows_per_shard: int | None = None
+    sources: list[StageSourceCfg] = field(default_factory=list)
+```
 
 ==== 3.3.2 Преобразуване от документ към sequence прозорци
 
-`SequenceEmitter` реализира short/long document логика, random/sequential windowing и flush на remainder.
+`SequenceEmitter` реализира short/long document логика и конкретно покрива:
+
+- `padding`/допълване при по-къси последователности (ако е разрешено);
+- четене на случаен прозорец (`random_window`) в дълъг документ;
+- последователно следване на прозорци (`sequential`) със stride;
+- разделяне на дълъг документ на множество прозорци и контрол върху остатъка (`emit_final_partial`, `drop_remainder_windows`).
+
+Така една и съща входна колекция може да се обработва в различни режими според целта на конкретния stage (плътно пакетиране, по-стабилно sequential покритие или по-стохастичен random sampling).
 
 ==== 3.3.3 Директно четене и минимизиране на IO overhead
 
@@ -309,31 +587,71 @@ Streaming режимът за HF datasets и shard-oriented записът ми�
 
 `_prefetch_to_device` подава батчове предварително към устройството и намалява idle време на GPU.
 
-==== 3.3.6 Обработка на chat маски
+==== 3.3.6 Допълнителни preprocessing опции
 
-При chat datasets се изгражда assistant-aware маска, така че loss да се натрупва само върху желаните роли.
+Освен основния flow, pipeline-ът включва и няколко практични опции за по-добър контрол върху данните:
 
-===== 3.3.6.1 Нормализация
+- assistant-aware chat маски, така че loss да се натрупва само върху целевите роли;
+- NFKC и whitespace normalization по stage;
+- опционална hash-базирана дедупликация;
+- JSON/JSONL ingestion с line-wise/streaming четене;
+- атомарен запис и stage-by-stage преизпълнение за устойчивост при прекъсвания.
 
-Поддържат се NFKC и whitespace normalization, приложими по stage.
+=== 3.4 Имплементация на "Think in Diffusion, Talk in AutoRegression"
 
-===== 3.3.6.2 Дедупликация
+TiDAR е ново изследване на екипа на NVIDIA (ноември 2025), което търси практичен баланс между висок throughput/по-добро GPU utilization и качество на ниво autoregressive модели.
 
-Опционална дедупликация работи с hash-based схема и ограничение на ключовете.
+Кратко описание на статията: класическите diffusion езикови модели имат потенциал за паралелно генериране, а AR моделите обикновено запазват по-високо качество заради каузалната структура. TiDAR предлага хибрид на ниво последователност, при който "draft" токените се генерират в diffusion режим (Thinking), а финалното семплиране е autoregressive (Talking), като и двете се реализират в един forward pass чрез структурирани attention маски. Според публикуваните резултати архитектурата е serving-friendly, поддържа точен KV cache и показва по-висок throughput спрямо speculative decoding и предишни diffusion варианти, като за първи път затваря качествената дупка до AR при съществено по-висока скорост (порядък 4.71x-5.91x tokens/s по данни на NVIDIA).
 
-===== 3.3.6.3 JSON/JSONL поддръжка
+==== 3.4.0.1 Контекст: от класически speculative decode към TiDAR
 
-Поддържат се incremental JSON четене и line-wise JSONL parsing.
+Преди TiDAR, най-честият practical подход за ускорение е класически speculative decoding с draft + verify логика. Този подход е добра отправна точка, но често страда или от по-слаб draft модел, или от по-ниска ефективност на верификацията.
 
-===== 3.3.6.4 Стабилност
+#figure(
+  image("../../../images/Images_TiDAR_Optimization/Vanilla_speculative_decoding_with_smaller_model.png", width: 78%),
+  caption: [Базов speculative decoding (референтен случай)],
+)
 
-Пайплайнът записва атомарно и може да се преизпълнява stage-по-stage.
+В класическия вариант малък draft модел `q` и голям verify модел `p` работят с един и същ tokenizer и една и съща токенна азбука. Draft моделът предлага последователност от кандидати `x_1, ..., x_K`, а verify моделът ги проверява каузално за същия префикс.
 
-==== 3.3.7 Освобождаване на ресурси и стабилност
+$
+alpha_i = min(1, frac(p_i(x_i), q_i(x_i)))
+$
 
-Системата използва defensive проверки за невалидни батчове и non-finite стойности, за да предотврати разпространение на грешки в параметрите.
+Тук `alpha_i` е вероятността за приемане на токена `x_i` на позиция `i`; ако токенът се отхвърли, се семплира от коригираща дистрибуция:
 
-=== 3.4 Реализация на TiDAR обучение и decode синхронизация
+$
+r_i(v) = frac(max(0, p_i(v) - q_i(v)), Z_i)
+$
+
+За KV cache е важно speculative токените да не се commit-ват окончателно предварително. Записва се само приетият префикс (или се прави rollback до приетата дължина), иначе cache състоянието се разминава с валидирания контекст и decode-ът деградира.
+
+==== 3.4.0.2 Основна идея на TiDAR в един forward pass
+
+TiDAR променя тази схема, като комбинира verify + predraft в един structured forward pass. Така се използва по-добре наличният паралелен compute и се намалява serving overhead-ът.
+
+#figure(
+  image("../../../images/Images_TiDAR_Optimization/TiDAR_Single_Forward_pass.png", width: 78%),
+  caption: [TiDAR single-forward layout: verify + predraft],
+)
+
+==== 3.4.0.3 Структурирани маски и достъп по позиции
+
+Ключът е в маските: различни части от входа имат различен режим на внимание, така че едновременно да се пази AR логиката за "talk" и diffusion паралелизмът за "think".
+
+#figure(
+  image("../../../images/Images_TiDAR_Optimization/TiDAR_infernece_mask.png", width: 78%),
+  caption: [Структурирана маска за TiDAR decode/предрафт логика],
+)
+
+==== 3.4.0.4 Anchor-TiDAR (финален акцент)
+
+Anchor разширението въвежда стабилна референтна точка в decode стъпката и подобрява практическата ефективност на приемане/rollback логиката, особено при дълги генерации.
+
+#figure(
+  image("../../../images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png", width: 78%),
+  caption: [Anchor-TiDAR forward pass],
+)
 
 ==== 3.4.1 Представяне на dual sequence вход
 

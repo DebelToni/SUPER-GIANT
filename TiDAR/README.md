@@ -17,7 +17,7 @@ TiDAR trains a single decoder-only transformer under two attention regimes: stan
 <img width="1633" height="439" alt="image" src="https://github.com/user-attachments/assets/f385fe3f-4b34-48e4-b3f3-65036f2125c4" />
 
 Reference how normal speculative decoding works:
-![Speculative Decoding Explained:](../docs+archive/images/Images_TiDAR_Optimization/8F4405E8-81BE-419A-BEDF-163F3D7E30E3.png)
+![Speculative Decoding Explained:](../docs+archive/images/Images_TiDAR_Optimization/Vanilla_speculative_decoding_with_smaller_model.png)
 
 ---
 
@@ -42,7 +42,7 @@ The idea is that in training runs we can choose to add or remove terms based on 
 
 Anchor-TiDAR samples an anchor token from the previous AR logit and commits it immediately, then verifies positions 1..K-1 only. This guarantees at least +1 token progress per step and removes the worst-case no-progress case when all drafts reject, while keeping the same single-pass predraft structure.
 
-![How Anchor TiDAR forward pass looks](../docs+archive/images/Images_TiDAR_Optimization/269417BB-1FB0-4AAD-BDE1-65C51324DFD0.png)
+![How Anchor TiDAR forward pass looks](../docs+archive/images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png)
 
 Visual example of how Anchor-TiDAR works during inference:
 

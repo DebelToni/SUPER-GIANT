@@ -1,0 +1,34 @@
+= Използвана литература
+
+- Vaswani, A. et al. *Attention Is All You Need*. NeurIPS 2017. https://arxiv.org/abs/1706.03762
+- Zhang, B., Sennrich, R. *Root Mean Square Layer Normalization (RMSNorm)*. 2019. https://arxiv.org/abs/1910.07467
+- Su, J. et al. *RoFormer: Enhanced Transformer with Rotary Position Embedding*. 2021. https://arxiv.org/abs/2104.09864
+- Shazeer, N. *GLU Variants Improve Transformer*. 2020. https://arxiv.org/abs/2002.05202
+- Dao, T. et al. *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness*. 2022. https://arxiv.org/abs/2205.14135
+- Dao, T. *FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning*. 2023. https://arxiv.org/abs/2307.08691
+- Leviathan, Y., Kalman, M., Matias, Y. *Fast Inference from Transformers via Speculative Decoding*. 2023. https://arxiv.org/abs/2211.17192
+- Stern, M. et al. *Blockwise Parallel Decoding for Deep Autoregressive Models*. 2018. https://arxiv.org/abs/1811.03115
+- Cai, T. et al. *Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads*. 2024. https://arxiv.org/abs/2401.10774
+- Li, Y. et al. *EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty*. 2024. https://arxiv.org/abs/2401.15077
+- NVIDIA Research. *Think in Diffusion, Talk in Autoregression (TiDAR)*. 2025. https://arxiv.org/pdf/2511.08923
+- Touvron, H. et al. *LLaMA: Open and Efficient Foundation Language Models*. 2023. https://arxiv.org/abs/2302.13971
+- Hoffmann, J. et al. *Training Compute-Optimal Large Language Models (Chinchilla)*. 2022. https://arxiv.org/abs/2203.15556
+- Kaplan, J. et al. *Scaling Laws for Neural Language Models*. 2020. https://arxiv.org/abs/2001.08361
+- Kwon, W. et al. *Efficient Memory Management for Large Language Model Serving with PagedAttention (vLLM)*. 2023. https://arxiv.org/abs/2309.06180
+- NVIDIA. *NVIDIA Ampere Architecture In-Depth*. 2020. https://developer.nvidia.com/blog/nvidia-ampere-architecture-in-depth/
+- NVIDIA. *NVIDIA A100 Tensor Core GPU Architecture Whitepaper*. 2020. https://resources.nvidia.com/en-us-tensor-core/nvidia-ampere-architecture-whitepaper
+- NVIDIA. *NVIDIA A40 Datasheet*. 2020. https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/documents/nvidia-rtx-a40-datasheet.pdf
+- JAX Documentation. https://docs.jax.dev/
+- Flax Documentation. https://flax.readthedocs.io/
+- Optax Documentation. https://optax.readthedocs.io/
+- Orbax Checkpointing Documentation. https://orbax.readthedocs.io/
+- Hugging Face Datasets Documentation. https://huggingface.co/docs/datasets
+- Hugging Face Transformers Documentation. https://huggingface.co/docs/transformers
+- OmegaConf Documentation. https://omegaconf.readthedocs.io/
+- Docker Documentation. https://docs.docker.com/
+- Tailscale Documentation. https://tailscale.com/kb
+- s5cmd Documentation. https://github.com/peak/s5cmd
+- Andrej Karpathy. *Let’s build GPT: from scratch, in code, spelled out*. YouTube, 2023. https://www.youtube.com/watch?v=kCc8FmEb1nY
+- Andrej Karpathy. *Neural Networks: Zero to Hero* (video playlist). YouTube. https://karpathy.ai/zero-to-hero.html
+- Andrej Karpathy. *Intro to Large Language Models*. YouTube, 2023. https://www.youtube.com/watch?v=zjkBMFhNj_g
+- Typst Documentation. https://typst.app/docs/

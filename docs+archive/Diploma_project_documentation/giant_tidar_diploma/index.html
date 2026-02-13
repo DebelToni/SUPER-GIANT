@@ -1,0 +1,282 @@
+<!doctype html>
+<html>
+
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width,initial-scale=1" />
+	<title>Live PDF</title>
+	<style>
+		html,
+		body {
+			margin: 0;
+			padding: 0;
+		}
+
+		#toolbar {
+			position: fixed;
+			top: 0;
+			left: 0;
+			right: 0;
+			height: 44px;
+			display: flex;
+			gap: 8px;
+			align-items: center;
+			padding: 0 10px;
+			background: rgba(255, 255, 255, 0.95);
+			border-bottom: 1px solid #ddd;
+			z-index: 10;
+			font: 13px system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+		}
+
+		#viewer {
+			padding-top: 52px;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			gap: 14px;
+		}
+
+		.page {
+			box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+			background: white;
+		}
+
+		button {
+			height: 30px;
+		}
+
+		#status {
+			opacity: 0.7;
+			margin-left: auto;
+		}
+	</style>
+</head>
+
+<body>
+	<div id="toolbar">
+		<button id="prev">◀</button>
+		<button id="next">▶</button>
+		<span id="pageinfo"></span>
+		<span id="status"></span>
+	</div>
+
+	<div id="viewer"></div>
+
+	<script type="module">
+		// pdf.js from CDN (pin a version so it doesn't randomly break)
+		import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs";
+		pdfjsLib.GlobalWorkerOptions.workerSrc =
+			"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.worker.min.mjs";
+
+		const PDF_URL = "./main.pdf";
+		const POLL_MS = 800;
+
+		const viewer = document.getElementById("viewer");
+		const pageinfo = document.getElementById("pageinfo");
+		const status = document.getElementById("status");
+
+		let pdf = null;
+		let pageViews = [];
+		let scale = 1.0;
+		let io = null;
+		let lastSig = null;
+
+		function debounce(fn, ms) {
+			let t = null;
+			return (...args) => {
+				if (t) clearTimeout(t);
+				t = setTimeout(() => fn(...args), ms);
+			};
+		}
+
+		function getAnchor() {
+			// Save: current page + relative scroll within that page
+			const y = window.scrollY + 60; // toolbar offset
+			for (const pv of pageViews) {
+				const top = pv.wrap.offsetTop;
+				const h = pv.wrap.offsetHeight || 1;
+				if (y >= top && y < top + h) {
+					const rel = (y - top) / h;
+					return {page: pv.pageNum, rel: Math.max(0, Math.min(1, rel))};
+				}
+			}
+			return {page: 1, rel: 0};
+		}
+
+		function saveAnchor() {
+			localStorage.setItem("livepdf_anchor", JSON.stringify(getAnchor()));
+		}
+
+		function loadAnchor() {
+			try {
+				return JSON.parse(localStorage.getItem("livepdf_anchor") || "null");
+			} catch {
+				return null;
+			}
+		}
+
+		function currentPage() {
+			return getAnchor().page;
+		}
+
+		function updatePageInfo() {
+			if (!pdf) return;
+			pageinfo.textContent = `page ${currentPage()} / ${pdf.numPages}`;
+		}
+
+		const saveAnchorDebounced = debounce(saveAnchor, 150);
+		const updatePageInfoDebounced = debounce(updatePageInfo, 100);
+
+		window.addEventListener("scroll", () => {
+			saveAnchorDebounced();
+			updatePageInfoDebounced();
+		}, {passive: true});
+
+		async function renderPageIfNeeded(pageNum) {
+			const pv = pageViews[pageNum - 1];
+			if (!pv || pv.rendered) return;
+
+			const page = await pdf.getPage(pageNum);
+
+			const viewport = page.getViewport({scale});
+			const outputScale = window.devicePixelRatio || 1;
+
+			const canvas = pv.canvas;
+			const ctx = canvas.getContext("2d", {alpha: false});
+
+			// Canvas bitmap size (device pixels)
+			canvas.width = Math.floor(viewport.width * outputScale);
+			canvas.height = Math.floor(viewport.height * outputScale);
+
+			// CSS size (layout pixels)
+			canvas.style.width = Math.floor(viewport.width) + "px";
+			canvas.style.height = Math.floor(viewport.height) + "px";
+
+			pv.wrap.style.width = canvas.style.width;
+			pv.wrap.style.height = canvas.style.height;
+
+			const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+
+			await page.render({
+				canvasContext: ctx,
+				viewport,
+				transform,
+			}).promise;
+
+			pv.rendered = true;
+		}
+
+		function scrollToAnchor(anchor) {
+			const pv = pageViews[anchor.page - 1];
+			if (!pv) return;
+
+			const doScroll = () => {
+				const top = pv.wrap.offsetTop;
+				const h = pv.wrap.offsetHeight || 1;
+				const target = Math.max(0, top + anchor.rel * h - 60);
+				window.scrollTo(0, target);
+			};
+
+			if (!pv.rendered) {
+				renderPageIfNeeded(anchor.page).then(doScroll);
+			} else {
+				doScroll();
+			}
+		}
+
+		function setupIntersectionObserver() {
+			if (io) io.disconnect();
+			io = new IntersectionObserver((entries) => {
+				for (const e of entries) {
+					if (e.isIntersecting) {
+						const pageNum = Number(e.target.dataset.page);
+						renderPageIfNeeded(pageNum);
+					}
+				}
+			}, {root: null, rootMargin: "900px 0px", threshold: 0.01});
+
+			for (const pv of pageViews) io.observe(pv.wrap);
+		}
+
+		async function loadPdf(keepAnchor = true) {
+			const anchor = keepAnchor ? (loadAnchor() || getAnchor()) : {page: 1, rel: 0};
+
+			status.textContent = "loading…";
+
+			viewer.innerHTML = "";
+			pageViews = [];
+
+			if (pdf) {
+				try {pdf.destroy();} catch { }
+			}
+
+			// cache-bust so the browser actually fetches the new PDF
+			const bust = Date.now();
+			pdf = await pdfjsLib.getDocument({url: `${PDF_URL}?v=${bust}`}).promise;
+
+			// Fit-to-width-ish scaling using page 1
+			const p1 = await pdf.getPage(1);
+			const v1 = p1.getViewport({scale: 1.0});
+			const available = document.documentElement.clientWidth - 24;
+			scale = Math.max(0.7, Math.min(2.0, available / v1.width));
+
+			for (let i = 1; i <= pdf.numPages; i++) {
+				const wrap = document.createElement("div");
+				wrap.className = "page";
+				wrap.dataset.page = String(i);
+
+				const canvas = document.createElement("canvas");
+				canvas.dataset.page = String(i);
+
+				wrap.appendChild(canvas);
+				viewer.appendChild(wrap);
+
+				pageViews.push({pageNum: i, wrap, canvas, rendered: false});
+			}
+
+			setupIntersectionObserver();
+
+			// Render around the anchor quickly
+			await renderPageIfNeeded(anchor.page);
+			renderPageIfNeeded(Math.max(1, anchor.page - 1));
+			renderPageIfNeeded(Math.min(pdf.numPages, anchor.page + 1));
+
+			scrollToAnchor(anchor);
+			updatePageInfo();
+
+			status.textContent = `loaded ${new Date().toLocaleTimeString()}`;
+		}
+
+		document.getElementById("prev").onclick = () => scrollToAnchor({page: Math.max(1, currentPage() - 1), rel: 0});
+		document.getElementById("next").onclick = () => scrollToAnchor({page: Math.min(pdf.numPages, currentPage() + 1), rel: 0});
+
+		async function headSignature() {
+			const res = await fetch(PDF_URL, {method: "HEAD", cache: "no-store"});
+			const lm = res.headers.get("Last-Modified") || "";
+			const etag = res.headers.get("ETag") || "";
+			return lm + "::" + etag;
+		}
+
+		async function pollLoop() {
+			try {
+				const sig = await headSignature();
+				if (lastSig === null) {
+					lastSig = sig;
+				} else if (sig !== lastSig) {
+					lastSig = sig;
+					saveAnchor();
+					await loadPdf(true);
+				}
+			} catch (e) {
+				status.textContent = "poll failed (server?)";
+			} finally {
+				setTimeout(pollLoop, POLL_MS);
+			}
+		}
+
+		await loadPdf(true);
+		pollLoop();
+	</script>
+</body>
+
+</html>

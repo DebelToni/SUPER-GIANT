@@ -34,11 +34,11 @@
   delta_data: none,
   delta_color: color-delta,
 ) = {
-  let margin-left = 22pt
+  let margin-left = 18pt
   let margin-right = 8pt
   let margin-top = 6pt
   let margin-bottom = 18pt
-  let y-label-gap = 4pt
+  let y-label-area = 16pt
   let plot-width = width - margin-left - margin-right
   let plot-height = height - margin-top - margin-bottom
 
@@ -98,10 +98,16 @@
         #align(center)[#text(size: 8pt)[#(x_label)]]
       ]
     ]
-    #let y-label-x = margin-left - y-label-gap
-    #let y-label-y = margin-top + plot-height / 2
-    #place(right + horizon, dx: y-label-x - width, dy: y-label-y - height / 2)[
-      #rotate(-90deg)[#text(size: 8pt)[#(y_label)]]
+    #place(top + left, dx: 0pt, dy: margin-top)[
+      #box(width: y-label-area, height: plot-height)[
+        #align(center)[
+          #rotate(-90deg, origin: center, reflow: true)[
+            #box(width: plot-height, height: y-label-area)[
+              #align(center)[#text(size: 8pt)[#(y_label)]]
+            ]
+          ]
+        ]
+      ]
     ]
   ]
 }

@@ -38,6 +38,9 @@
   x_max: none,
   y_min: none,
   y_max: none,
+  y_ticks: 0,
+  y_tick_decimals: 2,
+  y_tick_percent: false,
   cut_x: none,
   cut_label: none,
   baseline_y: none,
@@ -46,7 +49,7 @@
   let margin-right = 8pt
   let margin-top = 6pt
   let margin-bottom = 18pt
-  let y-label-gap = 4pt
+  let y-label-gap = -2pt
   let plot-width = width - margin-left - margin-right
   let plot-height = height - margin-top - margin-bottom
 
@@ -82,6 +85,26 @@
       #let base-pos = plot-height - (baseline_y - min-y) * scale-y
       #place(top + left, dx: margin-left, dy: margin-top + base-pos)[
         #line(length: plot-width, stroke: (paint: rgb(170, 170, 170), thickness: 0.6pt, dash: (2pt, 2pt)))
+      ]
+    ]
+    #if y_ticks > 0 [
+      #for i in range(0, y_ticks + 1) [
+        #let yv = min-y + (max-y - min-y) * i / y_ticks
+        #let py = plot-height - (yv - min-y) * scale-y
+        #let yshow = if y_tick_percent { yv * 100 } else { yv }
+        #let ytxt = str(calc.round(yshow, digits: y_tick_decimals))
+        #place(top + left, dx: margin-left - 2pt, dy: margin-top + py)[
+          #line(length: 2pt, stroke: 0.5pt + rgb(120, 120, 120))
+        ]
+        #place(top + left, dx: 0pt, dy: margin-top + py - 4pt)[
+          #box(width: margin-left - 4pt)[
+            #align(right)[
+              #text(size: 6.6pt, fill: rgb(90, 90, 90))[
+                #if y_tick_percent [#ytxt%] else [#ytxt]
+              ]
+            ]
+          ]
+        ]
       ]
     ]
     #for s in series [
@@ -263,6 +286,9 @@
 - *Top-K set (brown)*: `gamma=0.01, gamma_topk=8` -- top-k set distillation (later-stage)
 - *Big Gamma+Delta (indigo)*: `gamma=5, gamma_topk=4, delta=1` -- strong top-k + hard agreement
 - *Masked Delta later (magenta)*: partial 90k+ run, plotted up to available checkpoints
+#text(size: 12pt, weight: "bold", fill: rgb("#DC2626"))[
+> Това е точно идеята, която ми предложи - тествах я вчера.
+]
 - *Delta masked early (cyan)*: short run (under 30k), overlaid on stable full-range Diff/Greedy charts
 
 == Legend
@@ -526,6 +552,9 @@ Prompts (10):
   [Distill \@121k], [2.31 / 3.50 / 1.53], [2.26 / 3.09 / 1.87], [2.19 / 2.74 / 1.80],
   [SmallAR big greedy eta \@105k], [2.15 / 2.88 / 1.75], [2.15 / 2.75 / 1.90], [2.00 / 2.43 / 1.74],
   [Stable bigger beta \@121.5k], [2.37 / 3.27 / 1.63], [2.33 / 3.09 / 1.62], [1.96 / 2.27 / 1.74],
+  [Top-K set \@121k], [2.28 / 3.12 / 1.52], [2.18 / 2.56 / 1.72], [2.19 / 2.91 / 1.56],
+  [Big Gamma+Delta \@105k], [2.32 / 3.33 / 1.67], [2.26 / 2.86 / 1.79], [2.09 / 2.59 / 1.71],
+  [Masked Delta later \@105k], [2.30 / 3.12 / 1.72], [2.34 / 2.86 / 1.72], [2.01 / 2.40 / 1.67],
 )
 
 #pagebreak()

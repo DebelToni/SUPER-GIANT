@@ -46,7 +46,7 @@
 
 Управление на ключови параметри на модела и декодирането:
 
-- `embedding_size`, `num_heads`, `num_kv_heads`, `num_layers`;03-
+- `embedding_size`, `num_heads`, `num_kv_heads`, `num_layers`;
 - `compute_dtype`, `param_dtype`;
 - context length и KV-cache policy;
 - TiDAR `draft_length`, bias стойности и decode режим.
@@ -104,9 +104,9 @@ Flax е избран като надстройка над JAX за структ�
 Основният работен формат за обучителните данни са Arrow shard файлове с manifest и статистики, които са оптимизирани за последователно четене от data loader-а.
 За пренос и синхронизация между среди се използва S3-съвместим storage workflow; JSON/TXT се ползват само като входен или междинен формат в етапа на ingest, а не като основен storage backend.
 
-==== 2.3.2. Клас на времевата линия
+==== 2.3.2 Stage конфигурация и curriculum модел
 
-"Времевата линия" в този проект е curriculum от stages:
+Stage curriculum-ът в този проект е описан с типизирана конфигурация:
 
 ```python
 @dataclass
@@ -122,7 +122,7 @@ class StageConfig:
 
 Конфигурационните домейни са `model`, `optimizer`, `training`, `inference`, `tidar`, комбинирани чрез merge на глобална и локална конфигурация.
 
-==== 2.3.4 Класове за клипове
+==== 2.3.4 Схема на dataset записите в shard
 
 Единичният dataset запис в Arrow шард е фиксиран по дължина и съдържа:
 
@@ -132,7 +132,7 @@ class StageConfig:
 
 `StageDataLoader` преобразува тези полета до `input/target/mask` батч структура.
 
-==== 2.3.5 Класове за източници
+==== 2.3.5 Източници и ingest адаптери
 
 `StageSourceCfg` описва source типа, полетата за текст, chat mapping и streaming поведение. Това позволява единна обработка на различни входни формати.
 
@@ -140,7 +140,7 @@ class StageConfig:
 
 Системата е разделена на три слоя:
 
-- интерфеен слой (CLI + YAML);
+- интерфейсен слой (CLI + YAML);
 - управляващи модули (pipeline, training, inference, checkpoints);
 - математически модел (Transformer + TiDAR разширения).
 

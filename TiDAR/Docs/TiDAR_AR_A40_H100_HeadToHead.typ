@@ -96,10 +96,11 @@ Metric used for charts
   x-label: "prefill tokens",
   y-label: "speedup vs AR (steady TPS)",
 ) = {
-  let margin-left = 30pt
+  let margin-left = 40pt
   let margin-right = 10pt
   let margin-top = 14pt
   let margin-bottom = 24pt
+  let y-label-area = 16pt
   let plot-width = width - margin-left - margin-right
   let plot-height = height - margin-top - margin-bottom
 
@@ -131,8 +132,12 @@ Metric used for charts
       #place(top + left, dx: margin-left, dy: py)[
         #line(length: plot-width, stroke: (paint: rgb("#E5E7EB"), thickness: 0.45pt, dash: (2pt, 2pt)))
       ]
-      #place(top + left, dx: 0pt, dy: py - 4pt)[
-        #text(size: 7pt, fill: rgb("#4B5563"))[#(str(calc.round(yv, digits: 2)))]
+      #place(top + left, dx: y-label-area, dy: py - 4pt)[
+        #box(width: margin-left - y-label-area)[
+          #align(right)[
+            #text(size: 7pt, fill: rgb("#4B5563"))[#(str(calc.round(yv, digits: 2)))]
+          ]
+        ]
       ]
     ]
 
@@ -169,8 +174,16 @@ Metric used for charts
     #place(top + left, dx: margin-left, dy: margin-top + plot-height + 12pt)[
       #text(size: 7.8pt)[#x-label]
     ]
-    #place(top + left, dx: 2pt, dy: margin-top + plot-height / 2 - 22pt)[
-      #rotate(-90deg)[#text(size: 7.8pt)[#y-label]]
+    #place(top + left, dx: 0pt, dy: margin-top)[
+      #box(width: y-label-area, height: plot-height)[
+        #align(center)[
+          #rotate(-90deg, origin: center, reflow: true)[
+            #box(width: plot-height, height: y-label-area)[
+              #align(center)[#text(size: 7.8pt)[#y-label]]
+            ]
+          ]
+        ]
+      ]
     ]
   ]
 }

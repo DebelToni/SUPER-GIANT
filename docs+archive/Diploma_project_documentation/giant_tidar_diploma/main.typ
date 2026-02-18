@@ -51,6 +51,3 @@
 
 #pagebreak()
 #include "sections/08-appendix-resources.typ"
-
-#pagebreak()
-#include "sections/09-experiments-embedded.typ"

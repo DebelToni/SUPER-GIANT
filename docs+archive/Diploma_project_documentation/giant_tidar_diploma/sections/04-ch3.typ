@@ -1,12 +1,27 @@
 #import "_common.typ": placeholder_figure
 #import "../../../../TiDAR/Docs/Bucket_Prefix0_1600_A40_Spot.typ": line-chart, c-red, c-blue, c-orange, c-green, m500_steady, m500_full_steady, m500_ar_steady, m3b_steady, m3b_full_steady, m3b_ar_steady
+#import "../../../../TiDAR/Docs/Finding_Free_token_slots_A40.typ" as fts
+#import "../../../../TiDAR/Docs/KV_Cache_Policy_A40.typ" as kv
+#import "../../../../TiDAR/Docs/TiDAR_AR_A40_H100_HeadToHead.typ" as hh
+#import "../../../../TiDAR/Docs/Results_Greedy_runs_135_360.typ" as rg
+#import "../../../../TiDAR/Docs/TinyStories_TiDAR_losses_Comparison.typ" as tsc
 
-#let tok(lbl, fill: rgb("#E5E7EB")) = box(
+#let tok(lbl, fill: rgb("#E5E7EB"), stroke_color: rgb("#374151")) = box(
+  width: 22pt,
+  height: 12pt,
   inset: (x: 4pt, y: 2pt),
-  stroke: 0.5pt + rgb("#374151"),
+  stroke: 0.5pt + stroke_color,
   fill: fill,
   radius: 2pt,
-)[#text(size: 7.5pt)[#lbl]]
+)[#align(center)[#text(size: 7.5pt)[#lbl]]]
+
+#let tok_pad() = box(
+  width: 22pt,
+  height: 12pt,
+  fill: luma(250),
+  stroke: 0.35pt + luma(220),
+  radius: 2pt,
+)[]
 
 #let cli_block(body) = block(
   width: 100%,
@@ -418,6 +433,58 @@ bucket = select_kv_bucket(prompt_len + steps, kv_cache_buckets)
 
 И в двата профила bucketed режимът стои над full-context baseline в голяма част от sweep-а, защото избягва ненужен "празен" cache капацитет и държи decode shape-а по-близо до реално нужната дължина.
 
+#figure(
+  grid(
+    columns: (1fr, 1fr),
+    gutter: 8pt,
+    row-gutter: 8pt,
+    align: top,
+    [
+      #kv.line-chart(
+        "KV policy 500m: steady",
+        kv.m500_steady,
+        width: 84mm,
+        height: 40mm,
+        y-label: "tokens/s",
+      )
+    ],
+    [
+      #kv.line-chart(
+        "KV policy 500m: first",
+        kv.m500_first,
+        width: 84mm,
+        height: 40mm,
+        y-label: "tokens/s",
+      )
+    ],
+    [
+      #kv.line-chart(
+        "KV policy 3b: steady",
+        kv.m3b_steady,
+        width: 84mm,
+        height: 40mm,
+        y-label: "tokens/s",
+      )
+    ],
+    [
+      #kv.line-chart(
+        "KV policy 3b: first",
+        kv.m3b_first,
+        width: 84mm,
+        height: 40mm,
+        y-label: "tokens/s",
+      )
+    ],
+  ),
+  caption: [KV cache policy резултати (2x2) - 500m/3b, steady/first],
+)
+
+Легенда (KV policy графики):
+
+- #box(width: 8pt, height: 8pt, fill: kv.c-red, radius: 1pt)[] #h(4pt) червена линия — full context policy;
+- #box(width: 8pt, height: 8pt, fill: kv.c-blue, radius: 1pt)[] #h(4pt) синя линия — current exact (`required_len`);
+- #box(width: 8pt, height: 8pt, fill: kv.c-orange, radius: 1pt)[] #h(4pt) оранжева линия — bucketed policy.
+
 ===== 3.2.5.4 Метод ChatTurn
 
 `Chat.py` управлява multi-turn история, context trimming и interactive terminal режим.
@@ -610,7 +677,7 @@ TiDAR е ново изследване на екипа на NVIDIA (ноемвр
 #figure(
   image("../../../images/Images_TiDAR_Optimization/Vanilla_speculative_decoding_with_smaller_model.png", width: 78%),
   caption: [Базов speculative decoding (референтен случай)],
-)
+) <fig-vanilla-spec>
 
 В класическия вариант малък draft модел `q` и голям verify модел `p` работят с един и същ tokenizer и една и съща токенна азбука. Draft моделът предлага последователност от кандидати `x_1, ..., x_K`, а verify моделът ги проверява каузално за същия префикс.
 
@@ -632,46 +699,122 @@ TiDAR променя тази схема, като комбинира verify + p
 
 #figure(
   image("../../../images/Images_TiDAR_Optimization/TiDAR_Single_Forward_pass.png", width: 78%),
-  caption: [TiDAR single-forward layout: verify + predraft],
-)
+  caption: [TiDAR single-forward layout: verify + predraft (diagram from TiDAR paper)],
+) <fig-tidar-single-forward>
+
+На схемата verify частта оценява текущия draft, а predraft частта едновременно предлага следващите кандидати за идната итерация. Ключовият момент е, че това не са два отделни модела, а един и същ TiDAR модел, изпълнен веднъж с различно структурирани attention връзки в рамките на същия forward pass.
+
+Така се спестява допълнителен model orchestration overhead (няма втори draft модел и допълнителен cross-model sync), а наличният GPU compute се използва по-плътно в една обща граф операция.
 
 ==== 3.4.0.3 Структурирани маски и достъп по позиции
 
 Ключът е в маските: различни части от входа имат различен режим на внимание, така че едновременно да се пази AR логиката за "talk" и diffusion паралелизмът за "think".
 
 #figure(
-  image("../../../images/Images_TiDAR_Optimization/TiDAR_infernece_mask.png", width: 78%),
-  caption: [Структурирана маска за TiDAR decode/предрафт логика],
-)
+  image("../../../images/Images_TiDAR_Optimization/TiDAR_infernece_mask.png", width: 64%),
+  caption: [Структурирана маска за TiDAR decode/предрафт логика (diagram from TiDAR paper)],
+) <fig-tidar-decode-mask>
 
-==== 3.4.0.4 Anchor-TiDAR (финален акцент)
+Verify токените виждат каузален контекст по същия принцип както при нормален speculative decoding. Predraft токените виждат останалите токени в своя predraft group с bidirectional attention и едновременно с това виждат префикса до позицията, след която трябва да предсказват, т.е. до съответния draft токен.
+
+==== 3.4.0.4 Prefill маска
+
+Prefill фазата подготвя началното KV-cache състояние за decode, като подава prompt контекста с коректна каузална видимост. Това гарантира, че последващите verify/predraft стъпки стъпват върху консистентна базова история.
+
+От prefill изхода се взима и първият `D*` токен (първият draft токен), който служи като стартова точка за следващата decode итерация.
+
+#figure(
+  image("../../../images/TiDAR_prefill_mask.png", width: 64%),
+  caption: [TiDAR prefill маска (diagram from TiDAR paper)],
+) <fig-tidar-prefill-mask>
+
+==== 3.4.0.5 Training маска
+
+В training режим маската реализира едновременно AR и diffusion режим върху подравнени позиции, така че моделът да учи и следващ токен (causal), и паралелна denoising логика в diffusion частта.
+
+Критичното предимство е, че training входът е с удвоен контекст `[clean | diff]` (приблизително `2S`), а не с decode-подобна експлозия от типа `K + K^2`. Така TiDAR може да се тренира с по-управляем memory/compute профил и със стандартен training pipeline за фиксирана контекстна дължина.
+
+В paper-а е тествано corruption поведение с шум, маска и смесени режими; отчетено е, че вариантът само с mask corruption работи най-добре. Затова и в тази имплементация се използва единен `[MASK]` токен при diffusion частта на training/inference подредбата.
+
+#figure(
+  image("../../../images/TiDAR_training_mask.png", width: 52%),
+  caption: [TiDAR training маска (diagram from TiDAR paper)],
+) <fig-tidar-training-mask>
+
+==== 3.4.0.6 Loss формулировка и баланс AR:Diff
+
+В оригиналната формулировка training целта е:
+
+$
+L_T(omega) = frac(1, 1 + epsilon) (
+  frac(epsilon, S) sum_(i=1)^S L_1(x_i, x_(i+1); omega)
+  + frac(1, S) sum_(i=1)^S L_2(m, x_i; omega)
+)
+$
+
+където `L_1` е AR терминът, `L_2` е diffusion терминът, `m` е `[MASK]` токенът, а `epsilon` контролира баланса между двата терма.
+
+В paper-а е направен sweep за съотношението между двата термина и е наблюдавано, че баланс `1:1` (т.е. `alpha = beta = 1`) е най-стабилен и дава най-добър общ компромис. Тестваният диапазон е около `0.8 .. 1.2` за всеки коефициент.
+
+В тази работа се приема същият принцип: AR и Diff компонентите се държат балансирани като базова настройка, а отклоненията се използват само при целеви експерименти.
+
+==== 3.4.0.7 Anchor-TiDAR (финален акцент)
 
 Anchor разширението въвежда стабилна референтна точка в decode стъпката и подобрява практическата ефективност на приемане/rollback логиката, особено при дълги генерации.
 
 #figure(
   image("../../../images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png", width: 78%),
   caption: [Anchor-TiDAR forward pass],
-)
+) <fig-anchor-forward>
+
+Важно уточнение: Anchor-TiDAR е мое собствено разширение спрямо оригиналния TiDAR paper. В статията акцентът е по-скоро върху това моделът да е обучен достатъчно добре, така че пълен rejection (нула приети draft токени) да се случва минимално рядко, вместо да се описва изрично fallback механизъм за този случай. Ако все пак се случи full rejection, трябва или да се направи нов predraft pass, или да се държи допълнителен `K` набор (още compute), за да се избегне стоп в прогреса.
+
+С Anchor подобрението се гарантира прогрес без нужда от допълнителен predraft compute в тази гранична ситуация, като целта е да се запази качеството на AR изхода. По-нататък е обяснено и как се управлява KV-cache pool-ът със static shape политика.
 
 ==== 3.4.1 Представяне на dual sequence вход
+// COMPACT_CANDIDATE: 3.4.1 може да се съкрати при финален page-budget pass.
 
-TiDAR training конструира вход `[clean | diff]`, където clean половината следва AR режим, а diff половината използва blockwise bidirectional mask.
+TiDAR training конструира вход с дължина `2S` във формат `[clean | diff]`:
+
+- `clean` част (`1..S`) — стандартен AR поток за next-token предсказване;
+- `diff` част (`S+1..2S`) — diffusion поток с `[MASK]` corruption и structured visibility.
+
+На практика се учат две съгласувани задачи върху едни и същи таргети:
+
+- AR: `x_i -> x_(i+1)` по каузален ред;
+- Diff: `masked(x_i) -> x_i` в паралелен blockwise режим.
+
+Това подравняване позволява директно сравнение и комбиниране на AR/Diff логити по позиции, което после се използва и при verify/predraft decode логиката.
+
+Визуална референция за training маската: @fig-tidar-training-mask.
 
 ==== 3.4.2 Преобразуване и маскиране по позиции
+// COMPACT_CANDIDATE: 3.4.2 може да се съкрати при финален page-budget pass.
 
-`tidar_masks.build_tidar_train_bias` реализира правила за достъп между clean/diff токени и block boundaries.
+`tidar_masks.build_tidar_train_bias` създава attention bias матрица, която управлява точно кои позиции се виждат в training pass-а. Ключовите правила са:
 
-#figure(
-  image("../../../images/Images_TiDAR_Optimization/TiDAR_infernece_mask.png", width: 78%),
-  caption: [Маска за TiDAR decode/предрафт логика],
-)
+- clean -> clean: каузален достъп (класически AR);
+- diff вътре в block: bidirectional достъп;
+- diff -> clean prefix: разрешен достъп до нужния контекст;
+- clean/diff към бъдещи невалидни позиции: забранен достъп.
+
+Тези правила гарантират, че AR частта остава каузално коректна, а diffusion частта получава паралелна локална видимост без leakage към бъдеща информация извън допустимия контекст.
+
+Decode/предрафт маската е показана по-горе на @fig-tidar-decode-mask.
 
 ==== 3.4.3 Извличане на verify и predraft логити
+// COMPACT_CANDIDATE: 3.4.3 може да се съкрати при финален page-budget pass.
 
 При inference входът се подрежда като `[current_draft | predraft_masks]`, след което от един forward pass се извличат:
 
 - verify логити за текущия draft;
 - K predraft предложения за следващата стъпка.
+
+Технически това е важно, защото verify и predraft не се изпълняват като две отделни model извиквания. Логитите се взимат от различни позиционни срезове на един и същ output тензор, което:
+
+- намалява host orchestration overhead;
+- подобрява ефективността при static-shape изпълнение;
+- поддържа консистентен KV-cache update модел за следващата итерация.
 
 ==== 3.4.4 KV-cache pointer commit/rollback
 
@@ -682,76 +825,45 @@ Anchor-TiDAR използва optimistic KV write и pointer semantics: прие
   caption: [KV cache развитие по итерации при Anchor-TiDAR],
 )
 
-==== 3.4.5 Подробен decode пример (Anchor-TiDAR)
+==== 3.4.5 Decode сценарий (Anchor-TiDAR)
 
 ```text
-Example of how my TiDAR variant would work in decode
-
-Prefill Input -> Output after sample
-ABC MMM  -> BCD* DEF
-Current KV cache: A B C
-
-Decode step 1 input:
-D*EF MMM MMM MMM
-
-Decode step 1 output after sampling:
-E*F'G' EFG FGH GHI
-Current KV cache: A B C D* E F
-
-Now we check if E* is E from the draft on the input (assume success). Then we check F' to F of the input (assume success). That means we accept the last proposal GHI.
-
-Decode step 2 input:
-(note here we will take G' that we sampled form F on last step and replace it in the GHI block)
-G'HI MMM MMM MMM
-
-Decode step 2 output after sampling:
-H*I'J' HIJ IJK JKL
-Current KV cache: A B C D* E F G' H I
-
-Now we check that I' matches the output from I in the input but for example I'!=I at the input. So we select proposal 2 which is IJK
-
-! Here we did not accept the full draft so we need ot move the pointer that says up to where we have KV cache. Right now it says we have 9 KV caches written but because we did not accept I!=I' we need to bring back the pointer 1 step back. So its current value will be 8 and the cache would contain A B C D* E F G' H
-
-Decode step 3 input:
-(Here we take I' from the sampled from last step instead of the I that is in the IJK block).
-I*JK
+1) Prefill: записваме prompt в KV cache и взимаме стартов D*.
+2) Forward pass: едновременно получаваме verify логити + K predraft предложения.
+3) Acceptance: проверяваме предложените токени по ред и приемаме най-дългия валиден префикс.
+4) Commit/Rollback: KV pointer се премества само до приетата дължина.
+5) Next step: от приетия префикс + новия anchor продължаваме следващата итерация.
 ```
 
-#figure(
-  image("../../../images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png", width: 78%),
-  caption: [Илюстрация на Anchor-TiDAR single-forward decode стъпка],
-)
-
-#figure(
-  image("../../../images/Images_TiDAR_Optimization/TiDAR_Single_Forward_pass.png", width: 78%),
-  caption: [Single-forward layout за TiDAR verify + predraft],
-)
+Визуални референции: @fig-anchor-forward и @fig-tidar-single-forward.
 
 ==== 3.4.6 Допълнителна визуална интерпретация за Mij
 
-```text
-Additional Verbose explenation of how decode pass works:
+Нека `A` е anchor токен, `D1..Dk` са draft токени, а `Mij` е токен в predraft блок `i` на позиция `j`.
 
-At inference draft token Mij from block i sees the prefix tokens + also the anchor token + any currently verified token up to token i (including it) from the draft that is being validated from last step
+`Mij` вижда:
 
-So if we verify this:
-A - anchor
-D - drafts but starting from 1, becasue 0 is the anchor
-Mij - Mask in theoretical draft i, at index j
-```
+- каузално: префикса + anchor + нужния verify префикс;
+- bidirectional: токените в собствения си predraft блок;
+- не вижда: нерелевантните бъдещи блокове извън текущата structured група.
 
 #figure(
   block(inset: 6pt, stroke: 0.6pt + rgb("#D1D5DB"), radius: 4pt)[
+    #align(left)[
     #grid(
       columns: (auto),
       row-gutter: 4pt,
-      [#tok("A", fill: rgb("#FDE68A")) #h(3pt) #tok("D1", fill: rgb("#BFDBFE")) #h(3pt) #tok("D2", fill: rgb("#BFDBFE")) #h(3pt) #tok("D3", fill: rgb("#BFDBFE")) #h(3pt) #tok("D4", fill: rgb("#BFDBFE"))],
-      [#h(18pt) #tok("M00", fill: rgb("#E9D5FF")) #h(3pt) #tok("M01", fill: rgb("#E9D5FF")) #h(3pt) #tok("M02", fill: rgb("#E9D5FF")) #h(3pt) #tok("M03", fill: rgb("#E9D5FF")) #h(3pt) #tok("M04", fill: rgb("#E9D5FF"))],
-      [#h(36pt) #tok("M10", fill: rgb("#E9D5FF")) #h(3pt) #tok("M11", fill: rgb("#E9D5FF")) #h(3pt) #tok("M12", fill: rgb("#E9D5FF")) #h(3pt) #tok("M13", fill: rgb("#E9D5FF")) #h(3pt) #tok("M14", fill: rgb("#E9D5FF"))],
-      [#h(54pt) #tok("M20", fill: rgb("#E9D5FF")) #h(3pt) #tok("M21", fill: rgb("#C4B5FD")) #h(3pt) #tok("M22", fill: rgb("#E9D5FF")) #h(3pt) #tok("M23", fill: rgb("#E9D5FF")) #h(3pt) #tok("M24", fill: rgb("#E9D5FF"))],
-      [#h(72pt) #tok("M30", fill: rgb("#E9D5FF")) #h(3pt) #tok("M31", fill: rgb("#E9D5FF")) #h(3pt) #tok("M32", fill: rgb("#E9D5FF")) #h(3pt) #tok("M33", fill: rgb("#E9D5FF")) #h(3pt) #tok("M34", fill: rgb("#E9D5FF"))],
-      [#h(90pt) #tok("M40", fill: rgb("#E9D5FF")) #h(3pt) #tok("M41", fill: rgb("#E9D5FF")) #h(3pt) #tok("M42", fill: rgb("#E9D5FF")) #h(3pt) #tok("M43", fill: rgb("#E9D5FF")) #h(3pt) #tok("M44", fill: rgb("#E9D5FF"))],
+      [#tok("A", fill: rgb("#FDE68A"), stroke_color: rgb("#DC2626")) #h(3pt) #tok("D1", fill: rgb("#BFDBFE"), stroke_color: rgb("#DC2626")) #h(3pt) #tok("D2", fill: rgb("#BFDBFE"), stroke_color: rgb("#DC2626")) #h(3pt) #tok("D3", fill: rgb("#BFDBFE")) #h(3pt) #tok("D4", fill: rgb("#BFDBFE"))],
+      [#tok_pad() #h(3pt) #tok("M00", fill: rgb("#E9D5FF")) #h(3pt) #tok("M01", fill: rgb("#E9D5FF")) #h(3pt) #tok("M02", fill: rgb("#E9D5FF")) #h(3pt) #tok("M03", fill: rgb("#E9D5FF")) #h(3pt) #tok("M04", fill: rgb("#E9D5FF"))],
+      [#tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok("M10", fill: rgb("#E9D5FF")) #h(3pt) #tok("M11", fill: rgb("#E9D5FF")) #h(3pt) #tok("M12", fill: rgb("#E9D5FF")) #h(3pt) #tok("M13", fill: rgb("#E9D5FF")) #h(3pt) #tok("M14", fill: rgb("#E9D5FF"))],
+      [#tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok("M20", fill: rgb("#E9D5FF"), stroke_color: rgb("#DC2626")) #h(3pt) #tok("M21", fill: rgb("#C4B5FD"), stroke_color: rgb("#DC2626")) #h(3pt) #tok("M22", fill: rgb("#E9D5FF"), stroke_color: rgb("#DC2626")) #h(3pt) #tok("M23", fill: rgb("#E9D5FF"), stroke_color: rgb("#DC2626")) #h(3pt) #tok("M24", fill: rgb("#E9D5FF"), stroke_color: rgb("#DC2626"))],
+      [#tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok("M30", fill: rgb("#E9D5FF")) #h(3pt) #tok("M31", fill: rgb("#E9D5FF")) #h(3pt) #tok("M32", fill: rgb("#E9D5FF")) #h(3pt) #tok("M33", fill: rgb("#E9D5FF")) #h(3pt) #tok("M34", fill: rgb("#E9D5FF"))],
+      [#tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok_pad() #h(3pt) #tok("M40", fill: rgb("#E9D5FF")) #h(3pt) #tok("M41", fill: rgb("#E9D5FF")) #h(3pt) #tok("M42", fill: rgb("#E9D5FF")) #h(3pt) #tok("M43", fill: rgb("#E9D5FF")) #h(3pt) #tok("M44", fill: rgb("#E9D5FF"))],
     )
+    #place(top + left, dx: 80pt, dy: 4pt)[
+      #line(length: 52pt, angle: 90deg, stroke: 1pt + rgb("#DC2626"))
+    ]
+    ]
   ],
   caption: [Triangular visualize на verify/predraft зависимостите; пример с маркиран M21],
 )
@@ -762,16 +874,829 @@ Mij - Mask in theoretical draft i, at index j
 - двупосочно внимание: `M20..M24` (в рамките на собствения блок);
 - липса на внимание към останалите предрафт блокове.
 
+Сравнение с класически speculative decode: @fig-vanilla-spec.
+
+=== 3.5 Експеримент: Free Token Slots
+
+В този раздел се анализира явлението "Free Token Slots" - случаи, в които TiDAR може да използва допълнителна паралелна работа в една decode стъпка по-ефективно от класически AR decode път. Експериментите са върху A40 профили и са свързани директно с избора на structured masks, single-forward verify/predraft и KV-cache стратегията, описани по-горе.
+
+В TiDAR paper-а има сходен тип анализ, но тук той е повторен върху значително по-слаб хардуер (A40 вместо H100), като е разширен и с допълнителни тестове за sampling режими и greedy decoding поведение.
+
+Точно това явление е и основната мотивация зад начина, по който TiDAR е конструиран: да запълва "свободните" изчислителни слотове в decode стъпката с полезна verify/predraft работа, вместо GPU ресурсът да остава неизползван между последователните AR операции.
+
+*Важно за интерпретацията:* показаните throughput резултати са benchmark-нати при зададен теоретичен `accept_rate = 0.8` (около 80% приети токени на итерация). За тези експериментални матрици не са тренирани отделни нови модели за всеки сценарий; сравняват се скоростни профили при фиксирана теоретична accuracy настройка.
+
+==== 3.5.1 Native decode attention
+
 #figure(
-  image("../../../images/Images_TiDAR_Optimization/Vanilla_speculative_decoding_with_smaller_model.png", width: 78%),
-  caption: [Базов speculative decoding (референтен случай за сравнение)],
+  grid(
+    columns: (1fr, 1fr, 1fr),
+    gutter: 8pt,
+    align: top,
+    [
+      #fts.line-chart(
+        "Native decode (1B-style, lower is better)",
+        fts.n1b,
+        width: 58mm,
+        height: 40mm,
+        x-label: "K",
+      )
+    ],
+    [
+      #fts.line-chart(
+        "Native decode (3B-style, lower is better)",
+        fts.n3b,
+        width: 58mm,
+        height: 40mm,
+        x-label: "K",
+      )
+    ],
+    [
+      #fts.line-chart(
+        "Native decode (7B-style, lower is better)",
+        fts.n7b,
+        width: 58mm,
+        height: 40mm,
+        x-label: "K",
+      )
+    ],
+  ),
+  caption: [Free Token Slots - native decode attention при 1B, 3B, 7B (A40)],
 )
 
-Отчетите за:
+Легенда (decode attention графики):
 
-- свободни token slots на A40;
-- throughput head-to-head A40 срещу H100;
-- KV cache policy сравнения;
-- дълги decode sweep-ове;
+- #box(width: 8pt, height: 8pt, fill: fts.c-n-structured, radius: 1pt)[] #h(4pt) синя линия — TiDAR native structured (стандартният decode път със structured mask; почти припокрива се с червената);
+- #box(width: 8pt, height: 8pt, fill: fts.c-n-dense, radius: 1pt)[] #h(4pt) червена линия — TiDAR native dense / no-mask variant (същият decode път, но без подаване на structured mask; долната от двете близки TiDAR линии);
+- #box(width: 8pt, height: 8pt, fill: fts.c-ar, radius: 1pt)[] #h(4pt) лилава линия — AR baseline (`K x len1`, горната линия).
 
-са вградени като оригинален Typst код в `Приложение Б`.
+Наблюдението тук е, че TiDAR native decode кривите остават значително по-плоски спрямо AR baseline, който е мащабиран като `K x len1`. Това е practically важният сигнал за проекта: при нарастване на `K` се получава по-добра амортизация на compute разхода на стъпка и по-добро използване на наличния паралелен ресурс.
+
+==== 3.5.2 Kernel terms (контролен анализ)
+
+#figure(
+  grid(
+    columns: (1fr, 1fr, 1fr),
+    gutter: 8pt,
+    align: top,
+    [
+      #fts.line-chart(
+        "Kernel terms (1B-style, lower is better)",
+        fts.k1b,
+        width: 58mm,
+        height: 40mm,
+        x-label: "K",
+      )
+    ],
+    [
+      #fts.line-chart(
+        "Kernel terms (3B-style, lower is better)",
+        fts.k3b,
+        width: 58mm,
+        height: 40mm,
+        x-label: "K",
+      )
+    ],
+    [
+      #fts.line-chart(
+        "Kernel terms (7B-style, lower is better)",
+        fts.k7b,
+        width: 58mm,
+        height: 40mm,
+        x-label: "K",
+      )
+    ],
+  ),
+  caption: [Kernel terms експеримент за attention pass варианти (1B, 3B, 7B)],
+)
+
+Легенда (kernel terms графики):
+
+- #box(width: 8pt, height: 8pt, fill: fts.c-k-structured, radius: 1pt)[] #h(4pt) синя линия — kernel structured (реално използваният вариант);
+- #box(width: 8pt, height: 8pt, fill: fts.c-k-dense, radius: 1pt)[] #h(4pt) червена линия — kernel dense / no-mask (почти винаги най-долна);
+- #box(width: 8pt, height: 8pt, fill: fts.c-k-densezero, radius: 1pt)[] #h(4pt) зелена линия — dense + jax-zero variant (при K=2,4 е най-долно, при K>4 започва да расте);
+- #box(width: 8pt, height: 8pt, fill: fts.c-ar, radius: 1pt)[] #h(4pt) лилава линия — AR baseline (`K x len1`, консистентно най-горна права линия).
+
+Тези графики са контролен експеримент за различни attention pass варианти и целят да изолират ефекта на маската върху compute профила. Важно: тук не се влиза в custom kernel посока (Pallas/Triton/собствени CUDA/C++ kernel-и); анализът е на текущия production-like decode път. Както и в paper-а, custom kernel оптимизациите остават по-скоро посока за бъдещо развитие.
+
+==== 3.5.3 MLP scaling
+
+#figure(
+  grid(
+    columns: (1fr, 1fr, 1fr),
+    gutter: 8pt,
+    align: top,
+    [
+      #fts.line-chart(
+        "MLP only (1B-style, lower is better)",
+        fts.mlp1b,
+        width: 58mm,
+        height: 40mm,
+        x-label: "K",
+        y-label: "ms / MLP",
+        y-label-dx: 6.5pt,
+      )
+    ],
+    [
+      #fts.line-chart(
+        "MLP only (3B-style, lower is better)",
+        fts.mlp3b,
+        width: 58mm,
+        height: 40mm,
+        x-label: "K",
+        y-label: "ms / MLP",
+        y-label-dx: 6.5pt,
+      )
+    ],
+    [
+      #fts.line-chart(
+        "MLP only (7B-style, lower is better)",
+        fts.mlp7b,
+        width: 58mm,
+        height: 40mm,
+        x-label: "K",
+        y-label: "ms / MLP",
+        y-label-dx: 6.5pt,
+      )
+    ],
+  ),
+  caption: [Free Token Slots - MLP scaling сравнение (1B, 3B, 7B)],
+)
+
+Легенда (MLP графики):
+
+- #box(width: 8pt, height: 8pt, fill: fts.c-mlp-tidar, radius: 1pt)[] #h(4pt) тюркоазена линия — TiDAR MLP при `L = K + K^2` (долната линия);
+- #box(width: 8pt, height: 8pt, fill: fts.c-mlp-ar, radius: 1pt)[] #h(4pt) лилава линия — AR MLP baseline (`K x len1`, горната линия).
+
+MLP графиките подсилват същата идея: при TiDAR токенният блок `L = K + K^2` се обработва в един общ pass, докато AR baseline се акумулира почти линейно с `K`. За текущата архитектура това е ключова връзка между теорията и практиката - structured single-model decode пътят не само работи коректно, а и носи реална throughput полза в настройките, върху които е разработен проектът.
+
+==== 3.5.4 Sampling path (greedy и non-greedy)
+
+#figure(
+  grid(
+    columns: (1fr, 1fr, 1fr),
+    gutter: 8pt,
+    align: top,
+    [
+      #fts.line-chart(
+        "Sampling-only 500m (lower is better)",
+        fts.samp500,
+        width: 58mm,
+        height: 45mm,
+        x-label: "K",
+        y-label: "ms / sampling cycle",
+        y-label-dx: -8pt,
+      )
+    ],
+    [
+      #fts.line-chart(
+        "Sampling-only 1B (lower is better)",
+        fts.samp1b,
+        width: 58mm,
+        height: 45mm,
+        x-label: "K",
+        y-label: "ms / sampling cycle",
+        y-label-dx: -8pt,
+      )
+    ],
+    [
+      #fts.line-chart(
+        "Sampling-only 3B (lower is better)",
+        fts.samp3b,
+        width: 58mm,
+        height: 45mm,
+        x-label: "K",
+        y-label: "ms / sampling cycle",
+        y-label-dx: -8pt,
+      )
+    ],
+  ),
+  caption: [Free Token Slots - sampling-only сравнение (500m, 1B, 3B)],
+)
+
+Легенда (sampling графики):
+
+- #box(width: 8pt, height: 8pt, fill: fts.c-samp-ti-g, radius: 1pt)[] #h(4pt) тюркоазена линия — TiDAR staged sampling, greedy (`top_k=0`);
+- #box(width: 8pt, height: 8pt, fill: fts.c-samp-ar-g, radius: 1pt)[] #h(4pt) лилава линия — AR scaled baseline, greedy (`K x len1`);
+- #box(width: 8pt, height: 8pt, fill: fts.c-samp-ti-ng, radius: 1pt)[] #h(4pt) жълта линия — TiDAR staged sampling, non-greedy (`top_k=50`);
+- #box(width: 8pt, height: 8pt, fill: fts.c-samp-ar-ng, radius: 1pt)[] #h(4pt) червена линия — AR scaled baseline, non-greedy (`top_k=50`).
+
+Sampling-only резултатите показват, че при greedy режим TiDAR държи по-нисък sampling cycle почти по целия диапазон на `K`. При non-greedy (`top_k=50`) има crossover поведение: при ниски `K` разликата е малка/в полза на AR, а при по-високи `K` TiDAR започва да печели, което е в синхрон с целта да се използва по-добре паралелният compute при по-широк draft.
+
+Как работи staged sampling в този benchmark: първо се семплира verify токенът за текущата позиция, след което се прави rejection/select стъпка за predraft предложенията и се семплира само избраният predraft ред за следващата итерация. Така се мери изолирано именно sampling/rejection пътят (без transformer forward), което позволява директно сравнение с AR `K x len1` baseline.
+
+#figure(
+  grid(
+    columns: (1fr, 1fr),
+    gutter: 8pt,
+    align: top,
+    [
+      #fts.delta-bar-chart(
+        "Staged sampling speedup (%) - top_k=0 (higher is better)",
+        fts.micro-topk0,
+        bar-color: fts.c-micro-0,
+        width: 84mm,
+        height: 34mm,
+        title-size: 8.4pt,
+      )
+    ],
+    [
+      #fts.delta-bar-chart(
+        "Staged sampling speedup (%) - top_k=50 (higher is better)",
+        fts.micro-topk50,
+        bar-color: fts.c-micro-50,
+        width: 84mm,
+        height: 34mm,
+        title-size: 8.4pt,
+      )
+    ],
+  ),
+  caption: [Изолиран sampling speedup: staged path спрямо old path],
+)
+
+Практически извод: в тези run-ове sampling частта е малък дял от целия decode wall-time (приблизително под ~1%). Това се вижда от факта, че изолираният sampling speedup е голям, но end-to-end decode подобрението остава около десети от процента; следователно основният bottleneck остава transformer forward пътят, а не самото sampling действие. Въпреки това free token slots остават важни, защото показват къде има неизползван паралелен ресурс и къде следващите оптимизации могат да донесат допълнителен throughput.
+
+=== 3.6 Резултати: TiDAR срещу AR (A40 и H100)
+
+След анализа на Free Token Slots тук показваме head-to-head резултатите за TiDAR срещу AR при еднаква 3b конфигурация върху A40 и H100.
+
+#figure(
+  grid(
+    columns: (58%, 42%),
+    gutter: 8pt,
+    align: top,
+    [
+      #hh.line-chart(
+        "Speedup vs AR by prefill",
+        hh.overlay_speedup_lines,
+        width: 84mm,
+        height: 48mm,
+      )
+    ],
+    [
+      *Легенда:*
+
+      - #box(width: 8pt, height: 8pt, fill: hh.c-a40-k8, radius: 1pt)[] #h(4pt) A40, K=8;
+      - #box(width: 8pt, height: 8pt, fill: hh.c-a40-k16, radius: 1pt)[] #h(4pt) A40, K=16;
+      - #box(width: 8pt, height: 8pt, fill: hh.c-h100-k8, radius: 1pt)[] #h(4pt) H100, K=8;
+      - #box(width: 8pt, height: 8pt, fill: hh.c-h100-k16, radius: 1pt)[] #h(4pt) H100, K=16.
+    ],
+  ),
+  caption: [Head-to-head: speedup vs AR по prefill (A40 + H100)],
+)
+
+#figure(
+  hh.bar-chart(
+    "Speedup vs AR (steady TPS)",
+    hh.overlay_bars,
+    width: 178mm,
+    height: 52mm,
+  ),
+  caption: [Head-to-head: обобщена speedup диаграма (full width)],
+)
+
+#text(size: 12pt, weight: "bold", fill: rgb("#DC2626"))[
+NOTE TO SELF: Re-run A40 vs H100 head-to-head because no shot H100 to lose to A40, altohgugh its prefill and it is really short so can be random. For that run just a huge prefill test.
+]
+
+Тези резултати потвърждават, че наблюдаваните ускорения не са единичен артефакт от една карта, а се запазват и при по-висок клас GPU, като при `K=16` H100 показва най-силна speedup крива.
+
+=== 3.7 Разширена loss функция за TiDAR
+
+Тази секция описва разширената loss формулировка в имплементацията, при която отделните обучителни термини са с независими коефициенти и могат да се комбинират контролирано според целта на конкретния training stage.
+
+==== 3.7.1 Формулировка с независими коефициенти
+
+В практическата имплементация замених нормализацията от paper-а `/(1 + alpha)` с модулна сума от отделни термини, всеки със собствен коефициент. Така всеки компонент може да се усилва, отслабва или да се изключва с нулев коефициент, което прави възможни чисти ablation експерименти и целенасочени комбинации между различни обучителни сигнали.
+
+$
+L = alpha L_(A) + beta L_(D) + rho D_(f) + chi D_(r) + delta L_(H) + delta_(m) L_(P) + eta L_(S) + gamma L_(K)
+$
+
+Където `bar(P_(A))` означава AR разпределение със stop-gradient (без обратен градиент към AR клона).
+
+- `AR` термин:
+
+  $
+  L_(A) = -frac(1, S - 1) sum_(t=0)^(S-2) log P_(A,t)(x_(t+1))
+  $
+
+  Поддържа стандартната next-token езикова способност в clean половината.
+
+- `Diff` термин:
+
+  $
+  L_(D) = -frac(1, S - 1) sum_(t=0)^(S-2) log Q_(D,t)(x_(t+1))
+  $
+
+  Учи diffusion половината да реконструира същата бъдеща цел от mask-нат вход.
+
+- Forward KL термин:
+
+  $
+  D_(f) = sum_v bar(P_(A)(v)) log frac(bar(P_(A)(v)), Q_(D)(v))
+  $
+
+  Наказва Diff, когато изпуска вероятностна маса, която AR счита за важна.
+
+- Reverse KL термин:
+
+  $
+  D_(r) = sum_v Q_(D)(v) log frac(Q_(D)(v), bar(P_(A)(v)))
+  $
+
+  Наказва Diff, когато разпределя излишна маса извън AR разпределението.
+
+- Hard agreement термин:
+
+  $
+  L_(H) = -log Q_(D)(v^*)
+  $
+
+  Притиска greedy избора на Diff да съвпада с greedy избора на AR; `v*` е токенът с най-висока вероятност според AR.
+
+- Masked hard agreement термин (prefix mask):
+
+  $
+  L_(P) = frac(1, N_(P)) sum_(i in P) -log Q_(D,i)(v^*_(A,i))
+  $
+
+  Това е новият "маскиран" hard loss: взима същия hard сигнал, но само върху позициите до първото несъвпадение между AR и Diff (включително). В кода този термин се управлява с отделен коефициент `delta_masked` и служи да фокусира натиска върху префикса, който е най-важен за accept логиката.
+
+- Soft distillation термин:
+
+  $
+  L_(S) = T^2 D(p_(A)^T || p_(D)^T)
+  $
+
+  Пренася "меката" форма на AR разпределението към Diff, без да се фиксира само един токен; `p^T` са температурно-скалирани вероятности.
+
+- Top-K set distillation термин:
+
+  $
+  L_(K) = -log sum_(v in V_K) Q_(D)(v)
+  $
+
+  Концентрира вероятностната маса на Diff в топ-K набора на AR и подобрява шансa за accept при decode; `V_K` е множеството от топ-K AR кандидати.
+
+Важно техническо поведение в кода: при коефициент `0` съответният термин се пропуска напълно от изчислението (`alpha`, `beta`, `rho`, `chi`, `delta`, `delta_masked`, `eta`, `gamma`), което позволява експериментите да се правят с минимален излишен compute и с ясна изолация на ефекта от всеки компонент.
+
+Механизъм на JAX компилацията: в `TiDAR/model/Run_training.py` функцията `_run_chunk` е JIT-компилирана чрез `@partial(jax.jit, static_argnames=...)`, като loss коефициентите са подадени като static аргументи. При нова комбинация от стойности се компилира нов изпълним вариант, а при повторение на същата комбинация се използва кешираният вариант. Тъй като branch-овете в `TiDAR/model/Training_step.py` са условни по коефициент, изключените термини се prune-ват от съответния jaxpr.
+
+=== 3.8 Резултати от greedy run-ове (135M vs 360M)
+
+Тази секция обобщава резултати от реално тренирани TiDAR варианти с `draft_len=8`: 135M и 360M. Данните са от продължителен run (около 5 часа), при който по-големият модел е стартиран с по-голям batch, а логовете са подравнени по optimizer стъпки.
+
+Легенда за сравняваните модели:
+
+- #box(width: 8pt, height: 8pt, fill: rg.color-135, radius: 1pt)[] #h(4pt) 135M модел - run на RTX 5090 (32GB), платена цена за наем 5.23 USD;
+- #box(width: 8pt, height: 8pt, fill: rg.color-360, radius: 1pt)[] #h(4pt) 360M модел - run на RTX PRO 6000 (96GB), платена цена за наем 11.81 USD.
+- #box(width: 8pt, height: 8pt, fill: rg.color-delta, radius: 1pt)[] #h(4pt) сива линия = делта `135M / 360M` (1.0 означава равни стойности).
+
+#figure(
+  grid(
+    columns: (1fr, 1fr),
+    gutter: 8pt,
+    row-gutter: 8pt,
+    align: top,
+    [
+      #rg.compare-chart(
+        (
+          (label: "135M", color: rg.color-135, data: rg.ar-135),
+          (label: "360M", color: rg.color-360, data: rg.ar-360),
+        ),
+        width: 84mm,
+        height: 42mm,
+        x_label: "Optimizer стъпка",
+        y_label: "AR (lower is better)",
+        delta_data: rg.delta-ratio-series(rg.ar-135, rg.ar-360),
+      )
+    ],
+    [
+      #rg.compare-chart(
+        (
+          (label: "135M", color: rg.color-135, data: rg.diff-135),
+          (label: "360M", color: rg.color-360, data: rg.diff-360),
+        ),
+        width: 84mm,
+        height: 42mm,
+        x_label: "Optimizer стъпка",
+        y_label: "Diff (lower is better)",
+        delta_data: rg.delta-ratio-series(rg.diff-135, rg.diff-360),
+      )
+    ],
+    [
+      #rg.compare-chart(
+        (
+          (label: "135M", color: rg.color-135, data: rg.hard-135),
+          (label: "360M", color: rg.color-360, data: rg.hard-360),
+        ),
+        width: 84mm,
+        height: 42mm,
+        x_label: "Optimizer стъпка",
+        y_label: "Hard (lower is better)",
+        delta_data: rg.delta-ratio-series(rg.hard-135, rg.hard-360),
+      )
+    ],
+    [
+      #rg.compare-chart(
+        (
+          (label: "135M", color: rg.color-135, data: rg.acc-135),
+          (label: "360M", color: rg.color-360, data: rg.acc-360),
+        ),
+        width: 84mm,
+        height: 42mm,
+        x_label: "Optimizer стъпка",
+        y_label: "Accept (higher is better)",
+        delta_data: rg.delta-ratio-series(rg.acc-135, rg.acc-360),
+      )
+    ],
+  ),
+  caption: [Обучителни метрики: 135M срещу 360M],
+)
+
+Практически извод: 360M вариантът държи по-стабилни и по-ниски Diff/Hard загуби и по-висок greedy acceptance, но идва с осезаемо по-висока цена във време и ресурс. Моделът е приблизително 2.66 пъти по-голям по брой параметри спрямо 135M, а в реалните run-ове обучението му беше около 3-4 пъти по-бавно. Тези диаграми показват и че началните способности на базовия модел директно се отразяват върху ученето на TiDAR future prediction-ите: по-силният стартов модел учи по-стабилно тази задача, което е консистентно с по-големия му капацитет и с факта, че е предварително трениран върху повече данни. За проекта това е важен ориентир за trade-off между качество, цена и време за итерация при TiDAR training.
+
+=== 3.9 Проведен експеримент с различни loss функции и конфигурации
+
+В този раздел е представен контролиран експеримент за TiDAR post-training с множество loss конфигурации. Основната цел е да се оцени кои комбинации подобряват ключовите метрики (`Diffusion loss` и `Greedy acceptance`), като едновременно с това се запази качеството на оригиналния AR модел (без значимо влошаване на AR loss спрямо последните итерации от базовото GIANT обучение). Дизайнът е избран така, че да поддържа бърз експериментален цикъл: промяна на loss конфигурация, кратък run, метрикa-анализ и следваща итерация.
+
+==== 3.9.0 Избор на TinyStories и базова конфигурация
+
+За експерименталната серия е избран TinyStories, защото е сравнително малък корпус с ниска ентропия. Това позволява бързи итерации#link(<note-fast-iter-39-0>)[#super[1]]<ref-fast-iter-39-0> и ясна интерпретация на ефекта от loss промените. В практиката този тип корпус се научава стабилно и от базов модел около `30M` параметъра, без да е необходимо пълно минаване през целия набор във всеки run.
+
+Базовият GIANT модел в тази серия е дефиниран със следната конфигурация:
+
+#cli_block[
+```yaml
+model:
+  embedding_size: 384
+  num_heads: 6
+  num_kv_heads: 2
+  num_layers: 18
+  feed_forward_size: 1024
+  context_length: 512
+training:
+  batch_size: 32
+  gradient_accumulation: 4
+stages:
+  - dataset: tinystories_512
+    seq_len: 512
+    epochs: 2
+    fraction: 0.75
+```
+]
+
+След базовото AR обучение се преминава към TiDAR post-training със същата архитектура, като началният режим е `alpha=1, beta=1`:
+
+#cli_block[
+```yaml
+tidar:
+  draft_length: 6
+training:
+  batch_size: 16
+  gradient_accumulation: 4
+  loss:
+    alpha: 1.0
+    beta: 1.0
+    rho: 0.0
+    chi: 0.0
+    delta: 0.0
+    eta: 0.0
+stages:
+  - dataset: tinystories_512
+    seq_len: 512
+    epochs: 3
+    fraction: 0.75
+```
+]
+
+Примерни изречения/промпт фрагменти от корпуса:
+
+- "There was a small village."
+- "Once upon a time, a little girl..."
+- "In the forest, a tiny fox..."
+- "One day, the teacher said..."
+- "The robot wanted to learn..."
+
+#text(size: 8pt, fill: rgb("#4B5563"))[#super[1] Тренирането на базовия GIANT 30M параметров модел върху 1.05 милиарда токена отне 33 минути на RTX 5090 (0.89 USD/час), а всеки TiDAR post-training run около 2.5 часа на същия хардуер. Целият експеримент беше проведен в продължение на седмица, защото изискваше междинен анализ след всеки run (включително логитни хистограми), и струва общо около 32 USD. #h(4pt)#link(<ref-fast-iter-39-0>)[↩]] <note-fast-iter-39-0>
+
+==== 3.9.1 Експериментален протокол и избор на checkpoint
+
+Основният TiDAR baseline run (`alpha=1, beta=1`) достига `121566` optimizer стъпки. За сравнителната част е избран checkpoint около `90k`, от който се пускат над 10 различни loss конфигурации до приблизително `121k`, за да се измери ефектът им върху Diffusion/Greedy метриките при близки стартови условия.
+
+Изборът на `90k` е целенасочен: в този етап baseline режимът започва видимо да забавя нормалното си учене при `alpha=beta=1`, което го прави подходяща точка за branch сравнения. Част от експериментите са стартирани и от нулева стъпка за допълнителна проверка на ранната динамика.
+
+Branch-based дизайнът е силен за сравнение, защото:
+
+- елиминира ефекта от различна ранна инициализация;
+- сравнява режимите върху близка checkpoint основа;
+- позволява директни delta криви спрямо baseline по една и съща step ос.
+
+Във файла са използвани два прозореца на анализ:
+
+- пълен прозорец (за стабилния run) `0-121k` за глобална динамика;
+- zoom прозорец `90k-121k` за head-to-head сравнение между branch вариантите.
+
+#figure(
+  grid(
+    columns: (1fr, 1fr),
+    gutter: 8pt,
+    [
+      #tsc.multi-line-chart(
+        ((color: tsc.stable-color, data: tsc.stable-ar),),
+        width: 84mm,
+        height: 44mm,
+        y_label: "AR loss",
+        y_ticks: 4,
+        y_tick_decimals: 1,
+        cut_x: tsc.cut-step,
+        cut_label: "90k",
+        x_min: tsc.stable-x-min,
+        x_max: tsc.branch-x-max,
+      )
+    ],
+    [
+      #move(dx: 4pt)[
+        #tsc.multi-line-chart(
+          ((color: tsc.stable-color, data: tsc.stable-greedy),),
+          width: 84mm,
+          height: 44mm,
+          y_label: "Greedy acc",
+          y_ticks: 4,
+          y_tick_decimals: 0,
+          y_tick_percent: true,
+          cut_x: tsc.cut-step,
+          cut_label: "90k",
+          x_min: tsc.stable-x-min,
+          x_max: tsc.branch-x-max,
+          y_min: tsc.greedy-y-min,
+          y_max: tsc.greedy-y-max,
+        )
+      ]
+    ],
+  ),
+  caption: [Базова траектория и branch cut при 90k стъпка],
+)
+
+==== 3.9.2 Сравнявани loss режими
+
+Легендата по-долу обобщава сравняваните конфигурации в sweep-а. Тя покрива както "меки" alignment сигнали (KL/Distill), така и "твърди" acceptance-ориентирани сигнали (delta, delta_masked, top-k set), което е методологично правилно за TiDAR, където целта не е само нисък loss, а по-ефективен speculative decode.
+
+Легенда на вариантите:
+
+- #box(width: 8pt, height: 8pt, fill: tsc.stable-color, radius: 1pt)[] #h(4pt) Stable - `alpha=1, beta=1`, референтна линия;
+- #box(width: 8pt, height: 8pt, fill: tsc.kl-only-color, radius: 1pt)[] #h(4pt) KL-only - `alpha=0.2, beta=0, rho=0.5, delta=0.3`, без Diff CE;
+- #box(width: 8pt, height: 8pt, fill: tsc.kl-keep-color, radius: 1pt)[] #h(4pt) KL-keep - `alpha=1, beta=1, rho=0.1, delta=0.3`, умерен alignment;
+- #box(width: 8pt, height: 8pt, fill: tsc.distill-color, radius: 1pt)[] #h(4pt) Distill - `alpha=1, beta=1, eta=0.04, T=2`, мека дистилация AR->Diff;
+- #box(width: 8pt, height: 8pt, fill: tsc.smallar-color, radius: 1pt)[] #h(4pt) Greedy eta - агресивен agreement/дистилация режим;
+- #box(width: 8pt, height: 8pt, fill: tsc.biggerbeta-color, radius: 1pt)[] #h(4pt) Bigger beta - `alpha=1, beta=5`, усилен Diff натиск;
+- #box(width: 8pt, height: 8pt, fill: tsc.topk-color, radius: 1pt)[] #h(4pt) Top-K set - `gamma=0.01, gamma_topk=8`, късен stage;
+- #box(width: 8pt, height: 8pt, fill: tsc.biggamma-color, radius: 1pt)[] #h(4pt) Big Gamma+Delta - силен Top-K + hard agreement;
+- #box(width: 8pt, height: 8pt, fill: tsc.maskedlater-color, radius: 1pt)[] #h(4pt) Masked Delta later - частичен 90k+ run с `delta_masked`;
+- #box(width: 8pt, height: 8pt, fill: tsc.deltamasked-color, radius: 1pt)[] #h(4pt) Delta masked early - кратък ранен run под 30k.
+
+Run-ове, които водят до твърде бърза деградация на AR quality (catastrophic forgetting) или показват незначим ефект спрямо основната група, не са включени във финалното сравнение в тази секция.
+
+==== 3.9.3 Интерпретация на AR и Diff кривите
+
+AR панелите показват, че стабилният режим и умерените добавки (KL-keep, Distill) запазват близка и устойчива AR динамика в `90k-121k`. Това означава, че тези варианти не разрушават основната next-token способност.
+
+Diff панелите дават по-силен разделителен сигнал:
+
+- при KL-only (`beta=0`) Diff loss след `90k` става нефункционален като сравним индикатор (затова е изключен от zoom Diff панела);
+- KL-keep и Distill остават в сравним диапазон със stable, което е знак, че дифузионният клон продължава да учи полезно, докато се добавя alignment.
+
+Изводът е, че пълното изключване на Diff CE може да повиши някои acceptance метрики краткосрочно, но отслабва контролa върху самата Diff реконструкция и прави режима по-рисков за дълги run-ове.
+
+#figure(
+  grid(
+    columns: (1fr, 1fr),
+    gutter: 8pt,
+    [
+      #tsc.multi-line-chart(
+        (
+          (color: tsc.stable-color, data: tsc.stable-ar-90),
+          (color: tsc.kl-only-color, data: tsc.kl-only-ar-90),
+          (color: tsc.kl-keep-color, data: tsc.kl-keep-ar-90),
+          (color: tsc.distill-color, data: tsc.distill-ar-90),
+        ),
+        width: 84mm,
+        height: 44mm,
+        y_label: "AR",
+        x_min: tsc.branch-x-min,
+        x_max: tsc.branch-x-max,
+        y_min: tsc.ar-zoom-y-min,
+        y_max: tsc.ar-zoom-y-max,
+      )
+    ],
+    [
+      #tsc.multi-line-chart(
+        (
+          (color: tsc.stable-color, data: tsc.stable-diff-90),
+          (color: tsc.kl-keep-color, data: tsc.kl-keep-diff-90),
+          (color: tsc.distill-color, data: tsc.distill-diff-90),
+        ),
+        width: 84mm,
+        height: 44mm,
+        y_label: "Diff",
+        x_min: tsc.branch-x-min,
+        x_max: tsc.branch-x-max,
+        y_min: tsc.diff-zoom-y-min,
+        y_max: tsc.diff-zoom-y-max,
+      )
+    ],
+  ),
+  caption: [AR и Diff zoom сравнение за 90k-121k],
+)
+
+#figure(
+  tsc.multi-line-chart(
+    (
+      (color: tsc.stable-color, data: tsc.stable-diff),
+      (color: tsc.deltamasked-color, data: tsc.deltamasked-diff),
+    ),
+    width: 170mm,
+    height: 46mm,
+    y_label: "Diff",
+    cut_x: tsc.cut-step,
+    cut_label: "90k",
+    x_min: tsc.stable-x-min,
+    x_max: tsc.branch-x-max,
+  ),
+  caption: [Пълен Diff прозорец: stable срещу ранен delta_masked run],
+)
+
+==== 3.9.4 Greedy acceptance: основен таргет на sweep-а
+
+Greedy acceptance е централната метрика в документа (`argmax(AR) == argmax(Diff)` по валидни позиции). Показаните панели имат три нива на интерпретация:
+
+- absolute панели (90k-121k): сравнение на реалните траектории;
+- delta панели спрямо stable: видимост дали вариантът е устойчиво над/под baseline;
+- extended панели: добавят агресивни режими и по-късни експериментални хипотези.
+
+Най-важните наблюдения за практиката са:
+
+- KL-keep и Distill дават по-добър баланс между acceptance печалба и запазена training стабилност;
+- KL-only може да покаже моментни плюсове в greedy, но на цената на "изключен" Diff обучителен сигнал;
+- по-агресивните режими (напр. Big Gamma+Delta) изискват внимателно stage планиране, защото увеличават чувствителността към хиперпараметри;
+- `delta_masked` (късен и ранен вариант) е концептуално обещаващ, защото натиска точно acceptance-критичния префикс, но частичният характер на част от run-овете налага предпазлива интерпретация.
+
+Част от run-овете са прекратявани по-рано, когато се наблюдава силно покачване на AR loss (catastrophic forgetting) или когато Diffusion/Greedy метриките тръгват устойчиво под основната група. Поради това някои криви са по-къси и не достигат до последните точки от общия прозорец. Всички логове и checkpoint-и от тези run-ове са запазени в репото.
+
+#figure(
+  tsc.multi-line-chart(
+    (
+      (color: tsc.stable-color, data: tsc.stable-greedy-90),
+      (color: tsc.kl-only-color, data: tsc.kl-only-greedy-90),
+      (color: tsc.kl-keep-color, data: tsc.kl-keep-greedy-90),
+      (color: tsc.distill-color, data: tsc.distill-greedy-90),
+    ),
+    width: 170mm,
+    height: 46mm,
+    y_label: "Greedy",
+    x_min: tsc.branch-x-min,
+    x_max: tsc.branch-x-max,
+    y_min: tsc.greedy-y-min,
+    y_max: tsc.greedy-y-max,
+  ),
+  caption: [Greedy acceptance: core варианти в 90k-121k],
+)
+
+#figure(
+  tsc.multi-line-chart(
+    (
+      (color: tsc.kl-only-color, data: tsc.delta-greedy-kl-only),
+      (color: tsc.kl-keep-color, data: tsc.delta-greedy-kl-keep),
+      (color: tsc.distill-color, data: tsc.delta-greedy-distill),
+    ),
+    width: 170mm,
+    height: 46mm,
+    y_label: "Delta",
+    x_min: tsc.branch-x-min,
+    x_max: tsc.branch-x-max,
+    y_min: tsc.delta-greedy-y-min,
+    y_max: tsc.delta-greedy-y-max,
+    baseline_y: 0.0,
+  ),
+  caption: [Delta срещу stable за core вариантите],
+)
+
+#figure(
+  tsc.multi-line-chart(
+    (
+      (color: tsc.stable-color, data: tsc.stable-greedy-90),
+      (color: tsc.kl-only-color, data: tsc.kl-only-greedy-90),
+      (color: tsc.kl-keep-color, data: tsc.kl-keep-greedy-90),
+      (color: tsc.distill-color, data: tsc.distill-greedy-90),
+      (color: tsc.smallar-color, data: tsc.smallar-greedy-90),
+      (color: tsc.biggerbeta-color, data: tsc.biggerbeta-greedy-90),
+      (color: tsc.topk-color, data: tsc.topk-greedy-90),
+      (color: tsc.biggamma-color, data: tsc.biggamma-greedy-90),
+      (color: tsc.maskedlater-color, data: tsc.maskedlater-greedy-90),
+    ),
+    width: 170mm,
+    height: 48mm,
+    y_label: "Greedy",
+    x_min: tsc.branch-x-min,
+    x_max: tsc.branch-x-max,
+    y_min: tsc.greedy-ext-y-min,
+    y_max: tsc.greedy-ext-y-max,
+  ),
+  caption: [Greedy acceptance: разширен набор от всички варианти],
+)
+
+#figure(
+  tsc.multi-line-chart(
+    (
+      (color: tsc.kl-only-color, data: tsc.delta-greedy-kl-only),
+      (color: tsc.kl-keep-color, data: tsc.delta-greedy-kl-keep),
+      (color: tsc.distill-color, data: tsc.delta-greedy-distill),
+      (color: tsc.smallar-color, data: tsc.delta-greedy-smallar),
+      (color: tsc.biggerbeta-color, data: tsc.delta-greedy-biggerbeta),
+      (color: tsc.topk-color, data: tsc.delta-greedy-topk),
+      (color: tsc.biggamma-color, data: tsc.delta-greedy-biggamma),
+      (color: tsc.maskedlater-color, data: tsc.delta-greedy-maskedlater),
+    ),
+    width: 170mm,
+    height: 58mm,
+    y_label: "Delta",
+    x_min: tsc.branch-x-min,
+    x_max: tsc.branch-x-max,
+    y_min: tsc.delta-greedy-ext-y-min,
+    y_max: tsc.delta-greedy-ext-y-max,
+    baseline_y: 0.0,
+  ),
+  caption: [Delta срещу stable за разширения набор],
+)
+
+==== 3.9.5 Inference резултати (Accept/Iter таблица)
+
+Секцията "Inference Results" проверява дали training ефектите се пренасят при реален greedy decode (`temperature=0`, `draft_len=6`) върху 10 промпта и три дължини на генериране (50/100/300 стъпки). Ключовите тенденции в таблицата са:
+
+#figure(
+  table(
+    columns: (auto, auto, auto, auto),
+    align: (left, center, center, center),
+    [Checkpoint], [Steps=50], [Steps=100], [Steps=300],
+    [Stable \@90k], [2.41 / #text(fill: rgb("#C62828"), weight: "bold")[3.50] / 1.63], [2.26 / 2.75 / 1.71], [2.10 / 2.45 / #text(fill: rgb("#C62828"), weight: "bold")[1.88]],
+    [Stable \@121k], [2.22 / 3.27 / 1.53], [2.09 / 2.68 / 1.60], [2.10 / 2.69 / 1.57],
+    [KL-only \@121k], [#text(fill: rgb("#C62828"), weight: "bold")[2.42] / 3.27 / #text(fill: rgb("#C62828"), weight: "bold")[1.81]], [2.30 / 2.68 / 1.80], [2.08 / 2.49 / 1.61],
+    [KL-keep \@121k], [2.40 / 3.27 / 1.75], [2.29 / 2.83 / 1.80], [2.18 / 2.90 / 1.75],
+    [Distill \@121k], [2.31 / #text(fill: rgb("#C62828"), weight: "bold")[3.50] / 1.53], [2.26 / #text(fill: rgb("#C62828"), weight: "bold")[3.09] / 1.87], [#text(fill: rgb("#C62828"), weight: "bold")[2.19] / 2.74 / 1.80],
+    [SmallAR+eta \@105k], [2.15 / 2.88 / 1.75], [2.15 / 2.75 / #text(fill: rgb("#C62828"), weight: "bold")[1.90]], [2.00 / 2.43 / 1.74],
+    [Bigger beta \@121.5k], [2.37 / 3.27 / 1.63], [2.33 / #text(fill: rgb("#C62828"), weight: "bold")[3.09] / 1.62], [1.96 / 2.27 / 1.74],
+    [Top-K set \@121k], [2.28 / 3.12 / 1.52], [2.18 / 2.56 / 1.72], [#text(fill: rgb("#C62828"), weight: "bold")[2.19] / #text(fill: rgb("#C62828"), weight: "bold")[2.91] / 1.56],
+    [Big Gamma+Delta \@105k], [2.32 / 3.33 / 1.67], [2.26 / 2.86 / 1.79], [2.09 / 2.59 / 1.71],
+    [Masked Delta later \@105k], [2.30 / 3.12 / 1.72], [#text(fill: rgb("#C62828"), weight: "bold")[2.34] / 2.86 / 1.72], [2.01 / 2.40 / 1.67],
+  ),
+  caption: [Accept/Iter summary върху 10 TinyStories промпта],
+)
+
+- при `Steps=300` най-силен среден резултат дават Distill (`2.19`) и Top-K set (`2.19`), следвани от KL-keep (`2.18`), над Stable (`2.10`);
+- при `Steps=100` Stable bigger beta достига висока средна стойност (`2.33`), но при дългия хоризонт (`300`) пада до `1.96`, което подсказва по-слабa устойчивост;
+- SmallAR big greedy eta и Masked Delta later са по-агресивни режими и остават под най-добрите устойчиви варианти при по-дълги генерации.
+
+Това потвърждава работната хипотеза, че умереният alignment (KL-keep или Distill) е по-надежден за обща decode ефективност от прекалено силни наказания/насърчения върху отделен компонент.
+
+==== 3.9.6 Локален механистичен анализ чрез logits хистограми
+
+Логитните хистограми дават позиционен анализ на механизма за accept/reject и допълват агрегираните метрики с локална причинна интерпретация. Наблюдава се следният типичен модел:
+
+- в ранните позиции на draft блока AR и Diff често са подравнени по top-1 и токените се приемат;
+- около семантично по-нееднозначни позиции Diff става по-разфокусиран или измества top-1 и там започват rejection-и;
+- точно тези позиции обясняват защо prefix-ориентирани loss-и (като `delta_masked`) имат смисъл: те таргетират момента, в който acceptance веригата се прекъсва.
+
+Този тип визуализация е силен аргумент, че sweep-ът не е "black-box" оптимизация по една метрика, а контролирано търсене на причинно обясними подобрения.
+
+#pagebreak()
+
+#tsc.render-hist(tsc.meta1, tsc.data1)
+
+#v(6pt)
+
+#tsc.render-hist(tsc.meta2, tsc.data2)
+
+#v(6pt)
+
+#tsc.render-hist(tsc.meta3, tsc.data3)
+
+#pagebreak()
+
+==== 3.9.7 Финален на експеримента и план за продължение
+
+Проведеният експеримент изпълнява основната си цел: да валидира end-to-end TiDAR training/inference pipeline и да даде първа сравнителна картина за ефекта от различни loss конфигурации. В същото време резултатите показват, че при текущата постановка разделителната способност между вариантите е ограничена.
+
+Основното наблюдение е силното припокриване на кривите между различните директории/конфигурации. В значителна част от диапазона разликите са минимални и на места практически неразличими визуално. Това е индикация, че в текущия режим доминира влиянието на корпуса, а не на конкретния избор на auxiliary loss.
+
+Работната интерпретация е, че TinyStories е нискоентропиен и силно структуриран корпус. При такава среда локална грешка в отделна позиция често не води до трайно разминаване по следващите токени, защото контекстът остава лесен за възстановяване. Поради това режими като `delta_masked` могат да изглеждат по-слаби в ранния диапазон (`0-30k`), без това задължително да означава по-нисък потенциал на самия метод в по-труден домейн.
+
+Втори ключов фактор е мащабната разлика спрямо оригиналната експериментална среда на NVIDIA. Тук базовият модел и тренировъчният корпус са приблизително 50 пъти по-малки, докато референтната постановка използва значително по-голям предварително обучен модел (Qwen 1.5B) и много по-широка предтренировъчна база. Това ограничение директно намалява чувствителността на експеримента към фини ефекти от loss комбинациите.
+
+Планирано продължение до защитата (следващи ~3 месеца):
+
+- втори експериментален цикъл върху по-информативен корпус от типа OpenWebText/Wikipedia/куриран web text;
+- увеличение на модела и тренировъчния обем, така че loss режимите да се разграничат по-ясно;
+- избор на най-устойчивите конфигурации от този междинен етап и пренасяне към финален training диапазон от порядъка `300M-1B` параметри и `5B-30B` токена.
+
+Следователно текущият експеримент се приема като междинен, но необходим етап: системата е валидирана, наблюдавани са ограниченията на малък/лесен корпус, и е дефиниран конкретен план за доразвитие преди финалната защита.

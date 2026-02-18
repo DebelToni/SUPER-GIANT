@@ -127,11 +127,12 @@ Recent whole-generation sanity check summary (A40, 3b profile)
   height: 62mm,
   x-label: "draft_len (K)",
   y-label: "ms / attention",
+  y-label-dx: 3pt,
 ) = {
   let margin-left = 28pt
   let margin-right = 8pt
   let margin-top = 12pt
-  let margin-bottom = 22pt
+  let margin-bottom = 26pt
   let plot-width = width - margin-left - margin-right
   let plot-height = height - margin-top - margin-bottom
 
@@ -198,10 +199,10 @@ Recent whole-generation sanity check summary (A40, 3b profile)
       ]
     ]
 
-    #place(top + left, dx: margin-left, dy: margin-top + plot-height + 12pt)[
+    #place(top + left, dx: margin-left, dy: margin-top + plot-height + 9pt)[
       #text(size: 7.8pt)[#x-label]
     ]
-    #place(top + left, dx: 0pt, dy: margin-top + plot-height / 2 - 16pt)[
+    #place(top + left, dx: y-label-dx, dy: margin-top + plot-height / 2 - 16pt)[
       #rotate(-90deg)[#text(size: 7.8pt)[#y-label]]
     ]
   ]
@@ -336,6 +337,7 @@ This section separates two different measurements to avoid mixing signals:
   bar-color: c-greedy-delta,
   width: 182mm,
   height: 60mm,
+  title-size: 9.4pt,
 ) = {
   let margin-left = 30pt
   let margin-right = 8pt
@@ -351,7 +353,7 @@ This section separates two different measurements to avoid mixing signals:
   let y-ticks = range(0, 6)
 
   block(width: width, height: height, inset: 5pt, stroke: 0.7pt + rgb("#D1D5DB"), radius: 6pt)[
-    #text(weight: "semibold", size: 9.4pt)[#title]
+    #text(weight: "semibold", size: title-size)[#title]
     #v(2pt)
     #place(top + left, dx: margin-left, dy: margin-top + plot-height)[
       #line(length: plot-width, stroke: 0.6pt + black)
@@ -462,7 +464,7 @@ This page isolates only the sampling/rejection path (no transformer forward) and
 #let c-samp-ar-g = rgb("#7C3AED")
 #let c-samp-ti-g = rgb("#0F766E")
 #let c-samp-ar-ng = rgb("#DC2626")
-#let c-samp-ti-ng = rgb("#0E7490")
+#let c-samp-ti-ng = rgb("#EAB308")
 
 #let sampling-chart-block(title, series) = [
   #block(breakable: false)[

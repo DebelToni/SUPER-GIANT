@@ -2,6 +2,14 @@
 
 == РЪКОВОДСТВО НА ПОТРЕБИТЕЛЯ
 
+#let cli_block(body) = block(
+  width: 100%,
+  inset: 8pt,
+  radius: 5pt,
+  stroke: 0.7pt + rgb("#9CA3AF"),
+  fill: luma(238),
+)[#body]
+
 === 4.1 Инсталация
 
 Базовият начин за стартиране е чрез Docker образите в `CICD/Docker/`.
@@ -35,10 +43,14 @@ docker exec -it giant-training bash
 
 Примери:
 
+#cli_block[
 ```bash
-python GIANT/v2/data_pipeline/build_corpus.py --config GIANT/v2/data_pipeline/Config.yml
-python TiDAR/data_pipeline/Run_pipeline.py --config TiDAR/data_pipeline/data_configs/Greedy_exp_500m.yml
+python GIANT/v2/data_pipeline/build_corpus.py \
+  --config GIANT/v2/data_pipeline/Config.yml
+python TiDAR/data_pipeline/Run_pipeline.py \
+  --config TiDAR/data_pipeline/data_configs/Greedy_exp_500m.yml
 ```
+]
 
 Системата ще генерира Arrow shard-ове и manifest/statistics файлове.
 
@@ -54,10 +66,14 @@ Stage структурата играе ролята на curriculum по вре
 
 Еквивалент: избор на конкретна checkpoint версия за инференс.
 
+#cli_block[
 ```bash
-python GIANT/v2/model/Generate_faster.py --checkpoint latest
-python TiDAR/model/inference.py --checkpoint /proj/giant-data/TiDAR/checkpoints/params/step_0012100.npz
+python GIANT/v2/model/Generate_faster.py \
+  --checkpoint latest
+python TiDAR/model/inference.py \
+  --checkpoint /proj/giant-data/TiDAR/checkpoints/params/step_0012100.npz
 ```
+]
 
 ==== 4.4.3 Разделяне на run на етапи
 
@@ -110,7 +126,6 @@ python TiDAR/model/inference.py --checkpoint /proj/giant-data/TiDAR/checkpoints/
 - `python TiDAR/model/Run_training.py --config TiDAR/model/Config_135m.yml`
 - `python TiDAR/model/inference.py --prompt "Hello" --draft_len 8 --temperature 0.0`
 
-#figure(
-  image("../../../images/Docker.png", width: 62%),
-  caption: [Примерен Docker-базиран стартов workflow за системата],
-)
+Главният контейнер е базова runtime среда за обучение и инференс, която съдържа само необходимите системни и ML зависимости: CUDA runtime/драйверно-съвместими библиотеки, JAX/Flax/Optax/Orbax стек, Python tooling и build инструменти за възпроизводимо изпълнение на скриптовете. Така се гарантира, че training и inference поведението е консистентно между локална машина и remote GPU среда.
+
+Репото и dataset/checkpoint данните не са вградени в самия Docker образ. Те се добавят след стартиране на контейнера чрез bind mount, sync или S3 workflow. Този подход държи образа по-малък, ускорява обновяването на кода и данните, и избягва ненужно преизграждане на image при всяка промяна в експериментите.

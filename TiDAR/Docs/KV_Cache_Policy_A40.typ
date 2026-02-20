@@ -181,7 +181,7 @@ Artifacts in repo
     #place(top + left, dx: margin-left, dy: margin-top + plot-height + 12pt)[
       #text(size: 7.8pt)[#x-label]
     ]
-    #place(top + left, dx: 0pt, dy: margin-top + plot-height / 2 - 12pt)[
+    #place(top + left, dx: 9pt, dy: margin-top + plot-height / 2 - 12pt)[
       #rotate(-90deg)[#text(size: 7.8pt)[#y-label]]
     ]
   ]

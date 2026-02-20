@@ -1,8 +1,20 @@
 #set page(width: 210mm, height: 297mm, margin: 20mm)
 #set page(footer: context align(center)[#text(size: 9pt)[#counter(page).display()]])
-#set text(font: "Times New Roman", size: 11pt)
-#set par(justify: true, leading: 0.6em)
+#set text(font: "Times New Roman", size: 12pt)
+#set par(justify: true, leading: 1.2em)
 #set heading(numbering: none)
+#show heading.where(level: 1): it => [
+  #align(center, it)
+  #v(0.8em)
+]
+#show heading.where(level: 2): it => [
+  #align(center, it)
+  #v(1.6em)
+]
+#show figure.caption: it => context {
+  let n = it.counter.display(it.numbering)
+  text(fill: rgb("#374151"))[#it.supplement #h(2pt)#n#it.separator #it.body]
+}
 
 #let placeholder_figure(title, body: none) = figure(
   block(
@@ -22,10 +34,14 @@
   caption: [#title],
 )
 
-#include "sections/00-cover.typ"
+#align(center + horizon)[
+  #text(size: 24pt, weight: "bold")[СКАНИРАНО ЗАДАНИЕ]
+]
 
 #pagebreak()
-#include "sections/01-intro.typ"
+#align(center + horizon)[
+  #text(size: 24pt, weight: "bold")[СКАНИРАНО СТАНОВИЩЕ]
+]
 
 #pagebreak()
 #include "sections/02-ch1.typ"

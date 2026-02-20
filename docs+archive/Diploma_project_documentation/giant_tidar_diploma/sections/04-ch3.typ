@@ -5,6 +5,7 @@
 #import "../../../../TiDAR/Docs/TiDAR_AR_A40_H100_HeadToHead.typ" as hh
 #import "../../../../TiDAR/Docs/Results_Greedy_runs_135_360.typ" as rg
 #import "../../../../TiDAR/Docs/TinyStories_TiDAR_losses_Comparison.typ" as tsc
+#import "@preview/fletcher:0.5.8": diagram, node, edge
 
 #let tok(lbl, fill: rgb("#E5E7EB"), stroke_color: rgb("#374151")) = box(
   width: 22pt,
@@ -349,33 +350,21 @@ bucket = select_kv_bucket(prompt_len + steps, kv_cache_buckets)
 
 #figure(
   block(
-    width: 42%,
-    inset: 8pt,
+    width: 74%,
+    inset: 7pt,
     radius: 5pt,
     stroke: 0.6pt + rgb("#9CA3AF"),
     fill: luma(242),
   )[
-```text
-128
-###.....................
-###.....................
-###.....................
-
-256
-######..................
-######..................
-######..................
-
-512
-############............
-############............
-############............
-
-1024
-########################
-########################
-########################
-```
+    #text(size: 8.5pt)[
+`128  | ###.....................`
+#linebreak()
+`256  | ######..................`
+#linebreak()
+`512  | ############............`
+#linebreak()
+`1024 | ########################`
+    ]
   ],
   caption: [Bucket стратегия: избор на най-малък валиден размер вместо винаги 1024],
 )
@@ -394,26 +383,26 @@ bucket = select_kv_bucket(prompt_len + steps, kv_cache_buckets)
     align: top,
     [
       #line-chart(
-        "A40 spot: 500m / k=4 (bucketed vs full vs AR)",
+        "A40 GPU: 500m / k=4 (bucketed vs full vs AR)",
         (
-          (label: "500m bucketed", color: c-blue, data: m500_steady),
+          (label: "500m bucketed", color: c-orange, data: m500_steady),
           (label: "500m full-context", color: c-red, data: m500_full_steady),
           (label: "500m AR", color: c-green, data: m500_ar_steady),
         ),
         width: 86mm,
-        height: 42mm,
+        height: 48mm,
       )
     ],
     [
       #line-chart(
-        "A40 spot: 3b / k=16 (bucketed vs full vs AR)",
+        "A40 GPU: 3b / k=16 (bucketed vs full vs AR)",
         (
           (label: "3b bucketed", color: c-orange, data: m3b_steady),
           (label: "3b full-context", color: c-red, data: m3b_full_steady),
           (label: "3b AR", color: c-green, data: m3b_ar_steady),
         ),
         width: 86mm,
-        height: 42mm,
+        height: 48mm,
       )
     ],
   ),
@@ -422,10 +411,9 @@ bucket = select_kv_bucket(prompt_len + steps, kv_cache_buckets)
 
 Легенда на линиите:
 
-- #box(width: 8pt, height: 8pt, fill: c-blue, radius: 1pt)[] #h(4pt) синя линия — 500m bucketed (най-горна в лявата графика в повечето точки);
-- #box(width: 8pt, height: 8pt, fill: c-red, radius: 1pt)[] #h(4pt) червена линия — TiDAR full-context baseline (средна в лявата графика);
-- #box(width: 8pt, height: 8pt, fill: c-green, radius: 1pt)[] #h(4pt) зелена линия — AR baseline (най-долна в лявата графика);
-- #box(width: 8pt, height: 8pt, fill: c-orange, radius: 1pt)[] #h(4pt) оранжева линия — 3b bucketed (най-горна в дясната графика в повечето точки).
+- #box(width: 8pt, height: 8pt, fill: c-orange, radius: 1pt)[] #h(4pt) оранжева линия — bucketed режим (и в двете графики);
+- #box(width: 8pt, height: 8pt, fill: c-red, radius: 1pt)[] #h(4pt) червена линия — TiDAR full-context baseline (в дясната графика е средна; в лявата е най-долна);
+- #box(width: 8pt, height: 8pt, fill: c-green, radius: 1pt)[] #h(4pt) зелена линия — AR baseline (позицията спрямо червената линия е обратна между двете графики).
 
 Метриката е steady decode tokens/s (*high is better*).
 
@@ -672,7 +660,7 @@ TiDAR е ново изследване на екипа на NVIDIA (ноемвр
 
 ==== 3.4.0.1 Контекст: от класически speculative decode към TiDAR
 
-Преди TiDAR, най-честият practical подход за ускорение е класически speculative decoding с draft + verify логика. Този подход е добра отправна точка, но често страда или от по-слаб draft модел, или от по-ниска ефективност на верификацията.
+Преди TiDAR най-честият practical подход за ускорение е класически speculative decoding с draft + verify логика. Този подход е добра отправна точка, но често страда или от по-слаб draft модел, или от по-ниска ефективност на верификацията.
 
 #figure(
   image("../../../images/Images_TiDAR_Optimization/Vanilla_speculative_decoding_with_smaller_model.png", width: 78%),
@@ -691,7 +679,7 @@ $
 r_i(v) = frac(max(0, p_i(v) - q_i(v)), Z_i)
 $
 
-За KV cache е важно speculative токените да не се commit-ват окончателно предварително. Записва се само приетият префикс (или се прави rollback до приетата дължина), иначе cache състоянието се разминава с валидирания контекст и decode-ът деградира.
+За KV cache е важно speculative токените да не се потвърждават окончателно предварително. Записва се само приетият префикс (или се прави rollback до приетата дължина), иначе cache състоянието се разминава с валидирания контекст и decode-ът деградира.
 
 ==== 3.4.0.2 Основна идея на TiDAR в един forward pass
 
@@ -818,33 +806,109 @@ Decode/предрафт маската е показана по-горе на @f
 
 ==== 3.4.4 KV-cache pointer commit/rollback
 
-Anchor-TiDAR използва optimistic KV write и pointer semantics: приеманата част се commit-ва чрез `prefix_len`, а отхвърленият суфикс се "rollback-ва" логически чрез връщане на pointer-а.
+Anchor-TiDAR използва оптимистичен запис в KV cache и семантика с указател: приетият префикс се потвърждава чрез `prefix_len`, а отхвърленият суфикс се отстранява логически чрез връщане на указателя.
 
 #figure(
-  image("../../../images/Images_TiDAR_Optimization/Anchor_TiDAR_KV_cache_per_interation.png", width: 80%),
-  caption: [KV cache развитие по итерации при Anchor-TiDAR],
+  block(inset: 6pt, stroke: 0.6pt + rgb("#D1D5DB"), radius: 4pt)[
+    #grid(
+      columns: (43%, 57%),
+      gutter: 8pt,
+      align: top,
+      [
+        #align(left)[
+          #text(size: 9pt, weight: "bold")[A) Поток на една Anchor-TiDAR decode итерация]
+          #v(3pt)
+          #diagram(
+            cell-size: (16mm, 9mm),
+            spacing: 6pt,
+            node-stroke: 0.8pt + rgb("#4B5563"),
+            edge-stroke: 0.8pt,
+            mark-scale: 70%,
+
+            node((0, 0), [Prefill
+L = prompt len], width: 36mm, fill: rgb("#E5E7EB")),
+            node((0, 1), [Single forward          \
+verify + K predraft], width: 44mm, fill: rgb("#DBEAFE")),
+            node((0, 2), [Acceptance check        \
+anchor + verify], width: 40mm, fill: rgb("#FDE68A")),
+            node((0, 3), [Accepted prefix = r     \
+(1 <= r <= K)], width: 40mm, fill: rgb("#FECACA")),
+            node((0, 4), [Pointer commit          \
+L := L + r], width: 34mm, fill: rgb("#DCFCE7")),
+            node((0, 5), [Next draft from         \
+selected proposal], width: 40mm, fill: rgb("#E9D5FF")),
+
+            edge((0, 0), (0, 1), "-|>"),
+            edge((0, 1), (0, 2), "-|>"),
+            edge((0, 2), (0, 3), "-|>"),
+            edge((0, 3), (0, 4), "-|>"),
+            edge((0, 4), (0, 5), "-|>"),
+          )
+        ]
+      ],
+      [
+        #align(left)[
+          #text(size: 9pt, weight: "bold")[B) KV cache pointer семантика (пример с частично приемане)]
+          #v(2pt)
+
+          #text(size: 7.9pt)[
+            Преди стъпката:#linebreak()
+            committed cache `A B C D* E F`,#linebreak()
+            указател `L=6`.
+          ]
+          #v(2pt)
+          #align(left)[#tok("A") #h(2pt) #tok("B") #h(2pt) #tok("C") #h(2pt) #tok("D*", fill: rgb("#FDE68A"), stroke_color: rgb("#DC2626")) #h(2pt) #tok("E", fill: rgb("#BFDBFE")) #h(2pt) #tok("F", fill: rgb("#BFDBFE"))]
+
+          #v(3pt)
+          #text(size: 7.9pt)[
+            Decode pass изпълнява оптимистичен#linebreak()
+            запис за текущия draft `G' H I`.#linebreak()
+            Временно се достига `L+K=9`.
+          ]
+          #v(2pt)
+          #align(left)[#tok("A") #h(2pt) #tok("B") #h(2pt) #tok("C") #h(2pt) #tok("D*", fill: rgb("#FDE68A"), stroke_color: rgb("#DC2626")) #h(2pt) #tok("E", fill: rgb("#BFDBFE")) #h(2pt) #tok("F", fill: rgb("#BFDBFE")) #h(2pt) #tok("G'", fill: rgb("#C4B5FD")) #h(2pt) #tok("H", fill: rgb("#C4B5FD")) #h(2pt) #tok("I", fill: rgb("#FCA5A5"), stroke_color: rgb("#B91C1C"))]
+
+          #v(3pt)
+          #text(size: 7.9pt)[
+            При несъответствие в последната#linebreak()
+            verify позиция (`I' != I`)#linebreak()
+            се приема само префиксът `G' H`.#linebreak()
+            Суфиксът `I` се отхвърля логически#linebreak()
+            чрез pointer update.
+          ]
+          #v(2pt)
+          #align(left)[#tok("A") #h(2pt) #tok("B") #h(2pt) #tok("C") #h(2pt) #tok("D*", fill: rgb("#FDE68A"), stroke_color: rgb("#DC2626")) #h(2pt) #tok("E", fill: rgb("#BFDBFE")) #h(2pt) #tok("F", fill: rgb("#BFDBFE")) #h(2pt) #tok("G'", fill: rgb("#C4B5FD"), stroke_color: rgb("#166534")) #h(2pt) #tok("H", fill: rgb("#C4B5FD"), stroke_color: rgb("#166534")) #h(2pt) #tok("I", fill: rgb("#F3F4F6"), stroke_color: rgb("#9CA3AF"))]
+          #v(2pt)
+          #text(size: 7.9pt)[
+            Краен commit за стъпката: `L := 8`.#linebreak()
+            Ефективният committed cache е#linebreak()
+            `A B C D* E F G' H`.
+          ]
+        ]
+      ],
+    )
+  ],
+  caption: [KV cache commit/rollback при Anchor-TiDAR: поток и pointer update],
 )
 
 ==== 3.4.5 Decode сценарий (Anchor-TiDAR)
 
-```text
-1) Prefill: записваме prompt в KV cache и взимаме стартов D*.
-2) Forward pass: едновременно получаваме verify логити + K predraft предложения.
-3) Acceptance: проверяваме предложените токени по ред и приемаме най-дългия валиден префикс.
-4) Commit/Rollback: KV pointer се премества само до приетата дължина.
-5) Next step: от приетия префикс + новия anchor продължаваме следващата итерация.
-```
+1. `Prefill`: записва се prompt в KV cache и се получава стартовият `D*`.
+2. `Forward pass`: едновременно се извличат verify логити и `K` predraft предложения.
+3. `Acceptance`: предложенията се проверяват по ред и се приема най-дългият валиден префикс.
+4. `Commit/Rollback`: KV pointer се премества само до приетата дължина.
+5. `Next step`: от приетия префикс и новия anchor започва следващата итерация.
 
 Визуални референции: @fig-anchor-forward и @fig-tidar-single-forward.
 
 ==== 3.4.6 Допълнителна визуална интерпретация за Mij
 
-Нека `A` е anchor токен, `D1..Dk` са draft токени, а `Mij` е токен в predraft блок `i` на позиция `j`.
+Обозначаваме с `A` anchor токена, с `D1..Dk` - draft токени, а с `Mij` - токен в predraft блок `i` на позиция `j`.
 
 `Mij` вижда:
 
 - каузално: префикса + anchor + нужния verify префикс;
-- bidirectional: токените в собствения си predraft блок;
+- двупосочно: токените в собствения predraft блок;
 - не вижда: нерелевантните бъдещи блокове извън текущата structured група.
 
 #figure(
@@ -865,7 +929,7 @@ Anchor-TiDAR използва optimistic KV write и pointer semantics: прие
     ]
     ]
   ],
-  caption: [Triangular visualize на verify/predraft зависимостите; пример с маркиран M21],
+  caption: [Триъгълна визуализация на verify/predraft зависимостите; пример с маркиран `M21`],
 )
 
 При токен `M21`:
@@ -1127,7 +1191,7 @@ Sampling-only резултатите показват, че при greedy реж
     align: top,
     [
       #hh.line-chart(
-        "Speedup vs AR by prefill",
+        "Speedup vs AR by prefill len",
         hh.overlay_speedup_lines,
         width: 84mm,
         height: 48mm,
@@ -1136,10 +1200,10 @@ Sampling-only резултатите показват, че при greedy реж
     [
       *Легенда:*
 
-      - #box(width: 8pt, height: 8pt, fill: hh.c-a40-k8, radius: 1pt)[] #h(4pt) A40, K=8;
+      - #box(width: 8pt, height: 8pt, fill: hh.c-h100-k16, radius: 1pt)[] #h(4pt) H100, K=16;
       - #box(width: 8pt, height: 8pt, fill: hh.c-a40-k16, radius: 1pt)[] #h(4pt) A40, K=16;
       - #box(width: 8pt, height: 8pt, fill: hh.c-h100-k8, radius: 1pt)[] #h(4pt) H100, K=8;
-      - #box(width: 8pt, height: 8pt, fill: hh.c-h100-k16, radius: 1pt)[] #h(4pt) H100, K=16.
+      - #box(width: 8pt, height: 8pt, fill: hh.c-a40-k8, radius: 1pt)[] #h(4pt) A40, K=8.
     ],
   ),
   caption: [Head-to-head: speedup vs AR по prefill (A40 + H100)],
@@ -1154,10 +1218,6 @@ Sampling-only резултатите показват, че при greedy реж
   ),
   caption: [Head-to-head: обобщена speedup диаграма (full width)],
 )
-
-#text(size: 12pt, weight: "bold", fill: rgb("#DC2626"))[
-NOTE TO SELF: Re-run A40 vs H100 head-to-head because no shot H100 to lose to A40, altohgugh its prefill and it is really short so can be random. For that run just a huge prefill test.
-]
 
 Тези резултати потвърждават, че наблюдаваните ускорения не са единичен артефакт от една карта, а се запазват и при по-висок клас GPU, като при `K=16` H100 показва най-силна speedup крива.
 
@@ -1323,7 +1383,9 @@ $
 
 ==== 3.9.0 Избор на TinyStories и базова конфигурация
 
-За експерименталната серия е избран TinyStories, защото е сравнително малък корпус с ниска ентропия. Това позволява бързи итерации#link(<note-fast-iter-39-0>)[#super[1]]<ref-fast-iter-39-0> и ясна интерпретация на ефекта от loss промените. В практиката този тип корпус се научава стабилно и от базов модел около `30M` параметъра, без да е необходимо пълно минаване през целия набор във всеки run.
+За експерименталната серия е избран TinyStories, защото е сравнително малък корпус с ниска ентропия. Това позволява бързи итерации и ясна интерпретация на ефекта от loss промените. В практиката този тип корпус се научава стабилно и от базов модел около `30M` параметъра, без да е необходимо пълно минаване през целия набор във всеки run.
+
+В конкретната серия базовият GIANT модел (`30M` параметъра) е обучен върху около `1.05` милиарда токена за приблизително `33` минути на RTX 5090 (`0.89 USD/час`), а всеки TiDAR post-training run е отнемал около `2.5` часа на същия хардуер. Общата експериментална кампания е проведена в рамките на една седмица с междинен анализ след всеки run (включително логитни хистограми), при приблизителен общ разход около `32 USD`.
 
 Базовият GIANT модел в тази серия е дефиниран със следната конфигурация:
 
@@ -1378,8 +1440,6 @@ stages:
 - "In the forest, a tiny fox..."
 - "One day, the teacher said..."
 - "The robot wanted to learn..."
-
-#text(size: 8pt, fill: rgb("#4B5563"))[#super[1] Тренирането на базовия GIANT 30M параметров модел върху 1.05 милиарда токена отне 33 минути на RTX 5090 (0.89 USD/час), а всеки TiDAR post-training run около 2.5 часа на същия хардуер. Целият експеримент беше проведен в продължение на седмица, защото изискваше междинен анализ след всеки run (включително логитни хистограми), и струва общо около 32 USD. #h(4pt)#link(<ref-fast-iter-39-0>)[↩]] <note-fast-iter-39-0>
 
 ==== 3.9.1 Експериментален протокол и избор на checkpoint
 

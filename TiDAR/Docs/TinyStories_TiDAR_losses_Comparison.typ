@@ -635,15 +635,23 @@ Prompts (10):
 
 #let ar-hist-color = rgb(244, 67, 150)
 #let diff-hist-color = rgb(33, 150, 243)
-#let hist-width = 27mm
-#let hist-height = 18mm
-#let hist-label-height = 4mm
-#let hist-gap = 0.8pt
+#let hist-width = 26.5mm
+#let hist-height = 22mm
+#let hist-label-height = 7.8mm
+#let hist-gap = 1.8pt
 
-#let hist-border(accept) = if accept == true { rgb(76, 175, 80) } else { rgb(190, 190, 190) }
+#let hist-stroke(accept, top1_match) = {
+  if accept == true {
+    (paint: rgb(76, 175, 80), thickness: 2.2pt)
+  } else if top1_match {
+    (paint: rgb(156, 39, 176), thickness: 1.8pt)
+  } else {
+    (paint: rgb(190, 190, 190), thickness: 0.6pt)
+  }
+}
 
-#let hist-cell(labels, values, color, border) = {
-  let n = labels.len()
+#let hist-cell(labels, values, color, stroke-style) = {
+  let n = calc.min(labels.len(), values.len(), 4)
   let inner-width = hist-width - 4pt
   let inner-height = hist-height - 4pt
   let plot-height = inner-height - hist-label-height - hist-gap
@@ -658,10 +666,10 @@ Prompts (10):
   let label-cells = range(0, n).map(i => {
     let label = labels.at(i)
     box(width: bar-width, height: hist-label-height)[
-      #align(center)[#text(size: 4.5pt)[#(label)]]
+      #align(center)[#text(size: 8pt)[#(label)]]
     ]
   })
-  box(width: hist-width, height: hist-height, stroke: 0.6pt + border, radius: 2pt, inset: 2pt)[
+  box(width: hist-width, height: hist-height, stroke: stroke-style, radius: 2pt, inset: 2pt)[
     #grid(
       columns: (..range(0, n).map(i => bar-width)),
       rows: (plot-height, hist-label-height),
@@ -673,52 +681,57 @@ Prompts (10):
   ]
 }
 
-#let hist-panel(title, labels, values, color, border) = grid(
+#let hist-panel(title, labels, values, color, stroke-style) = grid(
   columns: (auto),
   rows: (auto, auto),
   gutter: 2pt,
   align: center,
-  text(size: 6pt, weight: "bold")[#(title)],
-  hist-cell(labels, values, color, border),
+  text(size: 7.6pt, weight: "bold")[#(title)],
+  hist-cell(labels, values, color, stroke-style),
 )
 
-#let diff-panel(labels, values, top1, border) = grid(
+#let diff-panel(labels, values, top1, stroke-style) = grid(
   columns: (auto),
   rows: (auto, auto),
   gutter: 2pt,
   align: center,
-  hist-cell(labels, values, diff-hist-color, border),
-  text(size: 5.5pt)[top1: #(top1)],
+  hist-cell(labels, values, diff-hist-color, stroke-style),
+  text(size: 10pt, weight: "bold")[top1: #(top1)],
 )
 
 #let hist-columns(n) = (..range(0, n).map(_ => auto))
 
 #let render-hist(meta, data) = [
-  #text(size: 8pt)[Prompt: "#(meta.prompt)" | Checkpoint: "#(meta.checkpoint_name)"]
-  #text(size: 8pt)[Target position: #(meta.target_position) | Block: #(meta.block_start)-#(meta.block_end) | Draft len: #(meta.draft_len)]
+  #text(size: 12pt)[Prompt: "#(meta.prompt)"]
 
   #v(3pt)
 
-  #text(size: 8pt, weight: "bold")[AR verify logits (top-5, sorted by AR)]
+  #text(size: 12pt, weight: "bold")[AR verify logits (top-4, sorted by AR)]
   #grid(
     columns: hist-columns(data.len()),
     gutter: 6pt,
-    ..data.map(d => hist-panel(d.title, d.labels, d.ar, ar-hist-color, hist-border(d.accept))),
+    ..data.map(d => {
+      let top1_match = d.labels.at(0) == d.diff_top
+      hist-panel(d.title, d.labels, d.ar, ar-hist-color, hist-stroke(d.accept, top1_match))
+    }),
   )
 
   #v(3pt)
 
-  #text(size: 8pt, weight: "bold")[Diff draft logits (same tokens, AR order)]
+  #text(size: 12pt, weight: "bold")[Diff draft logits (same tokens, AR order)]
   #grid(
     columns: hist-columns(data.len()),
     gutter: 6pt,
-    ..data.map(d => diff-panel(d.labels, d.diff, d.diff_top, hist-border(d.accept))),
+    ..data.map(d => {
+      let top1_match = d.labels.at(0) == d.diff_top
+      diff-panel(d.labels, d.diff, d.diff_top, hist-stroke(d.accept, top1_match))
+    }),
   )
 
   #v(4pt)
 
-  #text(size: 8pt, weight: "bold")[Sentence context]
-  #text(size: 8pt)[#(meta.context_text)]
+  #text(size: 12pt, weight: "bold")[Sentence context]
+  #text(size: 12pt)[#(meta.context_text)]
 ]
 
 #render-hist(meta1, data1)

@@ -103,6 +103,8 @@ python TiDAR/model/inference.py \
 
 Това позволява баланс между памет и latency, особено при различни prompt/steps комбинации.
 
+#pagebreak()
+
 === 4.7 Настройка на training параметри
 
 Настройка на hyperparameters и loss коефициенти.
@@ -126,6 +128,10 @@ python TiDAR/model/inference.py \
 - `python TiDAR/model/Run_training.py --config TiDAR/model/Config_135m.yml`
 - `python TiDAR/model/inference.py --prompt "Hello" --draft_len 8 --temperature 0.0`
 
+\
+
 Главният контейнер е базова runtime среда за обучение и инференс, която съдържа само необходимите системни и ML зависимости: CUDA runtime/драйверно-съвместими библиотеки, JAX/Flax/Optax/Orbax стек, Python tooling и build инструменти за възпроизводимо изпълнение на скриптовете. Така се гарантира, че training и inference поведението е консистентно между локална машина и remote GPU среда.
+
+\
 
 Репото и dataset/checkpoint данните не са вградени в самия Docker образ. Те се добавят след стартиране на контейнера чрез bind mount, sync или S3 workflow. Този подход държи образа по-малък, ускорява обновяването на кода и данните, и избягва ненужно преизграждане на image при всяка промяна в експериментите.

@@ -171,7 +171,7 @@ $
 
 GIANT използва съвременен decoder-only профил:
 
-- RMSNorm#link(<bib-rmsnorm>)[#super[10]] вместо класически LayerNorm;
+- RMSNorm#link(<bib-rmsnorm>)[#super[10]] вместо класически LayerNorm#link(<bib-layernorm>)[#super[13]];
 - SwiGLU#link(<bib-glu-variants>)[#super[12]] в feed-forward частта;
 - RoPE#link(<bib-roformer>)[#super[11]] (rotary positional embeddings) за позиционна информация.
 

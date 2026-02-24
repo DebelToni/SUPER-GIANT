@@ -1,23 +1,25 @@
 = Използвана литература
 
+#set par(leading: 1.24em)
+
 - [1] Vaswani, A. et al. *Attention Is All You Need*. NeurIPS 2017. #link("https://arxiv.org/abs/1706.03762")[https://arxiv.org/abs/1706.03762] <bib-attention>
-- Ba, J. L., Kiros, J. R., Hinton, G. E. *Layer Normalization*. 2016. #link("https://arxiv.org/abs/1607.06450")[https://arxiv.org/abs/1607.06450]
+- [13] Ba, J. L., Kiros, J. R., Hinton, G. E. *Layer Normalization*. 2016. #link("https://arxiv.org/abs/1607.06450")[https://arxiv.org/abs/1607.06450] <bib-layernorm>
 - [10] Zhang, B., Sennrich, R. *Root Mean Square Layer Normalization (RMSNorm)*. 2019. #link("https://arxiv.org/abs/1910.07467")[https://arxiv.org/abs/1910.07467] <bib-rmsnorm>
 - Srivastava, N. et al. *Dropout: A Simple Way to Prevent Neural Networks from Overfitting*. 2014. #link("https://jmlr.org/papers/v15/srivastava14a.html")[https://jmlr.org/papers/v15/srivastava14a.html]
 - [11] Su, J. et al. *RoFormer: Enhanced Transformer with Rotary Position Embedding*. 2021. #link("https://arxiv.org/abs/2104.09864")[https://arxiv.org/abs/2104.09864] <bib-roformer>
 - [12] Shazeer, N. *GLU Variants Improve Transformer*. 2020. #link("https://arxiv.org/abs/2002.05202")[https://arxiv.org/abs/2002.05202] <bib-glu-variants>
 - [6] Kingma, D. P., Ba, J. *Adam: A Method for Stochastic Optimization*. 2014. #link("https://arxiv.org/abs/1412.6980")[https://arxiv.org/abs/1412.6980] <bib-adam>
-- Loshchilov, I., Hutter, F. *Decoupled Weight Decay Regularization (AdamW)*. 2017. #link("https://arxiv.org/abs/1711.05101")[https://arxiv.org/abs/1711.05101]
-- Dao, T. et al. *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness*. 2022. #link("https://arxiv.org/abs/2205.14135")[https://arxiv.org/abs/2205.14135]
+- [14] Loshchilov, I., Hutter, F. *Decoupled Weight Decay Regularization (AdamW)*. 2017. #link("https://arxiv.org/abs/1711.05101")[https://arxiv.org/abs/1711.05101] <bib-adamw>
+- [15] Dao, T. et al. *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness*. 2022. #link("https://arxiv.org/abs/2205.14135")[https://arxiv.org/abs/2205.14135] <bib-flashattention>
 - Dao, T. *FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning*. 2023. #link("https://arxiv.org/abs/2307.08691")[https://arxiv.org/abs/2307.08691]
-- Leviathan, Y., Kalman, M., Matias, Y. *Fast Inference from Transformers via Speculative Decoding*. 2023. #link("https://arxiv.org/abs/2211.17192")[https://arxiv.org/abs/2211.17192]
+- [16] Leviathan, Y., Kalman, M., Matias, Y. *Fast Inference from Transformers via Speculative Decoding*. 2023. #link("https://arxiv.org/abs/2211.17192")[https://arxiv.org/abs/2211.17192] <bib-spec-decoding>
 - Stern, M. et al. *Blockwise Parallel Decoding for Deep Autoregressive Models*. 2018. #link("https://arxiv.org/abs/1811.03115")[https://arxiv.org/abs/1811.03115]
 - Cai, T. et al. *Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads*. 2024. #link("https://arxiv.org/abs/2401.10774")[https://arxiv.org/abs/2401.10774]
-- Li, Y. et al. *EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty*. 2024. #link("https://arxiv.org/abs/2401.15077")[https://arxiv.org/abs/2401.15077]
+- [17] Li, Y. et al. *EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty*. 2024. #link("https://arxiv.org/abs/2401.15077")[https://arxiv.org/abs/2401.15077] <bib-eagle>
 - NVIDIA Research. *Think in Diffusion, Talk in Autoregression (TiDAR)*. 2025. #link("https://arxiv.org/pdf/2511.08923")[https://arxiv.org/pdf/2511.08923]
 - [8] Touvron, H. et al. *LLaMA: Open and Efficient Foundation Language Models*. 2023. #link("https://arxiv.org/abs/2302.13971")[https://arxiv.org/abs/2302.13971] <bib-llama>
 - [5] Hoffmann, J. et al. *Training Compute-Optimal Large Language Models (Chinchilla)*. 2022. #link("https://arxiv.org/abs/2203.15556")[https://arxiv.org/abs/2203.15556] <bib-chinchilla>
-- Kaplan, J. et al. *Scaling Laws for Neural Language Models*. 2020. #link("https://arxiv.org/abs/2001.08361")[https://arxiv.org/abs/2001.08361]
+- Kaplan, et al. *Scaling Laws for Neural Language Models*. 2020. #link("https://arxiv.org/abs/2001.08361")[https://arxiv.org/abs/2001.08361]
 - [2] Kwon, W. et al. *Efficient Memory Management for Large Language Model Serving with PagedAttention (vLLM)*. 2023. #link("https://arxiv.org/abs/2309.06180")[https://arxiv.org/abs/2309.06180] <bib-vllm>
 - NVIDIA. *NVIDIA Ampere Architecture In-Depth*. 2020. #link("https://developer.nvidia.com/blog/nvidia-ampere-architecture-in-depth/")[https://developer.nvidia.com/blog/nvidia-ampere-architecture-in-depth/]
 - NVIDIA. *NVIDIA A100 Tensor Core GPU Architecture Whitepaper*. 2020. #link("https://resources.nvidia.com/en-us-tensor-core/nvidia-ampere-architecture-whitepaper")[https://resources.nvidia.com/en-us-tensor-core/nvidia-ampere-architecture-whitepaper]
@@ -32,11 +34,12 @@
 - Tailscale Documentation. #link("https://tailscale.com/kb")[https://tailscale.com/kb]
 - s5cmd Documentation. #link("https://github.com/peak/s5cmd")[https://github.com/peak/s5cmd]
 - [9] Andrej Karpathy. *Let's build GPT: from scratch, in code, spelled out*. YouTube, 2023. #link("https://www.youtube.com/watch?v=kCc8FmEb1nY")[https://www.youtube.com/watch?v=kCc8FmEb1nY] <bib-karpathy-build-gpt>
-- Andrej Karpathy. *Neural Networks: Zero to Hero* (video playlist). YouTube. #link("https://karpathy.ai/zero-to-hero.html")[https://karpathy.ai/zero-to-hero.html]
-- Andrej Karpathy. *Intro to Large Language Models*. YouTube, 2023. #link("https://www.youtube.com/watch?v=zjkBMFhNj_g")[https://www.youtube.com/watch?v=zjkBMFhNj_g]
+- Andrej Karpathy. *The spelled-out intro to neural networks and backpropagation: building micrograd*. YouTube, 2022. #link("https://www.youtube.com/watch?v=VMj-3S1tku0")[https://www.youtube.com/watch?v=VMj-3S1tku0]
 - Typst Documentation. #link("https://typst.app/docs/")[https://typst.app/docs/]
 - [7] Brutlag, J. *Speed Matters for Google Web Search*. Google, 2009. #link("https://services.google.com/fh/files/blogs/google_delayexp.pdf")[https://services.google.com/fh/files/blogs/google_delayexp.pdf] <bib-brutlag-speed>
 
 - DeepSeek-AI. *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model* (MLA + MoE), 2024. #link("https://arxiv.org/abs/2405.04434")[https://arxiv.org/abs/2405.04434]
 - DeepSeek-AI. *DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models*, 2024. #link("https://arxiv.org/abs/2401.06066")[https://arxiv.org/abs/2401.06066]
 - Beltagy, I., Peters, M. E., Cohan, A. *Longformer: The Long-Document Transformer* (sliding-window attention), 2020. #link("https://arxiv.org/abs/2004.05150")[https://arxiv.org/abs/2004.05150]
+
+#set par(leading: 1.3em)

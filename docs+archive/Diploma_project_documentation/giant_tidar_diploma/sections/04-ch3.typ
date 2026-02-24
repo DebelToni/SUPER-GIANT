@@ -5,6 +5,7 @@
 #import "../../../../TiDAR/Docs/TiDAR_AR_A40_H100_HeadToHead.typ" as hh
 #import "../../../../TiDAR/Docs/Results_Greedy_runs_135_360.typ" as rg
 #import "../../../../TiDAR/Docs/TinyStories_TiDAR_losses_Comparison.typ" as tsc
+#import "../../../../TiDAR/Docs/TinyStories_Attention_HeadSweep_Losses.typ" as hs
 #import "@preview/fletcher:0.5.8": diagram, node, edge
 
 #let tok(lbl, fill: rgb("#E5E7EB"), stroke_color: rgb("#374151")) = box(
@@ -42,13 +43,13 @@
 
 Системата е CLI-first и основният интерфейс е набор от entry points:
 
-- `GIANT/v2/data_pipeline/build_corpus.py`
-- `GIANT/v2/model/Run_training.py`
-- `GIANT/v2/model/Evaluate.py`
-- `GIANT/v2/model/Generate_faster.py`
-- `GIANT/v2/model/Chat.py`
-- `TiDAR/model/Run_training.py`
-- `TiDAR/model/inference.py`
+- `GIANT/v2/data_pipeline/build_corpus.py` - build и шардване на корпус;
+- `GIANT/v2/model/Run_training.py` - обучение по stage конфигурации;
+- `GIANT/v2/model/Evaluate.py` - офлайн оценка на checkpoint;
+- `GIANT/v2/model/Generate_faster.py` - ускорен decode и benchmark;
+- `GIANT/v2/model/Chat.py` - интерактивен чат inference;
+- `TiDAR/model/Run_training.py` - TiDAR обучение и логване;
+- `TiDAR/model/inference.py` - TiDAR inference и сравнения.
 
 Тези скриптове формират основния интерфейс на системата и покриват пълния цикъл: data prep, обучение, оценка и инференс.
 
@@ -60,11 +61,11 @@
 - checkpoint metadata (`train_loss`, `val_loss`, `val_ppl`);
 - Typst отчети с throughput и policy сравнения.
 
-Този подход е избран целенасочено за terminal/vim workflow и за лесно remote наблюдение през SSH.
+Този подход е избран целенасочено за terminal/vim workflow и за лесно наблюдение през SSH.
 
 ==== 3.1.3 Управление на stage прогреса
 
-"Времевата линия" в проекта е stage curriculum. Прогресът се движи по stages с различен dataset и контекстна дължина, като се пази възстановимо състояние за всеки етап.
+Управлението на прогреса е реализирано чрез stage curriculum. Изпълнението преминава през последователни stages с различен dataset и контекстна дължина, като за всеки етап се съхранява възстановимо състояние.
 
 ==== 3.1.4 Управление на параметри
 
@@ -686,7 +687,7 @@ $
 TiDAR променя тази схема, като комбинира verify + predraft в един structured forward pass. Така се използва по-добре наличният паралелен compute и се намалява serving overhead-ът.
 
 #figure(
-  image("../../../images/Images_TiDAR_Optimization/TiDAR_Single_Forward_pass.png", width: 78%),
+  image("../../../images/Images_TiDAR_Optimization/TiDAR_Single_Forward_pass.png", width: 100%),
   caption: [TiDAR single-forward layout: verify + predraft (diagram from TiDAR paper)],
 ) <fig-tidar-single-forward>
 
@@ -699,7 +700,16 @@ TiDAR променя тази схема, като комбинира verify + p
 Ключът е в маските: различни части от входа имат различен режим на внимание, така че едновременно да се пази AR логиката за "talk" и diffusion паралелизмът за "think".
 
 #figure(
-  image("../../../images/Images_TiDAR_Optimization/TiDAR_infernece_mask.png", width: 64%),
+  grid(
+    columns: (74%, 26%),
+    gutter: 8pt,
+    align: top,
+    [#image("../../../images/Images_TiDAR_Optimization/TiDAR_infernece_mask.png", width: 100%)],
+    [
+      #v(10pt)
+      #align(center)[#image("../../../images/tidar_agenda.png", width: 84%)]
+    ],
+  ),
   caption: [Структурирана маска за TiDAR decode/предрафт логика (diagram from TiDAR paper)],
 ) <fig-tidar-decode-mask>
 
@@ -725,7 +735,16 @@ Prefill фазата подготвя началното KV-cache състоян
 В paper-а е тествано corruption поведение с шум, маска и смесени режими; отчетено е, че вариантът само с mask corruption работи най-добре. Затова и в тази имплементация се използва единен `[MASK]` токен при diffusion частта на training/inference подредбата.
 
 #figure(
-  image("../../../images/TiDAR_training_mask.png", width: 52%),
+  grid(
+    columns: (74%, 26%),
+    gutter: 8pt,
+    align: top,
+    [#image("../../../images/TiDAR_training_mask.png", width: 100%)],
+    [
+      #v(10pt)
+      #align(center)[#image("../../../images/tidar_agenda.png", width: 84%)]
+    ],
+  ),
   caption: [TiDAR training маска (diagram from TiDAR paper)],
 ) <fig-tidar-training-mask>
 
@@ -751,7 +770,7 @@ $
 Anchor разширението въвежда стабилна референтна точка в decode стъпката и подобрява практическата ефективност на приемане/rollback логиката, особено при дълги генерации.
 
 #figure(
-  image("../../../images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png", width: 78%),
+  image("../../../images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png", width: 100%),
   caption: [Anchor-TiDAR forward pass],
 ) <fig-anchor-forward>
 
@@ -790,21 +809,7 @@ TiDAR training конструира вход с дължина `2S` във фо�
 
 Decode/предрафт маската е показана по-горе на @fig-tidar-decode-mask.
 
-==== 3.4.3 Извличане на verify и predraft логити
-// COMPACT_CANDIDATE: 3.4.3 може да се съкрати при финален page-budget pass.
-
-При inference входът се подрежда като `[current_draft | predraft_masks]`, след което от един forward pass се извличат:
-
-- verify логити за текущия draft;
-- K predraft предложения за следващата стъпка.
-
-Технически това е важно, защото verify и predraft не се изпълняват като две отделни model извиквания. Логитите се взимат от различни позиционни срезове на един и същ output тензор, което:
-
-- намалява host orchestration overhead;
-- подобрява ефективността при static-shape изпълнение;
-- поддържа консистентен KV-cache update модел за следващата итерация.
-
-==== 3.4.4 KV-cache pointer commit/rollback
+==== 3.4.3 KV-cache pointer commit/rollback
 
 Anchor-TiDAR използва оптимистичен запис в KV cache и семантика с указател: приетият префикс се потвърждава чрез `prefix_len`, а отхвърленият суфикс се отстранява логически чрез връщане на указателя.
 
@@ -890,6 +895,20 @@ selected proposal], width: 40mm, fill: rgb("#E9D5FF")),
   ],
   caption: [KV cache commit/rollback при Anchor-TiDAR: поток и pointer update],
 )
+
+==== 3.4.4 Извличане на verify и predraft логити
+// COMPACT_CANDIDATE: 3.4.4 може да се съкрати при финален page-budget pass.
+
+При inference входът се подрежда като `[current_draft | predraft_masks]`, след което от един forward pass се извличат:
+
+- verify логити за текущия draft;
+- K predraft предложения за следващата стъпка.
+
+Технически това е важно, защото verify и predraft не се изпълняват като две отделни model извиквания. Логитите се взимат от различни позиционни срезове на един и същ output тензор, което:
+
+- намалява host orchestration overhead;
+- подобрява ефективността при static-shape изпълнение;
+- поддържа консистентен KV-cache update модел за следващата итерация.
 
 ==== 3.4.5 Decode сценарий (Anchor-TiDAR)
 
@@ -1227,13 +1246,21 @@ Sampling-only резултатите показват, че при greedy реж
 
 ==== 3.7.1 Формулировка с независими коефициенти
 
-В практическата имплементация замених нормализацията от paper-а `/(1 + alpha)` с модулна сума от отделни термини, всеки със собствен коефициент. Така всеки компонент може да се усилва, отслабва или да се изключва с нулев коефициент, което прави възможни чисти ablation експерименти и целенасочени комбинации между различни обучителни сигнали.
+В практическата имплементация замених нормализацията от paper-а $frac(1, 1 + alpha)$ с модулна сума от отделни термини, всеки със собствен коефициент. Така всеки компонент може да се усилва, отслабва или да се изключва с нулев коефициент, което прави възможни чисти ablation експерименти и целенасочени комбинации между различни обучителни сигнали.
 
-$
+$ 
 L = alpha L_(A) + beta L_(D) + rho D_(f) + chi D_(r) + delta L_(H) + delta_(m) L_(P) + eta L_(S) + gamma L_(K)
 $
 
-Където `bar(P_(A))` означава AR разпределение със stop-gradient (без обратен градиент към AR клона).
+За сравнимост между различни конфигурации с различна обща тежест на коефициентите, в анализа може да се използва и нормализирана форма, при която относителните дялове се запазват:
+
+$
+w_i = frac(lambda_i, sum_j lambda_j + epsilon), quad L_(norm) = sum_i w_i T_i
+$
+
+Тук $T_i$ обозначава съответния loss термин, а $epsilon$ е малка числена константа за стабилност.
+
+Където $bar(P_(A))$ означава AR разпределение със stop-gradient (без обратен градиент към AR клона).
 
 - `AR` термин:
 
@@ -1266,6 +1293,8 @@ $
   $
 
   Наказва Diff, когато разпределя излишна маса извън AR разпределението.
+
+  Съвместното използване на $D_(f)$ и $D_(r)$ дава по-стабилно подравняване от използването само на един KL термин. $D_(f)$ пази покритието на важните AR кандидати, а $D_(r)$ ограничава вероятностната маса в слабо релевантни опашки. На практика това позволява по-фин баланс между recall на валидни токени и селективност на Diff разпределението чрез коефициентите $rho$ и $chi$.
 
 - Hard agreement термин:
 
@@ -1377,11 +1406,99 @@ $
 
 Практически извод: 360M вариантът държи по-стабилни и по-ниски Diff/Hard загуби и по-висок greedy acceptance, но идва с осезаемо по-висока цена във време и ресурс. Моделът е приблизително 2.66 пъти по-голям по брой параметри спрямо 135M, а в реалните run-ове обучението му беше около 3-4 пъти по-бавно. Тези диаграми показват и че началните способности на базовия модел директно се отразяват върху ученето на TiDAR future prediction-ите: по-силният стартов модел учи по-стабилно тази задача, което е консистентно с по-големия му капацитет и с факта, че е предварително трениран върху повече данни. За проекта това е важен ориентир за trade-off между качество, цена и време за итерация при TiDAR training.
 
-=== 3.9 Проведен експеримент с различни loss функции и конфигурации
+=== 3.9 Допълнителен експеримент: TinyStories attention head sweep
+
+Проведен е кратък head sweep върху TinyStories с четири конфигурации: `h6 MHA` (baseline), `h18 MHA`, `h18/kv6 GQA` и контролен вариант `h6` с `head_dim=32`. Целта е бърза проверка дали промяната в attention head конфигурацията води до съществено разделяне по GIANT/TiDAR обучителните метрики.
+
+Легенда на конфигурациите:
+
+#grid(
+  columns: (1fr, 1fr),
+  gutter: 8pt,
+  row-gutter: 4pt,
+  [#box(width: 8pt, height: 8pt, fill: hs.c-h6, radius: 1pt)[] #h(4pt) `h6 MHA` (baseline)],
+  [#box(width: 8pt, height: 8pt, fill: hs.c-h18, radius: 1pt)[] #h(4pt) `h18 MHA`],
+  [#box(width: 8pt, height: 8pt, fill: hs.c-gqa, radius: 1pt)[] #h(4pt) `h18/kv6 GQA`],
+  [#box(width: 8pt, height: 8pt, fill: hs.c-h6hd32, radius: 1pt)[] #h(4pt) `h6 head_dim=32`],
+)
+
+#figure(
+  grid(
+    columns: (1fr, 1fr),
+    gutter: 8pt,
+    row-gutter: 8pt,
+    [
+      #hs.multi-line-chart(
+        (
+          (name: "h6 MHA", color: hs.c-h6, data: hs.giant-h6-loss),
+          (name: "h18 MHA", color: hs.c-h18, data: hs.giant-h18-loss),
+          (name: "h18 kv6 GQA", color: hs.c-gqa, data: hs.giant-gqa-loss),
+          (name: "h6 hd32", color: hs.c-h6hd32, data: hs.giant-h6hd32-loss),
+        ),
+        width: 84mm,
+        height: 36mm,
+        y_label: "GIANT loss",
+        y_ticks: 4,
+        y_tick_decimals: 2,
+      )
+    ],
+    [
+      #hs.multi-line-chart(
+        (
+          (name: "h6 baseline", color: hs.c-h6, data: hs.diff-ratio-h6),
+          (name: "h18 / h6", color: hs.c-h18, data: hs.diff-ratio-h18),
+          (name: "gqa / h6", color: hs.c-gqa, data: hs.diff-ratio-gqa),
+          (name: "h6hd32 / h6", color: hs.c-h6hd32, data: hs.diff-ratio-h6hd32),
+        ),
+        width: 84mm,
+        height: 36mm,
+        y_label: "Diff ratio vs h6",
+        y_ticks: 4,
+        y_tick_decimals: 2,
+        baseline_y: 1.0,
+      )
+    ],
+    [
+      #hs.multi-line-chart(
+        (
+          (name: "h6 MHA", color: hs.c-h6, data: hs.tidar-h6-diff),
+          (name: "h18 MHA", color: hs.c-h18, data: hs.tidar-h18-diff),
+          (name: "h18 kv6 GQA", color: hs.c-gqa, data: hs.tidar-gqa-diff),
+          (name: "h6 hd32", color: hs.c-h6hd32, data: hs.tidar-h6hd32-diff),
+        ),
+        width: 84mm,
+        height: 36mm,
+        y_label: "TiDAR Diff loss",
+        y_ticks: 4,
+        y_tick_decimals: 2,
+      )
+    ],
+    [
+      #hs.multi-line-chart(
+        (
+          (name: "h6 MHA", color: hs.c-h6, data: hs.tidar-h6-greedy),
+          (name: "h18 MHA", color: hs.c-h18, data: hs.tidar-h18-greedy),
+          (name: "h18 kv6 GQA", color: hs.c-gqa, data: hs.tidar-gqa-greedy),
+          (name: "h6 hd32", color: hs.c-h6hd32, data: hs.tidar-h6hd32-greedy),
+        ),
+        width: 84mm,
+        height: 36mm,
+        y_label: "TiDAR Greedy acc",
+        y_ticks: 4,
+        y_tick_decimals: 2,
+      )
+    ],
+  ),
+  caption: [TinyStories head sweep: компактен преглед на 4 ключови обучителни метрики],
+)
+
+Резултатите показват ограничено разделяне между сравнимите по ширина конфигурации (`h6/h18/GQA`) в рамките на краткия run прозорец. Увеличаването на броя heads само по себе си не дава ясно доминираща печалба по качество за този setup, докато GQA остава близо до baseline при умерено по-добра ефективност. Контролният `h6 head_dim=32` режим е значително по-бърз, но с отчетлив спад в качеството, поради което се интерпретира като trade-off вариант, а не като пряк "по-добър" заместител.
+
+=== 3.10 Проведен експеримент с различни loss функции и конфигурации
 
 В този раздел е представен контролиран експеримент за TiDAR post-training с множество loss конфигурации. Основната цел е да се оцени кои комбинации подобряват ключовите метрики (`Diffusion loss` и `Greedy acceptance`), като едновременно с това се запази качеството на оригиналния AR модел (без значимо влошаване на AR loss спрямо последните итерации от базовото GIANT обучение). Дизайнът е избран така, че да поддържа бърз експериментален цикъл: промяна на loss конфигурация, кратък run, метрикa-анализ и следваща итерация.
 
-==== 3.9.0 Избор на TinyStories и базова конфигурация
+==== 3.10.0 Избор на TinyStories и базова конфигурация
 
 За експерименталната серия е избран TinyStories, защото е сравнително малък корпус с ниска ентропия. Това позволява бързи итерации и ясна интерпретация на ефекта от loss промените. В практиката този тип корпус се научава стабилно и от базов модел около `30M` параметъра, без да е необходимо пълно минаване през целия набор във всеки run.
 
@@ -1441,7 +1558,7 @@ stages:
 - "One day, the teacher said..."
 - "The robot wanted to learn..."
 
-==== 3.9.1 Експериментален протокол и избор на checkpoint
+==== 3.10.1 Експериментален протокол и избор на checkpoint
 
 Основният TiDAR baseline run (`alpha=1, beta=1`) достига `121566` optimizer стъпки. За сравнителната част е избран checkpoint около `90k`, от който се пускат над 10 различни loss конфигурации до приблизително `121k`, за да се измери ефектът им върху Diffusion/Greedy метриките при близки стартови условия.
 
@@ -1499,7 +1616,7 @@ Branch-based дизайнът е силен за сравнение, защот�
   caption: [Базова траектория и branch cut при 90k стъпка],
 )
 
-==== 3.9.2 Сравнявани loss режими
+==== 3.10.2 Сравнявани loss режими
 
 Легендата по-долу обобщава сравняваните конфигурации в sweep-а. Тя покрива както "меки" alignment сигнали (KL/Distill), така и "твърди" acceptance-ориентирани сигнали (delta, delta_masked, top-k set), което е методологично правилно за TiDAR, където целта не е само нисък loss, а по-ефективен speculative decode.
 
@@ -1518,7 +1635,7 @@ Branch-based дизайнът е силен за сравнение, защот�
 
 Run-ове, които водят до твърде бърза деградация на AR quality (catastrophic forgetting) или показват незначим ефект спрямо основната група, не са включени във финалното сравнение в тази секция.
 
-==== 3.9.3 Интерпретация на AR и Diff кривите
+==== 3.10.3 Интерпретация на AR и Diff кривите
 
 AR панелите показват, че стабилният режим и умерените добавки (KL-keep, Distill) запазват близка и устойчива AR динамика в `90k-121k`. Това означава, че тези варианти не разрушават основната next-token способност.
 
@@ -1587,7 +1704,7 @@ Diff панелите дават по-силен разделителен сиг
   caption: [Пълен Diff прозорец: stable срещу ранен delta_masked run],
 )
 
-==== 3.9.4 Greedy acceptance: основен таргет на sweep-а
+==== 3.10.4 Greedy acceptance: основен таргет на sweep-а
 
 Greedy acceptance е централната метрика в документа (`argmax(AR) == argmax(Diff)` по валидни позиции). Показаните панели имат три нива на интерпретация:
 
@@ -1690,7 +1807,7 @@ Greedy acceptance е централната метрика в документа
   caption: [Delta срещу stable за разширения набор],
 )
 
-==== 3.9.5 Inference резултати (Accept/Iter таблица)
+==== 3.10.5 Inference резултати (Accept/Iter таблица)
 
 Секцията "Inference Results" проверява дали training ефектите се пренасят при реален greedy decode (`temperature=0`, `draft_len=6`) върху 10 промпта и три дължини на генериране (50/100/300 стъпки). Ключовите тенденции в таблицата са:
 
@@ -1699,16 +1816,16 @@ Greedy acceptance е централната метрика в документа
     columns: (auto, auto, auto, auto),
     align: (left, center, center, center),
     [Checkpoint], [Steps=50], [Steps=100], [Steps=300],
-    [Stable \@90k], [2.41 / #text(fill: rgb("#C62828"), weight: "bold")[3.50] / 1.63], [2.26 / 2.75 / 1.71], [2.10 / 2.45 / #text(fill: rgb("#C62828"), weight: "bold")[1.88]],
+    [Stable \@90k], [2.41 / #text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[3.50] / 1.63], [2.26 / 2.75 / 1.71], [2.10 / 2.45 / #text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[1.88]],
     [Stable \@121k], [2.22 / 3.27 / 1.53], [2.09 / 2.68 / 1.60], [2.10 / 2.69 / 1.57],
-    [KL-only \@121k], [#text(fill: rgb("#C62828"), weight: "bold")[2.42] / 3.27 / #text(fill: rgb("#C62828"), weight: "bold")[1.81]], [2.30 / 2.68 / 1.80], [2.08 / 2.49 / 1.61],
+    [KL-only \@121k], [#text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[2.42] / 3.27 / #text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[1.81]], [2.30 / 2.68 / 1.80], [2.08 / 2.49 / 1.61],
     [KL-keep \@121k], [2.40 / 3.27 / 1.75], [2.29 / 2.83 / 1.80], [2.18 / 2.90 / 1.75],
-    [Distill \@121k], [2.31 / #text(fill: rgb("#C62828"), weight: "bold")[3.50] / 1.53], [2.26 / #text(fill: rgb("#C62828"), weight: "bold")[3.09] / 1.87], [#text(fill: rgb("#C62828"), weight: "bold")[2.19] / 2.74 / 1.80],
-    [SmallAR+eta \@105k], [2.15 / 2.88 / 1.75], [2.15 / 2.75 / #text(fill: rgb("#C62828"), weight: "bold")[1.90]], [2.00 / 2.43 / 1.74],
-    [Bigger beta \@121.5k], [2.37 / 3.27 / 1.63], [2.33 / #text(fill: rgb("#C62828"), weight: "bold")[3.09] / 1.62], [1.96 / 2.27 / 1.74],
-    [Top-K set \@121k], [2.28 / 3.12 / 1.52], [2.18 / 2.56 / 1.72], [#text(fill: rgb("#C62828"), weight: "bold")[2.19] / #text(fill: rgb("#C62828"), weight: "bold")[2.91] / 1.56],
+    [Distill \@121k], [2.31 / #text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[3.50] / 1.53], [2.26 / #text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[3.09] / 1.87], [#text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[2.19] / 2.74 / 1.80],
+    [SmallAR+eta \@105k], [2.15 / 2.88 / 1.75], [2.15 / 2.75 / #text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[1.90]], [2.00 / 2.43 / 1.74],
+    [Bigger beta \@121.5k], [2.37 / 3.27 / 1.63], [2.33 / #text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[3.09] / 1.62], [1.96 / 2.27 / 1.74],
+    [Top-K set \@121k], [2.28 / 3.12 / 1.52], [2.18 / 2.56 / 1.72], [#text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[2.19] / #text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[2.91] / 1.56],
     [Big Gamma+Delta \@105k], [2.32 / 3.33 / 1.67], [2.26 / 2.86 / 1.79], [2.09 / 2.59 / 1.71],
-    [Masked Delta later \@105k], [2.30 / 3.12 / 1.72], [#text(fill: rgb("#C62828"), weight: "bold")[2.34] / 2.86 / 1.72], [2.01 / 2.40 / 1.67],
+    [Masked Delta later \@105k], [2.30 / 3.12 / 1.72], [#text(fill: rgb("#C62828"), weight: "bold", size: 13pt)[2.34] / 2.86 / 1.72], [2.01 / 2.40 / 1.67],
   ),
   caption: [Accept/Iter summary върху 10 TinyStories промпта],
 )
@@ -1719,12 +1836,12 @@ Greedy acceptance е централната метрика в документа
 
 Това потвърждава работната хипотеза, че умереният alignment (KL-keep или Distill) е по-надежден за обща decode ефективност от прекалено силни наказания/насърчения върху отделен компонент.
 
-==== 3.9.6 Локален механистичен анализ чрез logits хистограми
+==== 3.10.6 Локален механистичен анализ чрез logits хистограми
 
 Логитните хистограми дават позиционен анализ на механизма за accept/reject и допълват агрегираните метрики с локална причинна интерпретация. Наблюдава се следният типичен модел:
 
-- в ранните позиции на draft блока AR и Diff често са подравнени по top-1 и токените се приемат;
-- около семантично по-нееднозначни позиции Diff става по-разфокусиран или измества top-1 и там започват rejection-и;
+- в ранните позиции на draft блока AR и Diff често съвпадат по top-1 и токените се приемат;
+- при нееднозначни позиции Diff измества top-1 и започват rejection-и;
 - точно тези позиции обясняват защо prefix-ориентирани loss-и (като `delta_masked`) имат смисъл: те таргетират момента, в който acceptance веригата се прекъсва.
 
 Този тип визуализация е силен аргумент, че sweep-ът не е "black-box" оптимизация по една метрика, а контролирано търсене на причинно обясними подобрения.
@@ -1743,7 +1860,7 @@ Greedy acceptance е централната метрика в документа
 
 #pagebreak()
 
-==== 3.9.7 Финален на експеримента и план за продължение
+==== 3.10.7 Финален на експеримента и план за продължение
 
 Проведеният експеримент изпълнява основната си цел: да валидира end-to-end TiDAR training/inference pipeline и да даде първа сравнителна картина за ефекта от различни loss конфигурации. В същото време резултатите показват, че при текущата постановка разделителната способност между вариантите е ограничена.
 

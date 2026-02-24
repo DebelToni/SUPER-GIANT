@@ -21,16 +21,16 @@
 Суперскриптните индекси към термините насочват към съответната позиция в раздел "Използвана литература".
 
 - `autoregressive (AR)`#link(<bib-attention>)[#super[1]] - режим, при който моделът генерира следващ токен на база на предходните токени;
-- `inference`#link(<bib-vllm>)[#super[2]] - процесът на използване на вече обучен модел за генериране/предсказване, без update на параметрите;
-- `KV cache`#link(<bib-vllm>)[#super[2]] - кеш за key/value представянията в attention слоя, който ускорява decode стъпките;
-- `prefill`#link(<bib-vllm>)[#super[2]] - начален forward pass върху prompt-а, който запълва KV cache преди същинския decode;
+- `inference`#link(<bib-vllm>)[#super[2]] - процесът на използване на вече обучен модел за генериране, без трениране;
+- `KV cache`#link(<bib-vllm>)[#super[2]] - кеш за Key/Value матриците в attention слоя, който ускорява decode стъпките;
+- `prefill`#link(<bib-vllm>)[#super[2]] - начален forward pass върху prompt-а, който запълва KV cache преди decode;
 - `decode`#link(<bib-vllm>)[#super[2]] - итеративна фаза на генериране на нови токени след prefill;
 - `sharding`#link(<bib-hf-datasets>)[#super[3]] - разделяне на голям dataset на по-малки shard файлове за по-ефективно четене;
 - `checkpoint`#link(<bib-orbax>)[#super[4]] - запис на състоянието на модела и оптимизатора в конкретна training стъпка;
 - `resume`#link(<bib-orbax>)[#super[4]] - продължаване на training от съществуващ checkpoint вместо start от нула;
-- `stage`#link(<bib-chinchilla>)[#super[5]] - отделен обучителен етап с конкретни настройки (данни, дължина, епохи, loss коефициенти);
-- `curriculum`#link(<bib-chinchilla>)[#super[5]] - планирана последователност от stages, обикновено от по-лесни към по-сложни режими;
-- `loss function`#link(<bib-attention>)[#super[1]] - функция, която измерва грешката на модела и определя посоката на оптимизация;
+- `stage`#link(<bib-chinchilla>)[#super[5]] - отделен обучителен етап с конкретни настройки (данни, дължина, loss коефициенти);
+- `curriculum`#link(<bib-chinchilla>)[#super[5]] - планирана последователност от stages с последователна сложност
+- `loss function`#link(<bib-attention>)[#super[1]] - измерва грешката на модела и определя посоката на оптимизация;
 - `optimizer`#link(<bib-adam>)[#super[6]] - алгоритъм за обновяване на параметрите по градиент (например Adam/AdamW);
 - `batch`#link(<bib-karpathy-build-gpt>)[#super[9]] - група от примери, обработвани заедно в една training стъпка;
 - `epoch`#link(<bib-karpathy-build-gpt>)[#super[9]] - едно пълно преминаване през тренировъчния набор данни;
@@ -60,7 +60,7 @@ SmolLM профилите са важни като practical baseline за ек�
 
 ==== 1.3.4 vLLM и TensorRT-LLM
 
-Тези системи са водещи при serving/latency оптимизации и силно ефективно управление на KV-cache. В GIANT/TiDAR част от идеите за cache политика и throughput benchmarking са приложени в custom стек, като изследователският фокус е върху Anchor-TiDAR декодиране и loss-driven подобрения.
+vLLM и TensorRT-LLM са системи за ефективно изпълнение на вече обучени езикови модели. Те намаляват закъснението и повишават пропускателната способност чрез оптимизирано управление на KV кеша и GPU изпълнението. В проекта GIANT/TiDAR тези практики се използват като инженерен ориентир при оценката на скоростта и при избора на decode политики.
 
 ==== 1.3.5 Защо скоростта е критична за LLM приложения
 

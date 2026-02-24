@@ -322,6 +322,13 @@ def _prefetch_to_device(iterator, size: int = 2, *, device: jax.Device):
             buf.clear()
 
 
+def _format_wall_time(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def parse_args() -> argparse.Namespace:
     cli = argparse.ArgumentParser("SUPER-GIANT training")
     cli.add_argument("--config", default=None, help="Path to training config YAML file")
@@ -340,6 +347,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    command_start = time.perf_counter()
     args = parse_args()
     cfg = load_configs(config_path=args.config, global_config_path=args.global_config)
     global_seed = cfg.get("global_seed")
@@ -705,11 +713,18 @@ def main() -> None:
             "stage_states": stage_states,
         },
     )
+    print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
+    print("→ Use this checkpoint as --init_checkpoint for the QA finetune stage.")
+    elapsed_seconds = time.perf_counter() - command_start
+    runtime_msg = (
+        f"Command executed in {_format_wall_time(elapsed_seconds)} "
+        f"({elapsed_seconds:.1f}s)"
+    )
+    print(runtime_msg)
+    log_file.write(runtime_msg + "\n")
     mini_ckpt_mgr.wait_until_finished(timeout=10.0)
     log_file.flush()
     log_file.close()
-    print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
-    print("→ Use this checkpoint as --init_checkpoint for the QA finetune stage.")
 
 
 if __name__ == "__main__":

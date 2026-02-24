@@ -1,0 +1,60 @@
+# GIANT TinyStories head sweep (3x-head MHA)
+# Approx params: 56.49M (vocab=8192)
+
+model:
+  embedding_size: 576
+  num_heads: 18
+  num_kv_heads: 18
+  num_layers: 12
+  feed_forward_size: 1728
+  rope_dim: 32
+  context_length: 512
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tokenizer:
+  use_custom: true
+  custom_path: "/proj/giant-data/TiDAR/Tiny_tokenizer"
+
+optimizer:
+  base_learning_rate: 3.0e-4
+  min_learning_rate: 1.0e-5
+  warmup_steps: 1000
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
+
+training:
+  batch_size: 16
+  gradient_accumulation: 2
+  seed: 42
+  log_every: 200
+  checkpoint_every: 10000
+  mini_checkpoint_every: 1000
+  mini_max_to_keep: 2
+  scan_chunk: 2
+
+stages:
+  - name: tinystories_512_full_epoch
+    dataset: tinystories_512
+    seq_len: 512
+    epochs: 1
+    end_ratio: 1.0
+    shuffle: false
+    fraction: 1.0
+
+qa_finetune: {}
+
+inference:
+  stop_on_eos: true
+
+paths:
+  data_root: "/proj/giant-data/TiDAR"
+  processed_data_root: "dataset_artifacts/TinyStories_exp"
+  checkpoints_root: "checkpoints/TinyStories_exp/head_sweep/giant_h18_mha"

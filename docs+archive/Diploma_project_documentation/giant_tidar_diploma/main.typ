@@ -1,7 +1,7 @@
 #set page(width: 210mm, height: 297mm, margin: 20mm)
 #set page(footer: context align(center)[#text(size: 9pt)[#counter(page).display()]])
 #set text(font: "Times New Roman", size: 12pt)
-#set par(justify: true, leading: 1.2em)
+#set par(justify: true, leading: 1.3em)
 #set heading(numbering: none)
 #show heading.where(level: 1): it => [
   #align(center, it)

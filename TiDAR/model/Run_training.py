@@ -287,6 +287,13 @@ def _prefetch_to_device(iterator, size: int = 2):
             buf.clear()
 
 
+def _format_wall_time(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def parse_args() -> argparse.Namespace:
     cli = argparse.ArgumentParser("TiDAR training")
     cli.add_argument("--config", type=str, default=None)
@@ -329,6 +336,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    command_start = time.perf_counter()
     args = parse_args()
     cfg = load_configs(args.config, args.global_config)
     jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
@@ -918,10 +926,17 @@ def main() -> None:
             "stage_states": stage_states,
         },
     )
+    print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
+    elapsed_seconds = time.perf_counter() - command_start
+    runtime_msg = (
+        f"Command executed in {_format_wall_time(elapsed_seconds)} "
+        f"({elapsed_seconds:.1f}s)"
+    )
+    print(runtime_msg)
+    log_file.write(runtime_msg + "\n")
     mini_ckpt_mgr.wait_until_finished(timeout=10.0)
     log_file.flush()
     log_file.close()
-    print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
 
 
 if __name__ == "__main__":

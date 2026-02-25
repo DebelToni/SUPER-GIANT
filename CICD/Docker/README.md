@@ -52,4 +52,4 @@ The entrypoint always mounts `/proj`, expects your repo to live at `/proj/SUPER-
 For a quick reminder on how to run the container, see the main project's `README.md` next to the example invocation.
 
 
-![Lore accurate docker container](../../docs+archive/images/Docker.png)
+![Lore accurate docker container](../../docs/images/Docker.png)

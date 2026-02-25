@@ -17,7 +17,7 @@ TiDAR trains a single decoder-only transformer under two attention regimes: stan
 <img width="1633" height="439" alt="image" src="https://github.com/user-attachments/assets/f385fe3f-4b34-48e4-b3f3-65036f2125c4" />
 
 Reference how normal speculative decoding works:
-![Speculative Decoding Explained:](../docs+archive/images/Images_TiDAR_Optimization/Vanilla_speculative_decoding_with_smaller_model.png)
+![Speculative Decoding Explained:](../docs/images/Images_TiDAR_Optimization/Vanilla_speculative_decoding_with_smaller_model.png)
 
 ---
 
@@ -42,7 +42,7 @@ The idea is that in training runs we can choose to add or remove terms based on 
 
 Anchor-TiDAR samples an anchor token from the previous AR logit and commits it immediately, then verifies positions 1..K-1 only. This guarantees at least +1 token progress per step and removes the worst-case no-progress case when all drafts reject, while keeping the same single-pass predraft structure.
 
-![How Anchor TiDAR forward pass looks](../docs+archive/images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png)
+![How Anchor TiDAR forward pass looks](../docs/images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png)
 
 Visual example of how Anchor-TiDAR works during inference:
 
@@ -93,4 +93,4 @@ Latest training results:
 Tested how model capacity affects drafting performance - tested smollm-135m vs smollm-360m on the exact same [data config](./data_pipeline/data_configs/Greedy_exp_500m.yml) with the same [training config][./model/training_configs/Greedy_exp_135m.yml]
 <br>
 Greedy runs (135M vs 360M, draft_len=8) used the hard (greedy) agreement loss to reach avg_accept_per_iter 1.43 (135M) / 1.40 (360M), and the results are documented [here. Small preview:](Docs/Results_Greedy_runs_135_360.pdf).
-[![alt text](../docs+archive/images/PDF-preview-greedy-results.png)](Docs/Results_Greedy_runs_135_360.pdf)
+[![alt text](../docs/images/PDF-preview-greedy-results.png)](Docs/Results_Greedy_runs_135_360.pdf)

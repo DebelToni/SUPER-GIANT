@@ -74,7 +74,7 @@
 - За text-only промени по подразбиране не е задължителен compile.
 - При структурни промени, големи figure/layout промени или съмнение за синтаксис — compile.
 - Външните TiDAR `.typ` файлове дават познат deprecation warning (`path` -> `curve`), но build минава.
-- При compile от директорията на дипломата ползвай `--root /Users/antonhristov/Documents/ML/SUPER-GIANT`, за да работят image пътищата към `docs+archive/images`.
+- При compile от директорията на дипломата ползвай `--root /Users/antonhristov/Documents/ML/SUPER-GIANT`, за да работят image пътищата към `docs/images`.
 
 ## Layout настройки (main.typ)
 

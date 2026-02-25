@@ -3,7 +3,7 @@
 Няма да те занимавам с кода като имплементация, че там имам динамичен KV cache allocation с buckets, презаписване… Важното е TiDAR идеята:  
   
 Нормален speculative decoding:  
-![Speculative Decoding Explained:](../../docs+archive/images/Images_TiDAR_Optimization/Vanilla_speculative_decoding_with_smaller_model.png)  
+![Speculative Decoding Explained:](../../docs/images/Images_TiDAR_Optimization/Vanilla_speculative_decoding_with_smaller_model.png)  
   
 Source for TiDAR paper - [https://arxiv.org/pdf/2511.08923](https://arxiv.org/pdf/2511.08923)   
   
@@ -26,11 +26,11 @@ Input DEF (тези future prediction-и) -> Output E^ F^ G^ (слагам ^, з
 DEF MMM MMM MMM -> E^ F^ G^  EFG FGH GHI  
   
 Така имаме нови предикшъни за следващата стъпка в зависимост до кой вариант accept-нем. Това е главната идея на TiDAR, Така изглежда в paper-a:  
-![Prefix Tokens](../../docs+archive/images/Images_TiDAR_Optimization/TiDAR_Single_Forward_pass.png)  
+![Prefix Tokens](../../docs/images/Images_TiDAR_Optimization/TiDAR_Single_Forward_pass.png)  
 Вкарваме K+K^2 token-и вместо 1, като K е колко напред предсказваме, в този пример е 3, но може повече да се скалира.  
   
 ^ Важно е тук да се отбележи, че идеята на token-ите в прекъснати линии горе е, че маската след тях е направена да вижда само до тях. Ето маската:  
-![M](../../docs+archive/images/Images_TiDAR_Optimization/TiDAR_infernece_mask.png)  
+![M](../../docs/images/Images_TiDAR_Optimization/TiDAR_infernece_mask.png)  
   
   
 # Какво аз предлагам:  
@@ -40,11 +40,11 @@ DEF MMM MMM MMM -> E^ F^ G^  EFG FGH GHI
 За да го решим имаме 2 опции:  
 1.Още 3 маски за възможността, че дори D (от DEF) не сме приели, което ще направи цялото нещо 2K+K^2  
 2.**Какво според мен е по-добре като идея: **Да не вкарваме 3те prediction-a в decode-a, a да вкарам D*EF, като D* съм го взел от prefill/миналия степ след sampling на AR там. Това ще трябва да промени и следващите маски да влияят от него, а не от нормалното D. Ето рисунка:  
-![D* M M M](../../docs+archive/images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png)  
+![D* M M M](../../docs/images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png)  
 (Примерът ми е ако отхвърлим и E, но графиката в paper-а беше така просто)  
   
 Така хем винаги имаме +1 хем винаги имаме нови 3 предикшъна, защото не можем да сбъркаме D* никога, като сме го взели от AR директно. Това не би трябвало също да промени как работи ако E или F са били верни, защото те си имат блокчета и без това. Ето със таблица стъпка по стъпка какво става:  
-![O. Prefill](../../docs+archive/images/Images_TiDAR_Optimization/Anchor_TiDAR_KV_cache_per_interation.png)  
+![O. Prefill](../../docs/images/Images_TiDAR_Optimization/Anchor_TiDAR_KV_cache_per_interation.png)  
   
 Това блокче си го написах тук, за да го copy-paste-вам в лицето на Чата всеки път като ми каже, че идеята ми не баща:  
 —  

@@ -38,8 +38,8 @@
 - Typst Documentation. #link("https://typst.app/docs/")[https://typst.app/docs/]
 - [7] Brutlag, J. *Speed Matters for Google Web Search*. Google, 2009. #link("https://services.google.com/fh/files/blogs/google_delayexp.pdf")[https://services.google.com/fh/files/blogs/google_delayexp.pdf] <bib-brutlag-speed>
 
-- DeepSeek-AI. *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model* (MLA + MoE), 2024. #link("https://arxiv.org/abs/2405.04434")[https://arxiv.org/abs/2405.04434]
-- DeepSeek-AI. *DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models*, 2024. #link("https://arxiv.org/abs/2401.06066")[https://arxiv.org/abs/2401.06066]
+- [18] DeepSeek-AI. *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model* (MLA + MoE), 2024. #link("https://arxiv.org/abs/2405.04434")[https://arxiv.org/abs/2405.04434] <bib-deepseek-v2>
+- [19] DeepSeek-AI. *DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models*, 2024. #link("https://arxiv.org/abs/2401.06066")[https://arxiv.org/abs/2401.06066] <bib-deepseek-moe>
 - Beltagy, I., Peters, M. E., Cohan, A. *Longformer: The Long-Document Transformer* (sliding-window attention), 2020. #link("https://arxiv.org/abs/2004.05150")[https://arxiv.org/abs/2004.05150]
 
 #set par(leading: 1.3em)

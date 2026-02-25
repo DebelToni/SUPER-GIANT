@@ -117,7 +117,7 @@ python TiDAR/model/inference.py \
 - `eta`, `eta_T`;
 - `gamma`, `gamma_topk`.
 
-=== 4.8 Клавишни комбинации и бързи команди
+=== 4.8 Бързи CLI команди
 
 Работният процес е CLI-first. Типични бързи команди:
 

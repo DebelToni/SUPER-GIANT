@@ -1,5 +1,6 @@
 #set page(width: 210mm, height: 297mm, margin: 20mm)
-#set page(footer: context align(center)[#text(size: 9pt)[#counter(page).display()]])
+#let page_footer = context align(center)[#text(size: 9pt)[#counter(page).display()]]
+#set page(footer: page_footer)
 #set text(font: "Times New Roman", size: 12pt)
 #set par(justify: true, leading: 1.3em)
 #set heading(numbering: none)
@@ -34,6 +35,7 @@
   caption: [#title],
 )
 
+#set page(footer: none)
 #align(center + horizon)[
   #text(size: 24pt, weight: "bold")[СКАНИРАНО ЗАДАНИЕ]
 ]
@@ -42,6 +44,11 @@
 #align(center + horizon)[
   #text(size: 24pt, weight: "bold")[СКАНИРАНО СТАНОВИЩЕ]
 ]
+
+#pagebreak()
+#counter(page).update(1)
+#set page(footer: page_footer)
+#include "sections/01-intro.typ"
 
 #pagebreak()
 #include "sections/02-ch1.typ"

@@ -7,6 +7,10 @@
 
 #import "../../../TiDAR/Docs/TiDAR_AR_A40_H100_HeadToHead.typ" as hh
 #import "../../../TiDAR/Docs/TinyStories_TiDAR_losses_Comparison.typ" as tsc
+#import "../../../TiDAR/Docs/Bucket_Prefix0_1600_A40_Spot.typ" as bp
+#import "../../../TiDAR/Docs/KV_Cache_Policy_A40.typ" as kvp
+#import "../../../TiDAR/Docs/Finding_Free_token_slots_A40.typ" as fts
+#import "../../../TiDAR/Docs/Results_Greedy_runs_135_360.typ" as rg
 #import "@preview/fletcher:0.5.8": diagram, node, edge
 
 #let tok(lbl, fill: rgb("#E5E7EB"), stroke_color: rgb("#374151")) = box(
@@ -17,6 +21,12 @@
   fill: fill,
   radius: 2pt,
 )[#align(center)[#text(size: 7.5pt)[#lbl]]]
+
+#let leg(label, color, size: 7.6pt) = [
+  #box(width: 6pt, height: 6pt, fill: color, radius: 1pt)[]
+  #h(2pt)
+  #text(size: size)[#label]
+]
 
 #show heading.where(level: 1): it => [
   #v(0.5em)
@@ -33,7 +43,7 @@
 #align(center)[
   #v(12em)
   #text(size: 22pt, weight: "bold")[ДОКУМЕНТАЦИЯ НА ПРОЕКТ]
-  #v(1.2em)
+  #v(3.6em)
   #text(size: 18pt, weight: "bold")[GIANT]
   #v(0.8em)
   #text(size: 13pt)[Система за подготовка, трениране и ускорен инференс на езикови модели]
@@ -52,9 +62,9 @@
 
 = I. ТЕМА
 
-Темата на проекта е разработване на цялостна система за създаване и използване на езикови модели - от подготовката на данните и обучението до ускорен inference и количествена оценка на производителността. Реализацията обединява стабилна инженерна основа (GIANT) и изследователски слой (TiDAR/Anchor-TiDAR) в една codebase.
+Темата на проекта е разработване на цялостна система за създаване и използване на езикови модели - от подготовката на данните и обучението до ускорен inference и количествена оценка на производителността. Реализацията обединява стабилна инженерна основа за GPT-style езиков модел (GIANT) и изследователски слой за бърза генерация (TiDAR/Anchor-TiDAR) в единен codebase.
 
-Фокусът е върху decoder-only Transformer модели, KV cache оптимизации и сравнение между класически autoregressive decode и хибриден decode режим. В хибридния режим diffusion компонентът се реализира като итеративна *denoising trajectory* с последваща AR верификация в същия execution flow. Целта е практическа система с възпроизводимо обучение, ускорен inference и измерими метрики за speedup/latency.
+Фокусът е върху decoder-only Transformer модели, KV cache оптимизации и сравнение между класически autoregressive decode и хибриден decode режим. В хибридния режим diffusion компонентът се реализира като итеративнo подобряване на латентна репрезентация на бъдещето с последваща AR верификация в един и същ forward pass. Целта е практическа система с възпроизводимо обучение, ускорен inference и измерими метрики за speedup/latency.
 
 #block(
   width: 100%,
@@ -93,7 +103,7 @@
 
 *GIANT* е базовата инженерна платформа: data pipeline, decoder-only training loop, checkpoint/resume механизъм, ускорен inference с KV cache и стандартизирани benchmark сценарии. Този слой осигурява стабилен, възпроизводим и практически използваем моделeн pipeline.
 
-*TiDAR/Anchor-TiDAR* е изследователското разширение върху същата инфраструктура. То въвежда sequence-level hybrid decode (draft + verify в един forward pass), структурирани attention маски и допълнителни loss конфигурации за анализ на speed/quality поведението.
+*TiDAR/Anchor-TiDAR* е изследователското разширение върху същата инфраструктурапо вдъхновение от научния труд на NVIDIA Research - Think in Diffusion, talk in AutoRegression. То въвежда sequence-level hybrid decode (draft + verify в един forward pass), структурирани attention маски и допълнителни loss конфигурации за анализ на speed/quality поведението.
 
 Комбинацията между двата слоя позволява едновременно production-oriented експлоатация и научно-изследователска работа в една и съща codebase, без дублиране на инструменти и без отделни несъвместими среди.
 
@@ -184,18 +194,18 @@ $ op("MHA")(Q, K, V) = [h_1 || h_2 || ... || h_H] W^(O) $
 Функционално решението е изградено от следните модули:
 
 - *Data Module* - ingest, cleaning, dataset sharding, статистики, проверка на входните файлове.
-- *Training Module* - optimizer update loop, curriculum stages, gradient accumulation, checkpoint save/recover.
-- *Inference Module* - prefill + decode път, sampling режими, KV cache management, performance counters.
-- *Evaluation Module* - benchmark сценарии, автоматично събиране на метрики, сравнение между конфигурации.
+- *Training Module* - optimizer loop, stages, gradient accumulation, checkpoint/recover.
+- *Inference Module* - prefill/decode, sampling режими, KV cache, performance counters.
+- *Evaluation Module* - benchmark сценарии и сравнение на ключови метрики.
 - *Deployment Module* - Docker runtime, remote execution, data sync, artifact management.
 
 Комуникацията между модулите е конфигурационно-ориентирана: модулите не разчитат на ръчно редактирани вътрешни параметри, а на explicit YAML settings, което намалява риска от скрити зависимости.
 
 === 4.3. Data и training pipeline
 
-Data pipeline обработва корпусите в последователни стъпки: нормализация, филтриране, токенизация и shard-ване. Получените shard файлове се използват директно от training loop-а, така че I/O достъпът да е предвидим и подходящ за дълги run-ове.
+Data pipeline изпълнява нормализация, филтриране, токенизация и shard-ване, а получените shard файлове се подават директно към training loop-а за предвидим I/O.
 
-Training pipeline е stage-based. Всеки stage има собствени параметри (контекстна дължина, learning schedule, loss weights), като състоянието се съхранява чрез checkpoint. Така при прекъсване обучението може да продължи без загуба на прогрес.
+Training pipeline е stage-based: всеки stage има собствени параметри (контекст, learning schedule, loss weights), а състоянието се пази с checkpoint, което позволява надежден resume при прекъсване.
 
 Базовите training термини се дефинират така:
 
@@ -211,66 +221,194 @@ $ L = alpha L_(A) + beta L_(D) + rho D_(f) + chi D_(r) + delta L_(H) + delta_(m)
 
 $ D_(f) = sum_v p_(A)(v) ln frac(p_(A)(v), p_(D)(v)), quad D_(r) = sum_v p_(D)(v) ln frac(p_(D)(v), p_(A)(v)), quad L_(H) = - sum_t m_t ln p_(D)(y_t | c_t) $
 
-#figure(
-  grid(
-    columns: (1fr, 1fr, 1fr),
-    gutter: 5pt,
-    [
-      #tsc.multi-line-chart(
-        (
-          (color: tsc.stable-color, data: tsc.stable-ar-90),
-          (color: tsc.distill-color, data: tsc.distill-ar-90),
-        ),
-        width: 52mm,
-        height: 30mm,
-        y_label: "AR",
-        x_min: tsc.branch-x-min,
-        x_max: tsc.branch-x-max,
-        y_min: tsc.ar-zoom-y-min,
-        y_max: tsc.ar-zoom-y-max,
-      )
-    ],
-    [
-      #tsc.multi-line-chart(
-        (
-          (color: tsc.stable-color, data: tsc.stable-diff-90),
-          (color: tsc.kl-keep-color, data: tsc.kl-keep-diff-90),
-        ),
-        width: 52mm,
-        height: 30mm,
-        y_label: "Diff",
-        x_min: tsc.branch-x-min,
-        x_max: tsc.branch-x-max,
-        y_min: tsc.diff-zoom-y-min,
-        y_max: tsc.diff-zoom-y-max,
-      )
-    ],
-    [
-      #tsc.multi-line-chart(
-        (
-          (color: tsc.stable-color, data: tsc.stable-greedy-90),
-          (color: tsc.topk-color, data: tsc.topk-greedy-90),
-        ),
-        width: 52mm,
-        height: 30mm,
-        y_label: "Greedy",
-        y_tick_percent: true,
-        x_min: tsc.branch-x-min,
-        x_max: tsc.branch-x-max,
-        y_min: tsc.greedy-y-min,
-        y_max: tsc.greedy-y-max,
-      )
-    ],
-  ),
-  caption: [Мини training диаграми: AR, Diff и Greedy динамика за избрани loss режими],
+#align(center)[
+  #leg("3b bucket", bp.c-orange) #h(8pt)
+  #leg("3b full", bp.c-red) #h(8pt)
+  #leg("3b AR", bp.c-green) #h(10pt)
+  #leg("KV full", kvp.c-red) #h(8pt)
+  #leg("KV exact", kvp.c-blue) #h(8pt)
+  #leg("KV bucket", kvp.c-orange)
+]
+
+#grid(
+  columns: (1fr, 1fr),
+  gutter: 6pt,
+  [
+    #bp.line-chart(
+      "A40 GPU: 3b/k=16 (bucketed vs full AR)",
+      (
+        (label: "3b bucketed", color: bp.c-orange, data: bp.m3b_steady),
+        (label: "3b full-context", color: bp.c-red, data: bp.m3b_full_steady),
+        (label: "3b AR", color: bp.c-green, data: bp.m3b_ar_steady),
+      ),
+      width: 82mm,
+      height: 35mm,
+      y-label: "steady tokens/s",
+    )
+  ],
+  [
+    #kvp.line-chart(
+      "KV policy: 3b first",
+      kvp.m3b_first,
+      width: 82mm,
+      height: 35mm,
+      y-label: "compile+first tokens/s",
+      y-label-dx: 2pt,
+    )
+  ],
 )
 
+Двете графики показват как политиката за оразмеряване на KV cache влияе директно върху decode производителността: bucketed подходът запазва по-висока steady скорост спрямо full-context baseline, а в first-run режима се вижда цената на compile и ефектът от cache sizing върху първата заявка.
+
+#grid(
+  columns: (1fr, 1fr, 1fr),
+  gutter: 5pt,
+  [#align(center)[#scale(88%)[#fts.line-chart("Kernel terms (7B-style, lower is better)", fts.k7b, width: 53mm, height: 34mm, y-label: "ms / attention")]]],
+  [#align(center)[#scale(88%)[#fts.line-chart("Sampling-only 3b (lower is better)", fts.samp3b, width: 53mm, height: 34mm, y-label: "ms / sampling cycle")]]],
+  [#align(center)[#scale(88%)[#fts.line-chart("MLP only (7B-style, lower is better)", fts.mlp7b, width: 53mm, height: 34mm, y-label: "ms / MLP")]]],
+)
+
+#align(center)[
+  #leg("struct", rgb("#1D4ED8"), size: 7.4pt) #h(8pt)
+  #leg("dense", rgb("#DC2626"), size: 7.4pt) #h(8pt)
+  #leg("d+0", rgb("#059669"), size: 7.4pt) #h(8pt)
+  #leg("AR", rgb("#7C3AED"), size: 7.4pt) #h(8pt)
+  #leg("TiDAR", rgb("#0F766E"), size: 7.4pt) #h(8pt)
+  #leg("top-k", rgb("#EAB308"), size: 7.4pt)
+]
+
+Тези 3 графики показват Free Token Slots феномена при attetnion, sampling и MLP.
+
 #pagebreak()
+
+#set par(justify: false)
+
+#align(left)[#text(weight: "semibold")[SmolLM 135M vs 360M]]
+
+#grid(
+  columns: (auto, auto, auto),
+  gutter: 10pt,
+  [#box(width: 7pt, height: 7pt, fill: rg.color-135, radius: 1pt)[] #h(3pt) #text(size: 8pt)[135M]],
+  [#box(width: 7pt, height: 7pt, fill: rg.color-360, radius: 1pt)[] #h(3pt) #text(size: 8pt)[360M]],
+  [#box(width: 7pt, height: 7pt, fill: rg.color-delta, radius: 1pt)[] #h(3pt) #text(size: 8pt)[ratio 135/360]],
+)
+
+#grid(
+  columns: (1fr, 1fr),
+  gutter: 8pt,
+  [
+    #rg.compare-chart(
+      (
+        (label: "135M", color: rg.color-135, data: rg.diff-135),
+        (label: "360M", color: rg.color-360, data: rg.diff-360),
+      ),
+      width: 82mm,
+      height: 34mm,
+      y_label: "Diff loss",
+      delta_data: rg.delta-ratio-series(rg.diff-135, rg.diff-360),
+    )
+  ],
+  [
+    #rg.compare-chart(
+      (
+        (label: "135M", color: rg.color-135, data: rg.acc-135),
+        (label: "360M", color: rg.color-360, data: rg.acc-360),
+      ),
+      width: 82mm,
+      height: 34mm,
+      y_label: "Greedy acc",
+      delta_data: rg.delta-ratio-series(rg.acc-135, rg.acc-360),
+    )
+  ],
+)
+
+По-големият 360M модел поддържа по-стабилен quality профил при сравним decode режим, което е очакван индикатор за по-висок моделeн капацитет.
+
+В practical inference план това означава, че 360M дава по-предсказуемо поведение при сходни decode настройки, докато 135M остава полезен за по-евтини и бързи итерации. Тази двойка графики е полезна за избор на model size спрямо budget/quality изисквания.
+
+#v(4pt)
+#align(center)[
+  #leg("Stable baseline", tsc.stable-color, size: 7.1pt) #h(7pt)
+  #leg("KL-only no-diff", tsc.kl-only-color, size: 7.1pt) #h(7pt)
+  #leg("KL-keep soft-align", tsc.kl-keep-color, size: 7.1pt) #h(7pt)
+  #leg("Distill AR->Diff", tsc.distill-color, size: 7.1pt)
+]
+#align(center)[
+  #leg("G-eta hard-agree", tsc.smallar-color, size: 7.1pt) #h(7pt)
+  #leg("B-beta diff-boost", tsc.biggerbeta-color, size: 7.1pt) #h(7pt)
+  #leg("Top-K set-match", tsc.topk-color, size: 7.1pt) #h(7pt)
+  #leg("B-gamma hard+set", tsc.biggamma-color, size: 7.1pt) #h(7pt)
+  #leg("D-mask prefix-only", tsc.maskedlater-color, size: 7.1pt)
+]
+
+Следващите графики показват delta спрямо stable baseline за core и за разширения набор от loss конфигурации върху TinyStories (90k-121k).
+
+#grid(
+  columns: (1fr, 1fr),
+  gutter: 8pt,
+  [
+    #align(left)[#text(size: 8.5pt, weight: "semibold")[Core loss варианти]]
+    #tsc.multi-line-chart(
+      (
+        (color: tsc.kl-only-color, data: tsc.delta-greedy-kl-only),
+        (color: tsc.kl-keep-color, data: tsc.delta-greedy-kl-keep),
+        (color: tsc.distill-color, data: tsc.delta-greedy-distill),
+      ),
+      width: 82mm,
+      height: 34mm,
+      y_label: "Delta Greedy",
+      y_tick_percent: true,
+      x_min: tsc.branch-x-min,
+      x_max: tsc.branch-x-max,
+      y_min: tsc.delta-greedy-y-min,
+      y_max: tsc.delta-greedy-y-max,
+    )
+  ],
+  [
+    #align(left)[#text(size: 8.5pt, weight: "semibold")[Разширен loss набор]]
+    #tsc.multi-line-chart(
+      (
+        (color: tsc.smallar-color, data: tsc.delta-greedy-smallar),
+        (color: tsc.biggerbeta-color, data: tsc.delta-greedy-biggerbeta),
+        (color: tsc.topk-color, data: tsc.delta-greedy-topk),
+        (color: tsc.biggamma-color, data: tsc.delta-greedy-biggamma),
+        (color: tsc.maskedlater-color, data: tsc.delta-greedy-maskedlater),
+      ),
+      width: 82mm,
+      height: 34mm,
+      y_label: "Delta Greedy",
+      y_tick_percent: true,
+      x_min: tsc.branch-x-min,
+      x_max: tsc.branch-x-max,
+      y_min: tsc.delta-greedy-ext-y-min,
+      y_max: tsc.delta-greedy-ext-y-max,
+    )
+  ],
+)
+
+Анализ: TinyStories е нискоентропиен корпус с ограничена лексикална вариативност, затова разликите между loss вариантите често са с малка амплитуда. За по-ясно разделяне на ефектите е необходимо скалиране към по-големи модели и по-трудни корпуси.
+
+Core вариантите са добър избор за стабилност и контрол, докато разширеният набор е по-подходящ за търсене на агресивни speedup хипотези.
+
+#v(4pt)
+#pagebreak()
+#align(left)[#text(weight: "semibold")[Логитни хистограми (TinyStories примери)]]
+За всяка позиция са показани два панела: горният е AR verify разпределението, а долният е Diff draft разпределението за същите токени в същия ред.
+#v(2pt)
+#scale(96%)[#tsc.render-hist(tsc.meta2, tsc.data2)]
+#v(3pt)
+#scale(96%)[#tsc.render-hist(tsc.meta3, tsc.data3)]
+#v(2pt)
+След първия reject често се наблюдават локални top-1 съвпадения между AR и Diff, но acceptance веригата остава прекъсната за текущата итерация, поради което позициите не се маркират като приети.
+
+#pagebreak()
+
+#set par(justify: true)
 
 === 4.4. Anchor-TiDAR: hybrid decode логика
 
 #figure(
-  image("../../images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png", width: 86%),
+  image("../../images/Images_TiDAR_Optimization/Anchor_TiDAR_forward_pass.png", width: 100%),
   caption: [Anchor-TiDAR forward pass: verify + predraft в един моделeн проход],
 )
 

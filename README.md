@@ -1,9 +1,11 @@
-
 <h1 align="center">SUPER GIANT</h1>
 <!-- <h5 align="center"> SUPERsupreme Utra PROfesional ELITE ReVolutIonary GIGA intelligent ArtIfical neXus TITAN </h5> -->
 
 GIANT is my own custom implementation of a large language model (LLM) written in Python - JAX.
 It is designed to be a modern, robust and easily expandable implementation with a focus on performance on a single GPU and ease of use. 
+
+This project is developed for my own learning but also serves as my highschool graduation project. You can find the full bulgarian documentation for that here:
+[Bulgarian Graduation Project Documentation](<docs/Diploma_project_documentation/giant_tidar_diploma/Дипломна Работа Антон Христов.pdf>)
 
 To understand how LLMs work watch my first video:
 <br>

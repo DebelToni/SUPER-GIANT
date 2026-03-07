@@ -16,9 +16,10 @@ def loss_and_grad(params, batch, *, model, dropout_rng):
             deterministic=False,
         )
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch["target"])
-        mask_sum = batch["mask"].sum()
+        mask = batch["mask"].astype(jnp.float32)
+        mask_sum = mask.sum(dtype=jnp.float32)
         denom = jnp.maximum(mask_sum, 1.0)
-        return (loss * batch["mask"]).sum() / denom
+        return (loss * mask).sum(dtype=jnp.float32) / denom
 
     return jax.value_and_grad(loss_fn)(params)
 

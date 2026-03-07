@@ -7,33 +7,35 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
 
-from pathlib import Path
 
-from omegaconf import OmegaConf
-
-
-MODEL_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = MODEL_DIR.parent
-
-cfg = OmegaConf.merge(
-    OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
-    OmegaConf.load(MODEL_DIR / "Config.yml"),
-)
-MODEL_CFG = cfg.model
+def _to_dtype(value: jnp.dtype | str) -> jnp.dtype:
+    if isinstance(value, jnp.dtype):
+        return value
+    if isinstance(value, str):
+        try:
+            return getattr(jnp, value)
+        except AttributeError:
+            return jnp.dtype(value)
+    return jnp.dtype(value)
 
 
-def _to_dtype(name: str) -> jnp.dtype:
-    try:
-        return getattr(jnp, name)
-    except AttributeError:
-        return jnp.dtype(name)
+# Backward-compatible defaults; actual training/inference configs should pass
+# these explicitly through GiantGPT/Run_training/Generate_faster.
+PARAM_DTYPE = jnp.float32
+COMPUTE_DTYPE = jnp.bfloat16
 
 
-PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
-COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
+class _ModelDefaults:
+    embedding_size = 640
+    num_heads = 10
+    num_kv_heads = 5
+    feed_forward_size = 2560
+    context_length = 2048
+    rope_dim = 64
+    use_remat = False
 
-from jax import config as jax_config
-jax_config.update("jax_default_matmul_precision", MODEL_CFG.compute_dtype)  
+
+MODEL_CFG = _ModelDefaults()
 
 IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
 
@@ -66,13 +68,16 @@ class NativeJaxSelfAttention(nn.Module):
 
     num_heads: int
     qkv_features: int
-    context_length: int = MODEL_CFG.context_length
+    context_length: int = 2048
     dropout_rate: float = 0.0
     num_kv: int = 1
-    dtype: jnp.dtype = COMPUTE_DTYPE
-    rotary_dim: int = MODEL_CFG.rope_dim
+    dtype: jnp.dtype | str = COMPUTE_DTYPE
+    param_dtype: jnp.dtype | str = PARAM_DTYPE
+    rotary_dim: Optional[int] = None
 
     def setup(self):
+        self._compute_dtype = _to_dtype(self.dtype)
+        self._param_dtype = _to_dtype(self.param_dtype)
         assert (
             self.qkv_features % self.num_heads == 0
         ), "qkv_features must be divisible by num_heads"
@@ -80,29 +85,32 @@ class NativeJaxSelfAttention(nn.Module):
         assert (
             self.num_heads % self.num_kv == 0
         ), "num_heads must be divisible by num_kv_heads for grouped attention"
-        assert(self.rotary_dim <= self.head_dim), "less than or equal to head_dim"
-        assert(self.rotary_dim % 2 == 0), "rotary_dim must be even"
+
+        rotary_dim = self.rotary_dim if self.rotary_dim is not None else self.head_dim
+        self._rotary_dim = int(rotary_dim)
+        assert self._rotary_dim <= self.head_dim, "rotary_dim must be <= head_dim"
+        assert self._rotary_dim % 2 == 0, "rotary_dim must be even"
 
         total_out = self.qkv_features + 2 * self.num_kv * self.head_dim
         self.qkv_proj = nn.Dense(
             total_out,
             use_bias=False,
             name="qkv_proj",
-            dtype=self.dtype,
-            param_dtype=PARAM_DTYPE,
+            dtype=self._compute_dtype,
+            param_dtype=self._param_dtype,
         )
         self.o_proj = nn.Dense(
             self.qkv_features,
             use_bias=False,
             name="o_proj",
-            dtype=self.dtype,
-            param_dtype=PARAM_DTYPE,
+            dtype=self._compute_dtype,
+            param_dtype=self._param_dtype,
         )
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
         # Precompute rotary embeddings once and slice per call.
         self._rope_sin, self._rope_cos = _build_rope_cache(
-            self.context_length, self.rotary_dim, self.dtype
+            self.context_length, self._rotary_dim, self._compute_dtype
         )
 
     @nn.compact
@@ -135,15 +143,15 @@ class NativeJaxSelfAttention(nn.Module):
                 sin = jax.lax.dynamic_slice(
                     self._rope_sin,
                     (0, cur_index, 0, 0),
-                    (1, l, 1, self.rotary_dim),
+                    (1, l, 1, self._rotary_dim),
                 )
                 cos = jax.lax.dynamic_slice(
                     self._rope_cos,
                     (0, cur_index, 0, 0),
-                    (1, l, 1, self.rotary_dim),
+                    (1, l, 1, self._rotary_dim),
                 )
-                sin = jnp.broadcast_to(sin, (b, l, 1, self.rotary_dim))
-                cos = jnp.broadcast_to(cos, (b, l, 1, self.rotary_dim))
+                sin = jnp.broadcast_to(sin, (b, l, 1, self._rotary_dim))
+                cos = jnp.broadcast_to(cos, (b, l, 1, self._rotary_dim))
             else:
                 positions = cur_index[:, None] + jnp.arange(l, dtype=jnp.int32)[None, :]
                 sin = jnp.take(self._rope_sin[0], positions, axis=0)
@@ -152,8 +160,8 @@ class NativeJaxSelfAttention(nn.Module):
             sin = self._rope_sin[:, :l, :, :]
             cos = self._rope_cos[:, :l, :, :]
 
-        q = apply_partial_rope(q, sin, cos, self.rotary_dim)
-        k = apply_partial_rope(k, sin, cos, self.rotary_dim)
+        q = apply_partial_rope(q, sin, cos, self._rotary_dim)
+        k = apply_partial_rope(k, sin, cos, self._rotary_dim)
 
 
         if use_kv_cache:
@@ -164,14 +172,14 @@ class NativeJaxSelfAttention(nn.Module):
                 "k",
                 jnp.zeros,
                 cache_shape,
-                self.dtype,
+                self._compute_dtype,
             )
             cached_v = self.variable(
                 "cache",
                 "v",
                 jnp.zeros,
                 cache_shape,
-                self.dtype,
+                self._compute_dtype,
             )
 
             k_to_cache = jnp.swapaxes(k, 1, 2)  # (b, num_kv, l, hd)
@@ -201,13 +209,13 @@ class NativeJaxSelfAttention(nn.Module):
                 new_k, new_v = _update_scalar(cached_k.value, cached_v.value, cur_index)
                 cur_max = cur_index + (l - 1)
                 valid = jnp.arange(self.context_length) <= cur_max
-                attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
+                attn_bias = jnp.where(valid, 0.0, -1e10).astype(self._compute_dtype)
                 attn_bias = attn_bias[None, None, None, :]
             else:
                 new_k, new_v = _update_vector(cached_k.value, cached_v.value, cur_index)
                 cur_max = cur_index + (l - 1)
                 valid = jnp.arange(self.context_length)[None, :] <= cur_max[:, None]
-                attn_bias = jnp.where(valid, 0.0, -1e10).astype(self.dtype)
+                attn_bias = jnp.where(valid, 0.0, -1e10).astype(self._compute_dtype)
                 attn_bias = attn_bias[:, None, None, :]
 
             cached_k.value = new_k
@@ -241,33 +249,44 @@ class TinyTransformerBlock(nn.Module):
     d_model: int
     n_heads: int
     d_ff: int
-    context_length: int = MODEL_CFG.context_length
+    context_length: int = 2048
     dropout_rate: float = 0.1
-    num_kv_heads: Optional[int] = None  # If None, uses num_heads (MHA)
-    rotary_dim: Optional[int] = None  # If None, uses MODEL_CFG.rope_dim
-    dtype: jnp.dtype = COMPUTE_DTYPE
+    num_kv_heads: Optional[int] = None
+    rotary_dim: Optional[int] = None
+    dtype: jnp.dtype | str = COMPUTE_DTYPE
+    param_dtype: jnp.dtype | str = PARAM_DTYPE
+    use_remat: bool = False
 
     @nn.compact
-    def __call__(self, x, *, deterministic: bool, use_kv_cache: bool = False, cur_index: Optional[int] = None):
+    def __call__(
+        self,
+        x,
+        *,
+        deterministic: bool,
+        use_kv_cache: bool = False,
+        cur_index: Optional[jnp.ndarray | int] = None,
+    ):
+        compute_dtype = _to_dtype(self.dtype)
+        param_dtype = _to_dtype(self.param_dtype)
+        num_kv = self.num_kv_heads if self.num_kv_heads is not None else self.n_heads
+
         def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
             residual = h
-            h_norm = RMSNorm(name="rms1", dtype=self.dtype, epsilon=1e-5)(h)
-            # Use provided num_kv_heads or fall back to n_heads (MHA) or global config
-            num_kv = module.num_kv_heads if module.num_kv_heads is not None else MODEL_CFG.num_kv_heads
-            rotary_dim = module.rotary_dim if module.rotary_dim is not None else MODEL_CFG.rope_dim
+            h_norm = RMSNorm(name="rms1", dtype=compute_dtype, epsilon=1e-5)(h)
             h_attn = NativeJaxSelfAttention(
                 num_heads=module.n_heads,
                 num_kv=num_kv,
                 qkv_features=module.d_model,
                 context_length=module.context_length,
                 dropout_rate=module.dropout_rate,
-                dtype=module.dtype,
-                rotary_dim=rotary_dim,
+                dtype=compute_dtype,
+                param_dtype=param_dtype,
+                rotary_dim=module.rotary_dim,
             )(h_norm, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
             h = residual + h_attn
 
             residual = h
-            h_norm = RMSNorm(name="rms2", dtype=self.dtype, epsilon=1e-5)(h)
+            h_norm = RMSNorm(name="rms2", dtype=compute_dtype, epsilon=1e-5)(h)
 
             # Standard SwiGLU: project to 2 * d_ff, split, SiLU gate
             gate_dim = module.d_ff
@@ -276,8 +295,8 @@ class TinyTransformerBlock(nn.Module):
             h_proj = nn.Dense(
                 proj_dim,
                 name="fc1",
-                dtype=module.dtype,
-                param_dtype=PARAM_DTYPE,
+                dtype=compute_dtype,
+                param_dtype=param_dtype,
                 use_bias=False,
             )(h_norm)
 
@@ -288,13 +307,12 @@ class TinyTransformerBlock(nn.Module):
             h_ffn = nn.Dense(
                 module.d_model,
                 name="fc2",
-                dtype=module.dtype,
-                param_dtype=PARAM_DTYPE,
+                dtype=compute_dtype,
+                param_dtype=param_dtype,
                 use_bias=False,
             )(h_ffn)
             h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)
             return residual + h_ffn
 
-        use_remat = bool(getattr(MODEL_CFG, "use_remat", False))
-        block_fn = nn.remat(_block) if use_remat else _block
+        block_fn = nn.remat(_block) if self.use_remat else _block
         return block_fn(self, x)

@@ -6,7 +6,7 @@ import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
@@ -65,6 +65,17 @@ DEFAULT_DEVICE = select_default_device()
 IS_GPU = DEFAULT_DEVICE.platform == "gpu"
 
 
+def _to_dtype(value: jnp.dtype | str) -> jnp.dtype:
+    if isinstance(value, jnp.dtype):
+        return value
+    if isinstance(value, str):
+        try:
+            return getattr(jnp, value)
+        except AttributeError:
+            return jnp.dtype(value)
+    return jnp.dtype(value)
+
+
 @dataclass
 class StageConfig:
     name: str
@@ -120,7 +131,7 @@ def load_configs(
     else:
         cfg.paths.data_root = str(project_root)
 
-    for key in ("processed_data_root", "dataloader_state_root", "logs_root"):
+    for key in ("processed_data_root", "dataloader_state_root", "logs_root", "checkpoints_root"):
         if key in cfg.paths and cfg.paths[key] is not None:
             resolved = resolve_path(cfg.paths[key])
             if resolved is not None:
@@ -322,6 +333,57 @@ def _prefetch_to_device(iterator, size: int = 2, *, device: jax.Device):
             buf.clear()
 
 
+def _parse_int_candidates(raw: Optional[object], default: Iterable[int]) -> List[int]:
+    values: List[int] = []
+    if raw is None:
+        values = [int(v) for v in default]
+    elif isinstance(raw, str):
+        parts = [p.strip() for p in raw.split(",")]
+        for part in parts:
+            if not part:
+                continue
+            values.append(int(part))
+    else:
+        try:
+            values = [int(v) for v in raw]  # type: ignore[arg-type]
+        except TypeError:
+            values = [int(raw)]
+
+    cleaned: List[int] = []
+    seen = set()
+    for value in values:
+        iv = int(value)
+        if iv < 0:
+            continue
+        if iv in seen:
+            continue
+        seen.add(iv)
+        cleaned.append(iv)
+    return cleaned
+
+
+def _persist_training_int(config_path: Optional[str], key: str, value: int) -> bool:
+    if config_path is None:
+        return False
+    path = Path(config_path)
+    if not path.exists():
+        return False
+    cfg_doc = OmegaConf.load(path)
+    if cfg_doc.get("training") is None:
+        cfg_doc.training = {}
+    cfg_doc.training[key] = int(value)
+    OmegaConf.save(cfg_doc, path)
+    return True
+
+
+def _persist_prefetch_size(config_path: Optional[str], value: int) -> bool:
+    return _persist_training_int(config_path, "prefetch_size", value)
+
+
+def _persist_scan_chunk(config_path: Optional[str], value: int) -> bool:
+    return _persist_training_int(config_path, "scan_chunk", value)
+
+
 def _format_wall_time(seconds: float) -> str:
     total_seconds = max(0, int(round(seconds)))
     hours, rem = divmod(total_seconds, 3600)
@@ -343,6 +405,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of steps to fuse with lax.scan inside a single compiled call (reduces host dispatch overhead). "
              "Defaults to training.scan_chunk in the config.",
     )
+    cli.add_argument(
+        "--prefetch",
+        type=int,
+        default=None,
+        help="Override training.prefetch_size (device batch prefetch depth).",
+    )
     return cli.parse_args()
 
 
@@ -350,6 +418,10 @@ def main() -> None:
     command_start = time.perf_counter()
     args = parse_args()
     cfg = load_configs(config_path=args.config, global_config_path=args.global_config)
+
+    matmul_precision = str(cfg.model.get("compute_dtype", "default"))
+    jax.config.update("jax_default_matmul_precision", matmul_precision)
+
     global_seed = cfg.get("global_seed")
     if global_seed is not None:
         np.random.seed(int(global_seed))
@@ -385,6 +457,9 @@ def main() -> None:
     # Get optional model config params with defaults
     num_kv_heads = cfg.model.get("num_kv_heads", None)
     rotary_dim = cfg.model.get("rope_dim", None)
+    use_remat = bool(cfg.model.get("use_remat", False))
+    param_dtype = _to_dtype(cfg.model.param_dtype)
+    compute_dtype = _to_dtype(cfg.model.compute_dtype)
     model = GiantGPT(
         vocab_size=len(tokenizer),
         context_length=max_seq_len,
@@ -395,6 +470,9 @@ def main() -> None:
         dropout_rate=cfg.model.dropout_rate,
         num_kv_heads=num_kv_heads,
         rotary_dim=rotary_dim,
+        param_dtype=param_dtype,
+        compute_dtype=compute_dtype,
+        use_remat=use_remat,
     )
 
     rng = jax.random.PRNGKey(seed)
@@ -408,7 +486,13 @@ def main() -> None:
     opt_state = optimizer.init(params)
     global_step = 0
 
-    checkpoint_root = Path(args.checkpoint_dir)
+    checkpoint_dir_arg = args.checkpoint_dir
+    if checkpoint_dir_arg == "checkpoints":
+        cfg_checkpoint_root = cfg.paths.get("checkpoints_root", None)
+        if cfg_checkpoint_root:
+            checkpoint_dir_arg = str(cfg_checkpoint_root)
+
+    checkpoint_root = Path(checkpoint_dir_arg)
     if not checkpoint_root.is_absolute():
         checkpoint_root = (base_root / checkpoint_root).resolve()
     if checkpoint_root.name in {"params", "training_states"}:
@@ -507,12 +591,47 @@ def main() -> None:
     cfg_chunk = int(getattr(cfg.training, "scan_chunk", 1))
     chunk_size = max(1, int(args.scan_chunk)) if args.scan_chunk is not None else max(1, cfg_chunk)
     grad_accum = max(1, int(getattr(cfg.training, "gradient_accumulation", 1)))
+    autotune_scan_chunk = bool(getattr(cfg.training, "autotune_scan_chunk", False))
+    autotune_scan_chunk_chunks = max(1, int(getattr(cfg.training, "autotune_scan_chunk_chunks", 4)))
+    autotune_scan_chunk_persist = bool(getattr(cfg.training, "autotune_scan_chunk_persist", False))
+    autotune_scan_chunk_candidates = _parse_int_candidates(
+        getattr(cfg.training, "autotune_scan_chunk_candidates", None),
+        default=[1, 2, 4, 8, 16],
+    )
+    if chunk_size not in autotune_scan_chunk_candidates:
+        autotune_scan_chunk_candidates = [chunk_size] + autotune_scan_chunk_candidates
+    cfg.training.scan_chunk = int(chunk_size)
+
+    prefetch_default = 2 if IS_GPU else 0
+    cfg_prefetch = int(getattr(cfg.training, "prefetch_size", prefetch_default))
+    prefetch_size = max(0, int(args.prefetch)) if args.prefetch is not None else max(0, cfg_prefetch)
+    autotune_prefetch = bool(getattr(cfg.training, "autotune_prefetch", False))
+    autotune_prefetch_chunks = max(1, int(getattr(cfg.training, "autotune_prefetch_chunks", 4)))
+    autotune_prefetch_persist = bool(getattr(cfg.training, "autotune_prefetch_persist", False))
+    autotune_prefetch_candidates = _parse_int_candidates(
+        getattr(cfg.training, "autotune_prefetch_candidates", None),
+        default=[2, 4, 8, 16],
+    )
+    if prefetch_size not in autotune_prefetch_candidates:
+        autotune_prefetch_candidates = [prefetch_size] + autotune_prefetch_candidates
+    cfg.training.prefetch_size = int(prefetch_size)
 
     def _init_accum_grads(pytree):
         return jax.tree_util.tree_map(jnp.zeros_like, pytree)
 
     def _stack_batches(batches):
         return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *batches)
+
+    def _next_chunk(batch_iter, chunk_len: int):
+        batch_list = []
+        for _ in range(chunk_len):
+            try:
+                batch_list.append(next(batch_iter))
+            except StopIteration:
+                break
+        if not batch_list:
+            return None
+        return _stack_batches(batch_list)
 
     @jax.jit
     def _run_chunk(params, opt_state, batch_chunk, start_step, accum_grads, accum_count):
@@ -569,6 +688,198 @@ def main() -> None:
         params = optax.apply_updates(params, updates)
         return params, opt_state
 
+    should_autotune_scan_chunk = (
+        autotune_scan_chunk
+        and IS_GPU
+        and args.scan_chunk is None
+        and args.resume is None
+        and global_step == 0
+        and len(stage_runtimes) > 0
+    )
+    if should_autotune_scan_chunk:
+        tune_runtime = stage_runtimes[current_stage_idx]
+        loader_snapshot = tune_runtime.loader.state_dict()
+        candidates = [max(1, int(v)) for v in autotune_scan_chunk_candidates if int(v) > 0]
+        if not candidates:
+            candidates = [chunk_size]
+        if chunk_size not in candidates:
+            candidates = [chunk_size] + candidates
+
+        print(
+            f"[autotune] scan_chunk benchmark stage={tune_runtime.config.name} "
+            f"prefetch={prefetch_size} candidates={candidates}"
+        )
+
+        def _benchmark_scan_chunk(candidate: int) -> float:
+            tune_runtime.loader.load_state(loader_snapshot)
+            batch_iter = _prefetch_to_device(
+                tune_runtime.loader,
+                size=prefetch_size,
+                device=DEFAULT_DEVICE,
+            )
+
+            probe_params = params
+            probe_opt_state = opt_state
+            probe_accum_grads = _init_accum_grads(params)
+            probe_accum_count = jnp.asarray(0, dtype=jnp.int32)
+            probe_step = global_step
+
+            warm_chunk = _next_chunk(batch_iter, candidate)
+            if warm_chunk is None:
+                return 0.0
+            probe_params, probe_opt_state, probe_accum_grads, probe_accum_count, warm_losses = _run_chunk(
+                probe_params,
+                probe_opt_state,
+                warm_chunk,
+                probe_step,
+                probe_accum_grads,
+                probe_accum_count,
+            )
+            warm_host = np.asarray(jax.device_get(warm_losses))
+            if len(warm_host) > 0:
+                probe_step += len(warm_host)
+
+            measured_steps = 0
+            t0 = time.perf_counter()
+            for _ in range(autotune_scan_chunk_chunks):
+                chunk = _next_chunk(batch_iter, candidate)
+                if chunk is None:
+                    break
+                probe_params, probe_opt_state, probe_accum_grads, probe_accum_count, losses = _run_chunk(
+                    probe_params,
+                    probe_opt_state,
+                    chunk,
+                    probe_step,
+                    probe_accum_grads,
+                    probe_accum_count,
+                )
+                losses_host = np.asarray(jax.device_get(losses))
+                chunk_steps = len(losses_host)
+                if chunk_steps == 0:
+                    break
+                measured_steps += chunk_steps
+                probe_step += chunk_steps
+            elapsed = time.perf_counter() - t0
+            if measured_steps <= 0 or elapsed <= 0:
+                return 0.0
+            return measured_steps / elapsed
+
+        best_chunk_size = chunk_size
+        best_tps = -1.0
+        for candidate in candidates:
+            try:
+                tps = _benchmark_scan_chunk(candidate)
+                print(f"[autotune] scan_chunk={candidate} -> {tps:.3f} steps/s")
+                if tps > best_tps:
+                    best_tps = tps
+                    best_chunk_size = int(candidate)
+            except Exception as exc:
+                print(f"[autotune] scan_chunk={candidate} failed: {exc}")
+
+        tune_runtime.loader.load_state(loader_snapshot)
+        chunk_size = int(best_chunk_size)
+        cfg.training.scan_chunk = int(chunk_size)
+        print(f"[autotune] selected scan_chunk={chunk_size}")
+
+        if autotune_scan_chunk_persist and _persist_scan_chunk(args.config, chunk_size):
+            print(f"[autotune] wrote training.scan_chunk={chunk_size} to {args.config}")
+
+    should_autotune_prefetch = (
+        autotune_prefetch
+        and IS_GPU
+        and args.prefetch is None
+        and args.resume is None
+        and global_step == 0
+        and len(stage_runtimes) > 0
+    )
+    if should_autotune_prefetch:
+        tune_runtime = stage_runtimes[current_stage_idx]
+        loader_snapshot = tune_runtime.loader.state_dict()
+        candidates = [int(v) for v in autotune_prefetch_candidates if int(v) >= 0]
+        if not candidates:
+            candidates = [prefetch_size]
+        if prefetch_size not in candidates:
+            candidates = [prefetch_size] + candidates
+
+        print(
+            f"[autotune] prefetch benchmark stage={tune_runtime.config.name} "
+            f"chunk={chunk_size} candidates={candidates}"
+        )
+
+        def _benchmark_prefetch(candidate: int) -> float:
+            tune_runtime.loader.load_state(loader_snapshot)
+            batch_iter = _prefetch_to_device(
+                tune_runtime.loader,
+                size=int(candidate),
+                device=DEFAULT_DEVICE,
+            )
+
+            probe_params = params
+            probe_opt_state = opt_state
+            probe_accum_grads = _init_accum_grads(params)
+            probe_accum_count = jnp.asarray(0, dtype=jnp.int32)
+            probe_step = global_step
+
+            warm_chunk = _next_chunk(batch_iter, chunk_size)
+            if warm_chunk is None:
+                return 0.0
+            probe_params, probe_opt_state, probe_accum_grads, probe_accum_count, warm_losses = _run_chunk(
+                probe_params,
+                probe_opt_state,
+                warm_chunk,
+                probe_step,
+                probe_accum_grads,
+                probe_accum_count,
+            )
+            warm_host = np.asarray(jax.device_get(warm_losses))
+            if len(warm_host) > 0:
+                probe_step += len(warm_host)
+
+            measured_steps = 0
+            t0 = time.perf_counter()
+            for _ in range(autotune_prefetch_chunks):
+                chunk = _next_chunk(batch_iter, chunk_size)
+                if chunk is None:
+                    break
+                probe_params, probe_opt_state, probe_accum_grads, probe_accum_count, losses = _run_chunk(
+                    probe_params,
+                    probe_opt_state,
+                    chunk,
+                    probe_step,
+                    probe_accum_grads,
+                    probe_accum_count,
+                )
+                losses_host = np.asarray(jax.device_get(losses))
+                chunk_steps = len(losses_host)
+                if chunk_steps == 0:
+                    break
+                measured_steps += chunk_steps
+                probe_step += chunk_steps
+            elapsed = time.perf_counter() - t0
+            if measured_steps <= 0 or elapsed <= 0:
+                return 0.0
+            return measured_steps / elapsed
+
+        best_prefetch = prefetch_size
+        best_tps = -1.0
+        for candidate in candidates:
+            try:
+                tps = _benchmark_prefetch(candidate)
+                print(f"[autotune] prefetch={candidate} -> {tps:.3f} steps/s")
+                if tps > best_tps:
+                    best_tps = tps
+                    best_prefetch = int(candidate)
+            except Exception as exc:
+                print(f"[autotune] prefetch={candidate} failed: {exc}")
+
+        tune_runtime.loader.load_state(loader_snapshot)
+        prefetch_size = int(best_prefetch)
+        cfg.training.prefetch_size = int(prefetch_size)
+        print(f"[autotune] selected prefetch_size={prefetch_size}")
+
+        if autotune_prefetch_persist and _persist_prefetch_size(args.config, prefetch_size):
+            print(f"[autotune] wrote training.prefetch_size={prefetch_size} to {args.config}")
+
     start = time.time()
     last_loss = None
     accum_grads = _init_accum_grads(params)
@@ -595,20 +906,15 @@ def main() -> None:
 
         batch_iter = _prefetch_to_device(
             runtime.loader,
-            size=2 if IS_GPU else 0,
+            size=prefetch_size,
             device=DEFAULT_DEVICE,
         )
         while completed_in_stage < stage_steps_target:
-            batch_list = []
-            for _ in range(chunk_size):
-                try:
-                    batch_list.append(next(batch_iter))
-                except StopIteration:
-                    break
-            if not batch_list:
+            remaining_steps = stage_steps_target - completed_in_stage
+            request_chunk = min(chunk_size, max(1, remaining_steps))
+            chunk = _next_chunk(batch_iter, request_chunk)
+            if chunk is None:
                 break
-
-            chunk = _stack_batches(batch_list)
             params, opt_state, accum_grads, accum_count, losses = _run_chunk(
                 params, opt_state, chunk, global_step, accum_grads, accum_count
             )

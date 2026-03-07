@@ -92,6 +92,7 @@ Artifacts in repo
   height: 66mm,
   x-label: "required_len",
   y-label: "tokens/s",
+  y-label-dx: 9pt,
 ) = {
   let margin-left = 30pt
   let margin-right = 8pt
@@ -181,7 +182,7 @@ Artifacts in repo
     #place(top + left, dx: margin-left, dy: margin-top + plot-height + 12pt)[
       #text(size: 7.8pt)[#x-label]
     ]
-    #place(top + left, dx: 9pt, dy: margin-top + plot-height / 2 - 12pt)[
+    #place(top + left, dx: y-label-dx, dy: margin-top + plot-height / 2 - 12pt)[
       #rotate(-90deg)[#text(size: 7.8pt)[#y-label]]
     ]
   ]

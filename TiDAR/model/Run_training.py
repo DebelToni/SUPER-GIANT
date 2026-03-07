@@ -272,11 +272,11 @@ def _prefetch_to_device(iterator, size: int = 2):
 
     it = iter(iterator)
     buf = []
-    try:
-        for _ in range(size):
+    for _ in range(size):
+        try:
             buf.append(jax.device_put(next(it)))
-    except StopIteration:
-        buf.clear()
+        except StopIteration:
+            break
 
     while buf:
         batch = buf.pop(0)
@@ -284,7 +284,7 @@ def _prefetch_to_device(iterator, size: int = 2):
         try:
             buf.append(jax.device_put(next(it)))
         except StopIteration:
-            buf.clear()
+            pass
 
 
 def _format_wall_time(seconds: float) -> str:

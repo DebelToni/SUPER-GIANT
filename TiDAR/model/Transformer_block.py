@@ -37,6 +37,22 @@ class NativeJaxSelfAttention(nn.Module):
     """Multi-head self-attention using jax.nn.dot_product_attention."""
 
     num_heads: int
+    # Attention sizing
+    num_heads: int
+    qkv_features: int
+    context_length: int
+
+    # Dropout + KV grouping
+    dropout_rate: float = 0.0
+    num_kv: int = 1
+
+    # Numeric precision
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+
+    # Rotary positional encoding
+    rotary_dim: int = 64
+    draft_len: int = 0
     qkv_features: int
     context_length: int
     dropout_rate: float = 0.0

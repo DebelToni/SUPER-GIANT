@@ -21,10 +21,10 @@ Assitant: The capital of France is sometimes called Paris.<EOS>
 > (This is a 101 milion param checkpoint trained on 2 bilion tokens including a schedule and a circulumn of basetext, wikipedia, webtext and finally chat examples.)
 
 ## What I am working on right now:
-- Right now I am working on replicating the results of the [TiDAR paper](https://arxiv.org/pdf/2511.08923) under my [TiDAR](TiDAR/) folder.
-- I am using GIANT as the underlying LLM architecture and data pipeline. Only the training script differs significantly because TiDAR is a special diffusion based post-training method. 
-- I've implemented a small architectural change to original TiDAR proposed in the paper which boosts drafting efficiency per step by a small amount. [>Details<]()
-- I am also experimenting with different Loss functions for TiDAR. [>Details<]()
+- [TiDAR](TiDAR/) is already implemented (including my Anchor-TiDAR variant), and this is where I run ongoing experiments.
+- I am currently validating/replicating the TiDAR paper behavior and refining training/inference settings on top of GIANT's core architecture and data pipeline.
+- I've implemented a small architectural change to the original TiDAR design that improves drafting efficiency per step. [>Details<]()
+- I am also experimenting with different loss function configurations for TiDAR. [>Details<]()
 
 * When finished I want to experiment with the TiDAR "free token slots" fenomenon when paired with memory optimizaion architectural changes like [MLA], [MoE], [Sliding window attention] and [Router aware drafting]
 
@@ -40,7 +40,7 @@ Assitant: The capital of France is sometimes called Paris.<EOS>
 > - Mixture of Experts (MoE)
 > - Multi-head Latent Attention (MLA)
 > - Real time access of tools at inference time (in the TTC) - see [TRM as tool use](TRM/TRM-token-tool)
-> - Diffusion future prediction for faster text generation - currently implementing this in the [TiDAR](TiDAR/]) folder
+> - Diffusion future prediction for faster text generation - already implemented in [TiDAR](TiDAR/) and currently being optimized
 > 
 
 ---

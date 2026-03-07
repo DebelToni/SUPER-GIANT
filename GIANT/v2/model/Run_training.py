@@ -600,6 +600,11 @@ def main() -> None:
     )
     if chunk_size not in autotune_scan_chunk_candidates:
         autotune_scan_chunk_candidates = [chunk_size] + autotune_scan_chunk_candidates
+    default_scan_steps = autotune_scan_chunk_chunks * max(autotune_scan_chunk_candidates or [chunk_size])
+    autotune_scan_chunk_steps = max(
+        1,
+        int(getattr(cfg.training, "autotune_scan_chunk_steps", default_scan_steps)),
+    )
     cfg.training.scan_chunk = int(chunk_size)
 
     prefetch_default = 2 if IS_GPU else 0
@@ -707,7 +712,7 @@ def main() -> None:
 
         print(
             f"[autotune] scan_chunk benchmark stage={tune_runtime.config.name} "
-            f"prefetch={prefetch_size} candidates={candidates}"
+            f"prefetch={prefetch_size} candidates={candidates} steps={autotune_scan_chunk_steps}"
         )
 
         def _benchmark_scan_chunk(candidate: int) -> float:
@@ -741,7 +746,8 @@ def main() -> None:
 
             measured_steps = 0
             t0 = time.perf_counter()
-            for _ in range(autotune_scan_chunk_chunks):
+            loops = max(1, int(np.ceil(autotune_scan_chunk_steps / candidate)))
+            for _ in range(loops):
                 chunk = _next_chunk(batch_iter, candidate)
                 if chunk is None:
                     break
@@ -945,14 +951,18 @@ def main() -> None:
                     start = time.time()
 
             if mini_every and (global_step % mini_every == 0):
-                mini_state = {
-                    "params": params,
-                    "opt_state": opt_state,
-                    "global_step": global_step,
-                    "stage_index": stage_idx,
-                    "stage_step_total": completed_in_stage,
-                    "stage_states": stage_states,
-                }
+                # Stage mini-checkpoint payload on host RAM so asynchronous orbax
+                # writes do not retain additional large device buffers.
+                mini_state = jax.device_get(
+                    {
+                        "params": params,
+                        "opt_state": opt_state,
+                        "global_step": global_step,
+                        "stage_index": stage_idx,
+                        "stage_step_total": completed_in_stage,
+                        "stage_states": stage_states,
+                    }
+                )
                 mini_ckpt_mgr.save(global_step, mini_state)
 
             if global_step % checkpoint_every == 0:

@@ -32,17 +32,18 @@ optimizer:
     - embedding
 
 training:
-  batch_size: 4
-  gradient_accumulation: 4
+  batch_size: 20
+  gradient_accumulation: 8
   seed: 0
   log_every: 200
-  checkpoint_every: 10000
-  mini_checkpoint_every: 1000
+  checkpoint_every: 100000
+  mini_checkpoint_every: 0
   mini_max_to_keep: 2
   scan_chunk: 4
   autotune_scan_chunk: true
   autotune_scan_chunk_candidates: [1, 2, 4, 8, 16]
   autotune_scan_chunk_chunks: 4
+  autotune_scan_chunk_steps: 256
   autotune_scan_chunk_persist: true
   prefetch_size: 2
   autotune_prefetch: true

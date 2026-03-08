@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -263,14 +264,34 @@ class StageDataLoader:
             "shard_pos": self._current_shard_pos,
             "row_ptr": self._row_ptr,
             "rows_consumed": self._rows_consumed,
+            "batch_size": self.batch_size,
+            "seq_len": self.seq_len,
         }
 
     def load_state(self, state: Dict[str, int]) -> None:
+        saved_seq_len = state.get("seq_len")
+        if saved_seq_len is not None and int(saved_seq_len) != self.seq_len:
+            raise ValueError(
+                f"Saved dataloader seq_len={saved_seq_len} does not match current seq_len={self.seq_len}"
+            )
+
+        saved_batch_size = state.get("batch_size")
+        batch_size_changed = (
+            saved_batch_size is not None and int(saved_batch_size) != self.batch_size
+        )
+        if batch_size_changed:
+            warnings.warn(
+                "Resuming dataloader with a different global batch size. "
+                "Sample order resumes from the saved row cursor, but step counters become approximate.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
         self.epoch = int(state.get("epoch", 0))
-        self.step_in_epoch = int(state.get("step_in_epoch", 0))
         shard_pos = int(state.get("shard_pos", 0))
         row_ptr = int(state.get("row_ptr", 0))
         saved_rows_consumed = int(state.get("rows_consumed", 0))
+        self.step_in_epoch = int(state.get("step_in_epoch", 0))
         self._prepare_epoch()
         # _prepare_epoch resets counters; restore consumed rows before loading shard.
         self._rows_consumed = saved_rows_consumed
@@ -281,6 +302,8 @@ class StageDataLoader:
             raise RuntimeError("Failed to load shard while restoring state")
         limit = self._current_data.shape[0] if self._current_data is not None else 0
         self._row_ptr = min(max(row_ptr, 0), limit)
+        if batch_size_changed:
+            self.step_in_epoch = min(self._rows_consumed // self.batch_size, self.steps_per_epoch)
 
     def __iter__(self):
         return self

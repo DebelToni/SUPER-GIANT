@@ -32,8 +32,8 @@ optimizer:
     - embedding
 
 training:
-  batch_size: 24
-  gradient_accumulation: 80
+  batch_size: 2
+  gradient_accumulation: 20
   seed: 0
   log_every: 200
   checkpoint_every: 10000
@@ -96,7 +96,7 @@ qa_finetune: {}
 
 paths:
   data_root: "/proj/giant-data/GIANT"
-  processed_data_root: "dataset_artifacts/dataset_artifacts/curriculum_20b"
+  processed_data_root: "dataset_artifacts/curriculum_20b"
   dataloader_state_root: "checkpoints/curriculum_20b_big_model/dataloader_state"
   logs_root: "logs/curriculum_20b_big_model"
   checkpoints_root: "checkpoints/curriculum_20b_big_model"

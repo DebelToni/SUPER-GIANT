@@ -5,6 +5,7 @@ import os
 import signal
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -17,7 +18,7 @@ import numpy as np
 import optax
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
-
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from GIANT.v2.model.GiantGPT import GiantGPT
 from GIANT.v2.model.Training_step import loss_and_grad
 from GIANT.v2.model.arrow_data_loader import (
@@ -38,6 +39,7 @@ from GIANT.v2.model.checkpoint_manager import (
 from GIANT.v2.model.optimizer_utils import create_weight_decay_mask
 from GIANT.v2.device_utils import select_default_device
 from flax import core as flax_core
+from flax import jax_utils as flax_jax_utils
 from flax import serialization
 
 
@@ -62,6 +64,21 @@ signal.signal(signal.SIGINT, _signal_handler)
 
 
 DEFAULT_DEVICE = select_default_device()
+LOCAL_DEVICES = tuple(d for d in jax.local_devices() if d.platform == DEFAULT_DEVICE.platform)
+if not LOCAL_DEVICES:
+    LOCAL_DEVICES = (DEFAULT_DEVICE,)
+LOCAL_DEVICE_COUNT = len(LOCAL_DEVICES)
+MULTI_GPU_BACKEND = "single"
+if LOCAL_DEVICE_COUNT > 1:
+    MULTI_GPU_BACKEND = os.environ.get("GIANT_MULTI_GPU_BACKEND", "pmap").strip().lower()
+    if MULTI_GPU_BACKEND not in {"shard_map", "pmap"}:
+        raise ValueError(
+            f"Unsupported GIANT_MULTI_GPU_BACKEND={MULTI_GPU_BACKEND!r}; expected 'shard_map' or 'pmap'"
+        )
+USE_SHARD_MAP = LOCAL_DEVICE_COUNT > 1 and MULTI_GPU_BACKEND == "shard_map"
+USE_PMAP = LOCAL_DEVICE_COUNT > 1 and MULTI_GPU_BACKEND == "pmap"
+TRAINING_MESH = Mesh(np.array(LOCAL_DEVICES), ("data",)) if USE_SHARD_MAP else None
+REPLICATED_SHARDING = NamedSharding(TRAINING_MESH, P()) if USE_SHARD_MAP else None
 IS_GPU = DEFAULT_DEVICE.platform == "gpu"
 
 
@@ -244,7 +261,12 @@ def validate_milestones(stage_cfgs: List[StageConfig]) -> None:
 
 
 def build_optimizer(cfg: OmegaConf, total_update_steps: int, params) -> optax.GradientTransformation:
-    warmup_steps = int(cfg.optimizer.get("warmup_updates", cfg.optimizer.warmup_steps))
+    warmup_raw = cfg.optimizer.get("warmup_updates", None)
+    if warmup_raw is None:
+        warmup_raw = cfg.optimizer.get("warmup_steps", None)
+    if warmup_raw is None:
+        raise ValueError("optimizer warmup_updates or warmup_steps must be set")
+    warmup_steps = int(warmup_raw)
     if total_update_steps <= warmup_steps:
         raise ValueError("Total optimizer updates must exceed warmup updates for cosine decay")
     schedule = optax.warmup_cosine_decay_schedule(
@@ -293,10 +315,12 @@ def save_training_state(
     """Persist params, optimizer, and dataloader progress atomically."""
     os.makedirs(params_dir, exist_ok=True)
     os.makedirs(training_states_dir, exist_ok=True)
-    ckpt_file = save_ckpt(params, global_step, params_dir, train_loss=train_loss)
+    host_params = _checkpoint_tree(params)
+    host_opt_state = _checkpoint_tree(opt_state)
+    ckpt_file = save_ckpt(host_params, global_step, params_dir, train_loss=train_loss)
     if train_loss is not None:
         print(f"[metadata] Wrote train_loss={train_loss:.6f} to checkpoint {ckpt_file}")
-    save_opt_state(opt_state, global_step, training_states_dir)
+    save_opt_state(host_opt_state, global_step, training_states_dir)
     stage_states[runtime.config.name] = runtime.loader.state_dict()
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),
@@ -309,8 +333,136 @@ def save_training_state(
     return ckpt_file
 
 
-def _prefetch_to_device(iterator, size: int = 2, *, device: jax.Device):
-    """Simple host prefetcher to keep device fed."""
+def _freeze_if_dict(tree):
+    return flax_core.freeze(tree) if isinstance(tree, dict) else tree
+
+
+def _place_on_training_devices(tree):
+    if USE_SHARD_MAP:
+        return jax.tree_util.tree_map(
+            lambda x: jax.device_put(x, REPLICATED_SHARDING),
+            tree,
+        )
+    if USE_PMAP:
+        return flax_jax_utils.replicate(tree, devices=LOCAL_DEVICES)
+    return jax.device_put(tree, DEFAULT_DEVICE)
+
+
+def _checkpoint_tree(tree):
+    if USE_PMAP:
+        return jax.device_get(flax_jax_utils.unreplicate(tree))
+    return jax.device_get(tree)
+
+
+def _replicated_scalar_to_int(value) -> int:
+    if USE_PMAP:
+        return int(np.asarray(jax.device_get(flax_jax_utils.unreplicate(value))))
+    host_value = np.asarray(jax.device_get(value))
+    if host_value.shape == ():
+        return int(host_value)
+    return int(host_value.reshape(-1)[0])
+
+
+def _training_scalar(value, dtype):
+    scalar = jnp.asarray(value, dtype=dtype)
+    if USE_PMAP:
+        return flax_jax_utils.replicate(scalar, devices=LOCAL_DEVICES)
+    return _place_on_training_devices(scalar)
+
+
+def _host_losses(losses) -> np.ndarray:
+    if USE_PMAP:
+        return np.asarray(jax.device_get(flax_jax_utils.unreplicate(losses)))
+    return np.asarray(jax.device_get(losses))
+
+
+def _reshape_batch_for_pmap(batch, *, per_device_batch: int):
+    def reshape_leaf(x):
+        arr = np.asarray(x)
+        if arr.ndim == 0:
+            raise ValueError("Batch leaves must include a batch axis for pmap")
+        expected_global_batch = LOCAL_DEVICE_COUNT * per_device_batch
+        if arr.shape[0] != expected_global_batch:
+            raise ValueError(
+                f"Expected global batch {expected_global_batch} for pmap input, got {arr.shape[0]}"
+            )
+        return arr.reshape((LOCAL_DEVICE_COUNT, per_device_batch, *arr.shape[1:]))
+
+    return jax.tree_util.tree_map(reshape_leaf, batch)
+
+
+def _batch_partition_for_leaf(ndim: int, *, chunked: bool):
+    if not USE_SHARD_MAP:
+        return None
+    if ndim == 0:
+        return P()
+    if chunked:
+        if ndim < 2:
+            raise ValueError(f"Chunked batch leaf must have ndim >= 2, got ndim={ndim}")
+        return P(None, "data", *([None] * (ndim - 2)))
+    return P("data", *([None] * (ndim - 1)))
+
+
+def _place_batch_on_training_devices(batch, *, chunked: bool):
+    if not USE_SHARD_MAP:
+        return batch
+
+    def place_leaf(x):
+        arr = jnp.asarray(x)
+        spec = _batch_partition_for_leaf(arr.ndim, chunked=chunked)
+        sharding = NamedSharding(TRAINING_MESH, spec)
+        return jax.device_put(arr, sharding)
+
+    return jax.tree_util.tree_map(place_leaf, batch)
+
+
+def _prefetch_training_batches(iterator, size: int, *, per_device_batch: int):
+    if USE_PMAP:
+        source = (_reshape_batch_for_pmap(batch, per_device_batch=per_device_batch) for batch in iterator)
+        if size <= 0:
+            yield from source
+            return
+
+        it = iter(source)
+        buf = []
+        try:
+            for _ in range(size):
+                buf.append(next(it))
+        except StopIteration:
+            pass
+
+        while buf:
+            batch = buf.pop(0)
+            yield batch
+            try:
+                buf.append(next(it))
+            except StopIteration:
+                pass
+        return
+
+    if USE_SHARD_MAP:
+        if size <= 0:
+            for batch in iterator:
+                yield batch
+            return
+
+        it = iter(iterator)
+        buf = []
+        try:
+            for _ in range(size):
+                buf.append(next(it))
+        except StopIteration:
+            pass
+
+        while buf:
+            batch = buf.pop(0)
+            yield batch
+            try:
+                buf.append(next(it))
+            except StopIteration:
+                pass
+        return
+
     if size <= 0:
         for batch in iterator:
             yield batch
@@ -320,7 +472,7 @@ def _prefetch_to_device(iterator, size: int = 2, *, device: jax.Device):
     buf = []
     try:
         for _ in range(size):
-            buf.append(jax.device_put(next(it), device))
+            buf.append(jax.device_put(next(it), DEFAULT_DEVICE))
     except StopIteration:
         buf.clear()
 
@@ -328,7 +480,7 @@ def _prefetch_to_device(iterator, size: int = 2, *, device: jax.Device):
         batch = buf.pop(0)
         yield batch
         try:
-            buf.append(jax.device_put(next(it), device))
+            buf.append(jax.device_put(next(it), DEFAULT_DEVICE))
         except StopIteration:
             buf.clear()
 
@@ -435,7 +587,8 @@ def main() -> None:
     dataset_root = Path(cfg.paths.processed_data_root)
     if not dataset_root.is_absolute():
         dataset_root = (base_root / dataset_root).resolve()
-    batch_size = int(cfg.training.batch_size)
+    per_device_batch_size = int(cfg.training.batch_size)
+    global_batch_size = per_device_batch_size * LOCAL_DEVICE_COUNT
     grad_accum = max(1, int(getattr(cfg.training, "gradient_accumulation", 1)))
     seed = getattr(cfg.training, "seed", None)
     if seed is None:
@@ -448,13 +601,24 @@ def main() -> None:
     stage_runtimes = build_stage_runtimes(
         stage_cfgs,
         dataset_root=dataset_root,
-        batch_size=batch_size,
+        batch_size=global_batch_size,
         seed=seed,
         pad_token_id=pad_token_id,
     )
     total_steps = sum(stage.total_steps for stage in stage_runtimes)
     total_update_steps = max(1, (total_steps + grad_accum - 1) // grad_accum)
-    warmup_updates = int(cfg.optimizer.get("warmup_updates", cfg.optimizer.warmup_steps))
+    print(
+        f"[devices] backend={DEFAULT_DEVICE.platform} local_devices={LOCAL_DEVICE_COUNT} "
+        f"multi_gpu_backend={MULTI_GPU_BACKEND} data_parallel={LOCAL_DEVICE_COUNT > 1} "
+        f"per_device_batch={per_device_batch_size} "
+        f"global_batch={global_batch_size}"
+    )
+    warmup_updates = cfg.optimizer.get("warmup_updates", None)
+    if warmup_updates is None:
+        warmup_updates = cfg.optimizer.get("warmup_steps", None)
+    if warmup_updates is None:
+        raise ValueError("optimizer warmup_updates or warmup_steps must be set")
+    warmup_updates = int(warmup_updates)
     print(
         f"[optimizer] micro_steps={total_steps} update_steps={total_update_steps} "
         f"grad_accum={grad_accum} warmup_updates={warmup_updates}"
@@ -483,11 +647,9 @@ def main() -> None:
     )
 
     rng = jax.random.PRNGKey(seed)
-    params = model.init(rng, jnp.zeros((batch_size, max_seq_len), dtype=jnp.int32))["params"]
-    from flax import core as flax_core
-    if isinstance(params, dict):
-        params = flax_core.freeze(params)
-    params = jax.device_put(params, DEFAULT_DEVICE)
+    init_batch_size = per_device_batch_size if (USE_SHARD_MAP or USE_PMAP) else global_batch_size
+    params = model.init(rng, jnp.zeros((init_batch_size, max_seq_len), dtype=jnp.int32))["params"]
+    params = _freeze_if_dict(params)
 
     optimizer = build_optimizer(cfg, total_update_steps, params)
     opt_state = optimizer.init(params)
@@ -544,7 +706,7 @@ def main() -> None:
     if resume_request == "latest":
         restored_state, restored_step = mini_ckpt_mgr.restore_latest(mini_state_template)
         if restored_step:
-            params = restored_state["params"]
+            params = _freeze_if_dict(restored_state["params"])
             opt_state = restored_state["opt_state"]
             global_step = int(restored_state.get("global_step", restored_step))
             current_stage_idx = int(restored_state.get("stage_index", 0))
@@ -554,7 +716,7 @@ def main() -> None:
             print(f"↩ Resumed from mini checkpoint at step {restored_step}")
         else:
             resume_request = "latest_full"
-    elif resume_request and resume_request != "latest":
+    elif resume_request and resume_request not in {"latest", "latest_full"}:
         resume_path = Path(resume_request)
         if not resume_path.is_absolute():
             resume_request = str((base_root / resume_path).resolve())
@@ -567,8 +729,7 @@ def main() -> None:
         else:
             ckpt_path = resume_request
         params, global_step = load_ckpt(ckpt_path)
-        if isinstance(params, dict):
-            params = flax_core.freeze(params)
+        params = _freeze_if_dict(params)
         opt_state = optimizer.init(params)
         opt_bytes = load_opt_state(global_step, training_states_dir_str)
         if opt_bytes is not None:
@@ -593,6 +754,24 @@ def main() -> None:
     for idx, runtime in enumerate(stage_runtimes):
         state_dict = stage_states.get(runtime.config.name, {"epoch": 0, "step_in_epoch": 0})
         runtime.loader.load_state(state_dict)
+
+    if 0 <= current_stage_idx < len(stage_runtimes):
+        current_runtime = stage_runtimes[current_stage_idx]
+        stage_step_total = (
+            current_runtime.loader.epoch * current_runtime.loader.steps_per_epoch
+            + current_runtime.loader.step_in_epoch
+        )
+
+    params = _place_on_training_devices(params)
+    opt_state = _place_on_training_devices(opt_state)
+    if USE_SHARD_MAP:
+        params_spec = jax.tree_util.tree_map(lambda _: P(), jax.device_get(params))
+        opt_state_spec = jax.tree_util.tree_map(lambda _: P(), jax.device_get(opt_state))
+        batch_chunk_spec = {
+            "input": P(None, "data", None),
+            "target": P(None, "data", None),
+            "mask": P(None, "data", None),
+        }
 
     base_rng = jax.random.PRNGKey(seed)
     cfg_chunk = int(getattr(cfg.training, "scan_chunk", 1))
@@ -630,8 +809,12 @@ def main() -> None:
     def _init_accum_grads(pytree):
         return jax.tree_util.tree_map(jnp.zeros_like, pytree)
 
+    def _init_accum_count():
+        value = jnp.asarray(0, dtype=jnp.int32)
+        return _place_on_training_devices(value)
+
     def _stack_batches(batches):
-        return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *batches)
+        return jax.tree_util.tree_map(lambda *xs: np.stack(xs, axis=0), *batches)
 
     def _next_chunk(batch_iter, chunk_len: int):
         batch_list = []
@@ -642,62 +825,207 @@ def main() -> None:
                 break
         if not batch_list:
             return None
-        return _stack_batches(batch_list)
+        chunk = _stack_batches(batch_list)
+        if USE_SHARD_MAP:
+            return _place_batch_on_training_devices(chunk, chunked=True)
+        if USE_PMAP:
+            return jax.tree_util.tree_map(lambda x: np.swapaxes(np.asarray(x), 0, 1), chunk)
+        return jax.device_put(chunk, DEFAULT_DEVICE)
 
-    @jax.jit
-    def _run_chunk(params, opt_state, batch_chunk, start_step, accum_grads, accum_count):
-        grad_scale = jnp.asarray(1.0 / grad_accum, dtype=jnp.float32)
+    if USE_SHARD_MAP:
+        accum_grads_spec = jax.tree_util.tree_map(lambda _: P(), jax.device_get(_init_accum_grads(params)))
+        accum_count_spec = P()
+        loss_spec = P(None)
 
-        def body(carry, batch):
-            params, opt_state, step, accum_grads, accum_count = carry
-            dropout_rng = jax.random.fold_in(base_rng, step)
+        def _run_chunk_local(params, opt_state, batch_chunk, start_step, accum_grads, accum_count):
+            grad_scale = jnp.asarray(1.0 / grad_accum, dtype=jnp.float32)
+            replica_index = jax.lax.axis_index("data")
 
-            loss, grads = loss_and_grad(
-                params,
-                batch,
-                model=model,
-                dropout_rng=dropout_rng,
+            def body(carry, batch):
+                params, opt_state, step, accum_grads, accum_count = carry
+                dropout_rng = jax.random.fold_in(base_rng, step)
+                dropout_rng = jax.random.fold_in(dropout_rng, replica_index)
+
+                loss, grads = loss_and_grad(
+                    params,
+                    batch,
+                    model=model,
+                    dropout_rng=dropout_rng,
+                    axis_name="data",
+                )
+
+                is_finite = jnp.isfinite(loss)
+                accum_grads = jax.lax.cond(
+                    is_finite,
+                    lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                    lambda ag, g: ag,
+                    accum_grads,
+                    grads,
+                )
+                accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+
+                def apply_updates(args):
+                    params, opt_state, accum_grads = args
+                    grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
+                    updates, opt_state = optimizer.update(grads, opt_state, params)
+                    params = optax.apply_updates(params, updates)
+                    accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+                    return params, opt_state, accum_grads
+
+                should_update = accum_count == grad_accum
+                params, opt_state, accum_grads = jax.lax.cond(
+                    should_update,
+                    apply_updates,
+                    lambda args: args,
+                    (params, opt_state, accum_grads),
+                )
+                accum_count = jnp.where(should_update, 0, accum_count)
+                return (params, opt_state, step + 1, accum_grads, accum_count), loss
+
+            (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
+                body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
             )
-            
-            # Skip gradient accumulation if NaN/Inf detected
-            is_finite = jnp.isfinite(loss)
-            accum_grads = jax.lax.cond(
-                is_finite,
-                lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
-                lambda ag, g: ag,  # Don't accumulate if NaN
-                accum_grads, grads
+            return params, opt_state, accum_grads, accum_count, losses
+
+        _run_chunk = jax.jit(
+            jax.shard_map(
+                _run_chunk_local,
+                mesh=TRAINING_MESH,
+                in_specs=(params_spec, opt_state_spec, batch_chunk_spec, P(), accum_grads_spec, P()),
+                out_specs=(params_spec, opt_state_spec, accum_grads_spec, accum_count_spec, loss_spec),
+                axis_names={"data"},
+                check_vma=False,
             )
-            accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
-
-            def apply_updates(args):
-                params, opt_state, accum_grads = args
-                grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
-                updates, opt_state = optimizer.update(grads, opt_state, params)
-                params = optax.apply_updates(params, updates)
-                accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
-                return params, opt_state, accum_grads
-
-            should_update = accum_count == grad_accum
-            params, opt_state, accum_grads = jax.lax.cond(
-                should_update,
-                apply_updates,
-                lambda args: args,
-                (params, opt_state, accum_grads),
-            )
-            accum_count = jnp.where(should_update, 0, accum_count)
-            return (params, opt_state, step + 1, accum_grads, accum_count), loss
-
-        (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
-            body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
         )
-        return params, opt_state, accum_grads, accum_count, losses
 
-    @jax.jit
-    def _apply_accum(params, opt_state, accum_grads, denom):
-        grads = jax.tree_util.tree_map(lambda g: g / denom, accum_grads)
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        return params, opt_state
+        def _apply_accum_local(params, opt_state, accum_grads, denom):
+            grads = jax.tree_util.tree_map(lambda g: g / denom, accum_grads)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            return params, opt_state
+
+        _apply_accum = jax.jit(
+            jax.shard_map(
+                _apply_accum_local,
+                mesh=TRAINING_MESH,
+                in_specs=(params_spec, opt_state_spec, accum_grads_spec, P()),
+                out_specs=(params_spec, opt_state_spec),
+                axis_names={"data"},
+            )
+        )
+    elif USE_PMAP:
+        @partial(jax.pmap, axis_name="data")
+        def _run_chunk(params, opt_state, batch_chunk, start_step, accum_grads, accum_count):
+            grad_scale = jnp.asarray(1.0 / grad_accum, dtype=jnp.float32)
+            replica_index = jax.lax.axis_index("data")
+
+            def body(carry, batch):
+                params, opt_state, step, accum_grads, accum_count = carry
+                dropout_rng = jax.random.fold_in(base_rng, step)
+                dropout_rng = jax.random.fold_in(dropout_rng, replica_index)
+
+                loss, grads = loss_and_grad(
+                    params,
+                    batch,
+                    model=model,
+                    dropout_rng=dropout_rng,
+                    axis_name="data",
+                )
+
+                is_finite = jnp.isfinite(loss)
+                accum_grads = jax.lax.cond(
+                    is_finite,
+                    lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                    lambda ag, g: ag,
+                    accum_grads,
+                    grads,
+                )
+                accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+
+                def apply_updates(args):
+                    params, opt_state, accum_grads = args
+                    grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
+                    updates, opt_state = optimizer.update(grads, opt_state, params)
+                    params = optax.apply_updates(params, updates)
+                    accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+                    return params, opt_state, accum_grads
+
+                should_update = accum_count == grad_accum
+                params, opt_state, accum_grads = jax.lax.cond(
+                    should_update,
+                    apply_updates,
+                    lambda args: args,
+                    (params, opt_state, accum_grads),
+                )
+                accum_count = jnp.where(should_update, 0, accum_count)
+                return (params, opt_state, step + 1, accum_grads, accum_count), loss
+
+            (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
+                body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
+            )
+            return params, opt_state, accum_grads, accum_count, losses
+
+        @partial(jax.pmap, axis_name="data")
+        def _apply_accum(params, opt_state, accum_grads, denom):
+            grads = jax.tree_util.tree_map(lambda g: g / denom, accum_grads)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            return params, opt_state
+    else:
+        @jax.jit
+        def _run_chunk(params, opt_state, batch_chunk, start_step, accum_grads, accum_count):
+            grad_scale = jnp.asarray(1.0 / grad_accum, dtype=jnp.float32)
+
+            def body(carry, batch):
+                params, opt_state, step, accum_grads, accum_count = carry
+                dropout_rng = jax.random.fold_in(base_rng, step)
+
+                loss, grads = loss_and_grad(
+                    params,
+                    batch,
+                    model=model,
+                    dropout_rng=dropout_rng,
+                )
+
+                is_finite = jnp.isfinite(loss)
+                accum_grads = jax.lax.cond(
+                    is_finite,
+                    lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                    lambda ag, g: ag,
+                    accum_grads,
+                    grads,
+                )
+                accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+
+                def apply_updates(args):
+                    params, opt_state, accum_grads = args
+                    grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
+                    updates, opt_state = optimizer.update(grads, opt_state, params)
+                    params = optax.apply_updates(params, updates)
+                    accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+                    return params, opt_state, accum_grads
+
+                should_update = accum_count == grad_accum
+                params, opt_state, accum_grads = jax.lax.cond(
+                    should_update,
+                    apply_updates,
+                    lambda args: args,
+                    (params, opt_state, accum_grads),
+                )
+                accum_count = jnp.where(should_update, 0, accum_count)
+                return (params, opt_state, step + 1, accum_grads, accum_count), loss
+
+            (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
+                body, (params, opt_state, start_step, accum_grads, accum_count), batch_chunk
+            )
+            return params, opt_state, accum_grads, accum_count, losses
+
+        @jax.jit
+        def _apply_accum(params, opt_state, accum_grads, denom):
+            grads = jax.tree_util.tree_map(lambda g: g / denom, accum_grads)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            return params, opt_state
 
     should_autotune_scan_chunk = (
         autotune_scan_chunk
@@ -723,16 +1051,16 @@ def main() -> None:
 
         def _benchmark_scan_chunk(candidate: int) -> float:
             tune_runtime.loader.load_state(loader_snapshot)
-            batch_iter = _prefetch_to_device(
+            batch_iter = _prefetch_training_batches(
                 tune_runtime.loader,
                 size=prefetch_size,
-                device=DEFAULT_DEVICE,
+                per_device_batch=per_device_batch_size,
             )
 
             probe_params = params
             probe_opt_state = opt_state
             probe_accum_grads = _init_accum_grads(params)
-            probe_accum_count = jnp.asarray(0, dtype=jnp.int32)
+            probe_accum_count = _init_accum_count()
             probe_step = global_step
 
             warm_chunk = _next_chunk(batch_iter, candidate)
@@ -742,11 +1070,11 @@ def main() -> None:
                 probe_params,
                 probe_opt_state,
                 warm_chunk,
-                probe_step,
+                _training_scalar(probe_step, jnp.int32),
                 probe_accum_grads,
                 probe_accum_count,
             )
-            warm_host = np.asarray(jax.device_get(warm_losses))
+            warm_host = _host_losses(warm_losses)
             if len(warm_host) > 0:
                 probe_step += len(warm_host)
 
@@ -761,11 +1089,11 @@ def main() -> None:
                     probe_params,
                     probe_opt_state,
                     chunk,
-                    probe_step,
+                    _training_scalar(probe_step, jnp.int32),
                     probe_accum_grads,
                     probe_accum_count,
                 )
-                losses_host = np.asarray(jax.device_get(losses))
+                losses_host = _host_losses(losses)
                 chunk_steps = len(losses_host)
                 if chunk_steps == 0:
                     break
@@ -820,16 +1148,16 @@ def main() -> None:
 
         def _benchmark_prefetch(candidate: int) -> float:
             tune_runtime.loader.load_state(loader_snapshot)
-            batch_iter = _prefetch_to_device(
+            batch_iter = _prefetch_training_batches(
                 tune_runtime.loader,
                 size=int(candidate),
-                device=DEFAULT_DEVICE,
+                per_device_batch=per_device_batch_size,
             )
 
             probe_params = params
             probe_opt_state = opt_state
             probe_accum_grads = _init_accum_grads(params)
-            probe_accum_count = jnp.asarray(0, dtype=jnp.int32)
+            probe_accum_count = _init_accum_count()
             probe_step = global_step
 
             warm_chunk = _next_chunk(batch_iter, chunk_size)
@@ -839,11 +1167,11 @@ def main() -> None:
                 probe_params,
                 probe_opt_state,
                 warm_chunk,
-                probe_step,
+                _training_scalar(probe_step, jnp.int32),
                 probe_accum_grads,
                 probe_accum_count,
             )
-            warm_host = np.asarray(jax.device_get(warm_losses))
+            warm_host = _host_losses(warm_losses)
             if len(warm_host) > 0:
                 probe_step += len(warm_host)
 
@@ -857,11 +1185,11 @@ def main() -> None:
                     probe_params,
                     probe_opt_state,
                     chunk,
-                    probe_step,
+                    _training_scalar(probe_step, jnp.int32),
                     probe_accum_grads,
                     probe_accum_count,
                 )
-                losses_host = np.asarray(jax.device_get(losses))
+                losses_host = _host_losses(losses)
                 chunk_steps = len(losses_host)
                 if chunk_steps == 0:
                     break
@@ -895,7 +1223,7 @@ def main() -> None:
     start = time.time()
     last_loss = None
     accum_grads = _init_accum_grads(params)
-    accum_count = jnp.asarray(0, dtype=jnp.int32)
+    accum_count = _init_accum_count()
     for stage_idx in range(current_stage_idx, len(stage_runtimes)):
         runtime = stage_runtimes[stage_idx]
         stage_steps_target = runtime.total_steps
@@ -916,10 +1244,10 @@ def main() -> None:
         )
         last_loss = None
 
-        batch_iter = _prefetch_to_device(
+        batch_iter = _prefetch_training_batches(
             runtime.loader,
             size=prefetch_size,
-            device=DEFAULT_DEVICE,
+            per_device_batch=per_device_batch_size,
         )
         while completed_in_stage < stage_steps_target:
             remaining_steps = stage_steps_target - completed_in_stage
@@ -928,9 +1256,9 @@ def main() -> None:
             if chunk is None:
                 break
             params, opt_state, accum_grads, accum_count, losses = _run_chunk(
-                params, opt_state, chunk, global_step, accum_grads, accum_count
+                params, opt_state, chunk, _training_scalar(global_step, jnp.int32), accum_grads, accum_count
             )
-            losses = np.asarray(jax.device_get(losses))
+            losses = _host_losses(losses)
             chunk_len = len(losses)
             if chunk_len == 0:
                 break
@@ -959,16 +1287,14 @@ def main() -> None:
             if mini_every and (global_step % mini_every == 0):
                 # Stage mini-checkpoint payload on host RAM so asynchronous orbax
                 # writes do not retain additional large device buffers.
-                mini_state = jax.device_get(
-                    {
-                        "params": params,
-                        "opt_state": opt_state,
-                        "global_step": global_step,
-                        "stage_index": stage_idx,
-                        "stage_step_total": completed_in_stage,
-                        "stage_states": stage_states,
-                    }
-                )
+                mini_state = {
+                    "params": _checkpoint_tree(params),
+                    "opt_state": _checkpoint_tree(opt_state),
+                    "global_step": global_step,
+                    "stage_index": stage_idx,
+                    "stage_step_total": completed_in_stage,
+                    "stage_states": stage_states,
+                }
                 mini_ckpt_mgr.save(global_step, mini_state)
 
             if global_step % checkpoint_every == 0:
@@ -988,12 +1314,12 @@ def main() -> None:
                 print(f"💾 checkpoint → {ckpt_file}")
 
             if _stop_requested:
-                accum_count_host = int(jax.device_get(accum_count))
+                accum_count_host = _replicated_scalar_to_int(accum_count)
                 if accum_count_host > 0:
-                    denom = jnp.asarray(accum_count_host, dtype=jnp.float32)
+                    denom = _training_scalar(accum_count_host, jnp.float32)
                     params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
                     accum_grads = _init_accum_grads(params)
-                    accum_count = jnp.asarray(0, dtype=jnp.int32)
+                    accum_count = _init_accum_count()
                 mini_ckpt_mgr.wait_until_finished(timeout=4.0)
                 log_file.flush()
                 log_file.close()
@@ -1002,12 +1328,12 @@ def main() -> None:
                 return
 
         pbar.close()
-        accum_count_host = int(jax.device_get(accum_count))
+        accum_count_host = _replicated_scalar_to_int(accum_count)
         if accum_count_host > 0:
-            denom = jnp.asarray(accum_count_host, dtype=jnp.float32)
+            denom = _training_scalar(accum_count_host, jnp.float32)
             params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
             accum_grads = _init_accum_grads(params)
-            accum_count = jnp.asarray(0, dtype=jnp.int32)
+            accum_count = _init_accum_count()
         if last_loss is not None:
             print(
                 f"✓ Stage {runtime.config.name} completed (last loss {last_loss:.4f})"
@@ -1017,16 +1343,16 @@ def main() -> None:
         # Stage finished → reset step tracker
         stage_step_total = 0
 
-    accum_count_host = int(jax.device_get(accum_count))
+    accum_count_host = _replicated_scalar_to_int(accum_count)
     if accum_count_host > 0:
-        denom = jnp.asarray(accum_count_host, dtype=jnp.float32)
+        denom = _training_scalar(accum_count_host, jnp.float32)
         params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
         accum_grads = _init_accum_grads(params)
-        accum_count = jnp.asarray(0, dtype=jnp.int32)
-    final_ckpt = save_ckpt(params, global_step, params_dir_str, train_loss=last_loss)
+        accum_count = _init_accum_count()
+    final_ckpt = save_ckpt(_checkpoint_tree(params), global_step, params_dir_str, train_loss=last_loss)
     if last_loss is not None:
         print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {final_ckpt}")
-    save_opt_state(opt_state, global_step, training_states_dir_str)
+    save_opt_state(_checkpoint_tree(opt_state), global_step, training_states_dir_str)
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),
         {

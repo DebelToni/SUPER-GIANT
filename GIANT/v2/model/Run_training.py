@@ -243,15 +243,15 @@ def validate_milestones(stage_cfgs: List[StageConfig]) -> None:
         raise ValueError("Stage end_ratio values must be non-decreasing")
 
 
-def build_optimizer(cfg: OmegaConf, total_steps: int, params) -> optax.GradientTransformation:
-    warmup_steps = int(cfg.optimizer.warmup_steps)
-    if total_steps <= warmup_steps:
-        raise ValueError("Total steps must exceed warmup steps for cosine decay")
+def build_optimizer(cfg: OmegaConf, total_update_steps: int, params) -> optax.GradientTransformation:
+    warmup_steps = int(cfg.optimizer.get("warmup_updates", cfg.optimizer.warmup_steps))
+    if total_update_steps <= warmup_steps:
+        raise ValueError("Total optimizer updates must exceed warmup updates for cosine decay")
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=cfg.optimizer.base_learning_rate,
         warmup_steps=warmup_steps,
-        decay_steps=total_steps - warmup_steps,
+        decay_steps=total_update_steps - warmup_steps,
         end_value=cfg.optimizer.min_learning_rate,
     )
     exclusions = cfg.optimizer.get("weight_decay_exclusions", [])
@@ -436,6 +436,7 @@ def main() -> None:
     if not dataset_root.is_absolute():
         dataset_root = (base_root / dataset_root).resolve()
     batch_size = int(cfg.training.batch_size)
+    grad_accum = max(1, int(getattr(cfg.training, "gradient_accumulation", 1)))
     seed = getattr(cfg.training, "seed", None)
     if seed is None:
         seed = global_seed if global_seed is not None else 0
@@ -452,6 +453,12 @@ def main() -> None:
         pad_token_id=pad_token_id,
     )
     total_steps = sum(stage.total_steps for stage in stage_runtimes)
+    total_update_steps = max(1, (total_steps + grad_accum - 1) // grad_accum)
+    warmup_updates = int(cfg.optimizer.get("warmup_updates", cfg.optimizer.warmup_steps))
+    print(
+        f"[optimizer] micro_steps={total_steps} update_steps={total_update_steps} "
+        f"grad_accum={grad_accum} warmup_updates={warmup_updates}"
+    )
 
     max_seq_len = max(stage.config.seq_len for stage in stage_runtimes)
     # Get optional model config params with defaults
@@ -482,7 +489,7 @@ def main() -> None:
         params = flax_core.freeze(params)
     params = jax.device_put(params, DEFAULT_DEVICE)
 
-    optimizer = build_optimizer(cfg, total_steps, params)
+    optimizer = build_optimizer(cfg, total_update_steps, params)
     opt_state = optimizer.init(params)
     global_step = 0
 
@@ -590,7 +597,6 @@ def main() -> None:
     base_rng = jax.random.PRNGKey(seed)
     cfg_chunk = int(getattr(cfg.training, "scan_chunk", 1))
     chunk_size = max(1, int(args.scan_chunk)) if args.scan_chunk is not None else max(1, cfg_chunk)
-    grad_accum = max(1, int(getattr(cfg.training, "gradient_accumulation", 1)))
     autotune_scan_chunk = bool(getattr(cfg.training, "autotune_scan_chunk", False))
     autotune_scan_chunk_chunks = max(1, int(getattr(cfg.training, "autotune_scan_chunk_chunks", 4)))
     autotune_scan_chunk_persist = bool(getattr(cfg.training, "autotune_scan_chunk_persist", False))

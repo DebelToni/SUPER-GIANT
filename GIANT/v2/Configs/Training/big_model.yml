@@ -32,22 +32,22 @@ optimizer:
     - embedding
 
 training:
-  batch_size: 20
-  gradient_accumulation: 8
+  batch_size: 24
+  gradient_accumulation: 80
   seed: 0
   log_every: 200
-  checkpoint_every: 100000
+  checkpoint_every: 10000
   mini_checkpoint_every: 0
   mini_max_to_keep: 2
   scan_chunk: 4
   autotune_scan_chunk: true
-  autotune_scan_chunk_candidates: [1, 2, 4, 8, 16]
+  autotune_scan_chunk_candidates: [1, 2, 4, 8, 16, 32]
   autotune_scan_chunk_chunks: 4
   autotune_scan_chunk_steps: 256
   autotune_scan_chunk_persist: true
   prefetch_size: 2
   autotune_prefetch: true
-  autotune_prefetch_candidates: [2, 4, 8, 16]
+  autotune_prefetch_candidates: [2, 4, 8, 16, 32]
   autotune_prefetch_chunks: 4
   autotune_prefetch_persist: true
 
@@ -64,7 +64,7 @@ stages:
     dataset: 2_finewiki_1b_l256
     seq_len: 256
     epochs: 1
-    fraction: 1.0
+    fraction: 0.5
     shuffle: true
     end_ratio: 0.10
 
@@ -72,7 +72,7 @@ stages:
     dataset: 3_open_textbooks_l512
     seq_len: 512
     epochs: 1
-    fraction: 1.0
+    fraction: 0.5
     shuffle: true
     end_ratio: 0.175
 
@@ -80,7 +80,7 @@ stages:
     dataset: 4_fineweb_edu_l512
     seq_len: 512
     epochs: 1
-    fraction: 1.0
+    fraction: 0.4
     shuffle: true
     end_ratio: 0.975
 

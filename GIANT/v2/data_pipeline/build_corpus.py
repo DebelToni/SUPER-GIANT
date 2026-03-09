@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 import numpy as np
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
+from datasets import load_dataset
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -183,17 +184,6 @@ def _open_text_stream(path: Path):
     if suffix == ".bz2":
         return bz2.open(path, "rt", encoding="utf-8", errors="ignore")
     return path.open("r", encoding="utf-8", errors="ignore")
-
-
-def _packed_mask_num_bytes(seq_len: int) -> int:
-    return (int(seq_len) + 7) // 8
-
-
-def _pack_loss_mask(mask: List[float], seq_len: int) -> bytes:
-    if len(mask) != seq_len:
-        raise ValueError(f"Expected mask length {seq_len}, got {len(mask)}")
-    bits = np.fromiter((1 if float(v) > 0 else 0 for v in mask), dtype=np.uint8, count=seq_len)
-    return np.packbits(bits, bitorder="little").tobytes()
 
 
 def _stream_json_records(path: Path, chunk_size: int = 65536) -> Iterator[Any]:
@@ -502,12 +492,6 @@ class SequenceEmitter:
                 if len(window) < self.stage.min_tokens:
                     break
                 mask_window = mask[offset : offset + seq_len] if mask is not None else None
-                if len(window) < seq_len and self.stage.add_eos:
-                    window = window + [int(self.eos_id)]
-                    if mask_window is not None:
-                        mask_window = mask_window + [0.0]
-                    else:
-                        mask_window = [1.0] * (len(window) - 1) + [0.0]
                 row = self._emit_sequence(window, mask_window)
                 if row:
                     yield row
@@ -604,19 +588,13 @@ class SequenceEmitter:
             seq = seq + [self.pad_id] * (self.seq_len - length)
             if mask is not None:
                 mask = mask + [0.0] * (self.seq_len - length)
-        if mask is None:
-            final_mask = [1.0] * length + [0.0] * (self.seq_len - length)
-        else:
-            final_mask = mask
-        if len(final_mask) != self.seq_len:
-            final_mask = list(final_mask[: self.seq_len])
-            if len(final_mask) < self.seq_len:
-                final_mask.extend([0.0] * (self.seq_len - len(final_mask)))
-        packed_mask = _pack_loss_mask(final_mask, self.seq_len)
         self.stats.sequences += 1
         self.stats.tokens += length
         row = {"input_ids": seq, "length": length}
-        row["loss_mask"] = packed_mask
+        if mask is not None:
+            row["loss_mask"] = mask
+        else:
+            row["loss_mask"] = [1.0] * self.seq_len
         self._check_targets()
         return row
 
@@ -694,12 +672,6 @@ def _build_chat_text_and_spans(
     return full_text, spans
 
 
-def _load_dataset_lazy(*args, **kwargs):
-    from datasets import load_dataset as hf_load_dataset
-
-    return hf_load_dataset(*args, **kwargs)
-
-
 def _iter_hf_source(source: StageSourceCfg) -> Iterator[Dict[str, Any]]:
     if not source.dataset_name:
         raise ValueError("HuggingFace source requires 'dataset_name'.")
@@ -708,37 +680,13 @@ def _iter_hf_source(source: StageSourceCfg) -> Iterator[Dict[str, Any]]:
         kwargs["name"] = source.dataset_config
     if source.data_files is not None:
         kwargs["data_files"] = source.data_files
-    requested_streaming = bool(source.streaming)
-    effective_streaming = requested_streaming
-    if not requested_streaming:
-        effective_streaming = True
-        LOGGER.info(
-            "Source %s configured with streaming=false; using partial-download mode "
-            "(streaming backend) so only consumed records are fetched/cached.",
-            source.dataset_name,
-        )
-    try:
-        ds = _load_dataset_lazy(
-            source.dataset_name,
-            split=source.split,
-            streaming=effective_streaming,
-            **kwargs,
-        )
-    except Exception:
-        if not requested_streaming and effective_streaming:
-            LOGGER.warning(
-                "Streaming backend unavailable for %s; falling back to full non-streaming load.",
-                source.dataset_name,
-            )
-            ds = _load_dataset_lazy(
-                source.dataset_name,
-                split=source.split,
-                streaming=False,
-                **kwargs,
-            )
-        else:
-            raise
-    if effective_streaming and source.shuffle_streaming:
+    ds = load_dataset(
+        source.dataset_name,
+        split=source.split,
+        streaming=source.streaming,
+        **kwargs,
+    )
+    if source.streaming and source.shuffle_streaming:
         ds = ds.shuffle(
             seed=source.shuffle_seed,
             buffer_size=int(source.shuffle_buffer_size),
@@ -864,11 +812,10 @@ def iter_stage_rows(
 
 
 def _arrow_schema(seq_len: int) -> pa.Schema:
-    mask_bytes = _packed_mask_num_bytes(seq_len)
     return pa.schema([
         pa.field("input_ids", pa.list_(pa.int32(), list_size=seq_len)),
         pa.field("length", pa.int32()),
-        pa.field("loss_mask", pa.binary(mask_bytes)),
+        pa.field("loss_mask", pa.list_(pa.float32(), list_size=seq_len)),
     ])
 
 
@@ -1074,13 +1021,8 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
         global_cfg = OmegaConf.load(global_cfg_path)
         LOGGER.info("Loaded global config: %s", global_cfg_path)
 
-    tokenizer_cfg_dict = dict(global_cfg.get("tokenizer") or {})
-    tokenizer_cfg_dict.update(dict(corpus_cfg.get("tokenizer") or {}))
-    tok = TokenizerCfg(**tokenizer_cfg_dict)
-
-    paths_cfg_dict = dict(global_cfg.get("paths") or {})
-    paths_cfg_dict.update(dict(corpus_cfg.get("paths") or {}))
-    paths = PathsCfg(**paths_cfg_dict)
+    tok = TokenizerCfg(**(global_cfg.get("tokenizer") or {}))
+    paths = PathsCfg(**(global_cfg.get("paths") or {}))
     global_seed = global_cfg.get("global_seed")
     if global_seed is not None:
         global_seed = int(global_seed)
@@ -1124,7 +1066,6 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None, help="Path to Config.yml (optional)")
-    parser.add_argument("--global_config", type=str, default=None, help="Path to Global_Config.yml (optional)")
     parser.add_argument("--stage", type=str, default="all", help="Stage name or 'all'")
     parser.add_argument("--dry-run", action="store_true", help="Tokenize without writing shards")
     parser.add_argument(
@@ -1186,7 +1127,6 @@ def main() -> None:
     args = parse_args()
     run_pipeline(
         config_path=args.config,
-        global_config_path=args.global_config,
         stage=args.stage,
         dry_run=args.dry_run,
         dataset_dir=args.dataset_dir,

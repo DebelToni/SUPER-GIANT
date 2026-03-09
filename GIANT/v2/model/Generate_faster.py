@@ -27,7 +27,6 @@ class ModelConfig:
     rope_dim: Optional[int] = None
     context_length: int = 2048
     dropout_rate: float = 0.0
-    activation: str = "silu"
     use_remat: bool = False
     param_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
@@ -231,9 +230,6 @@ def build_model(cfg: GenerateFasterConfig, vocab_size: int, context_length: int)
         num_kv_heads=model_cfg.num_kv_heads,
         rotary_dim=model_cfg.rope_dim,
         dropout_rate=0.0,
-        param_dtype=model_cfg.param_dtype,
-        compute_dtype=model_cfg.compute_dtype,
-        use_remat=bool(model_cfg.use_remat),
     )
 
 

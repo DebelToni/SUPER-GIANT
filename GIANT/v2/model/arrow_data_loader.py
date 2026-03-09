@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -10,15 +9,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
-
-
-def _packed_mask_num_bytes(seq_len: int) -> int:
-    return (int(seq_len) + 7) // 8
-
-
-def _unpack_packed_loss_mask(packed: np.ndarray, seq_len: int) -> np.ndarray:
-    unpacked = np.unpackbits(packed, axis=1, bitorder="little")
-    return unpacked[:, :seq_len].astype(np.uint8, copy=False)
 
 
 @dataclass
@@ -82,15 +72,7 @@ class ShardedArrowDataset:
                 mask_type = mask_array.type
                 if isinstance(mask_type, pa.FixedSizeListType) and mask_type.list_size == seq_len:
                     mask_values = mask_array.values.to_numpy(zero_copy_only=False)
-                    mask_values = mask_values.reshape(num_rows, seq_len)
-                    loss_mask = (mask_values > 0).astype(np.uint8, copy=False)
-                elif isinstance(mask_type, pa.FixedSizeBinaryType):
-                    num_bytes = _packed_mask_num_bytes(seq_len)
-                    raw_buffer = mask_array.buffers()[1]
-                    if raw_buffer is not None:
-                        packed = np.frombuffer(memoryview(raw_buffer), dtype=np.uint8)
-                        packed = packed.reshape(num_rows, num_bytes)
-                        loss_mask = _unpack_packed_loss_mask(packed, seq_len)
+                    loss_mask = mask_values.reshape(num_rows, seq_len).astype(np.float32, copy=False)
             return tokens, lengths, loss_mask
 
         seq_arrays = ids_column.to_pylist()
@@ -100,7 +82,7 @@ class ShardedArrowDataset:
         lengths = np.zeros(num_rows, dtype=np.int32)
         loss_mask = None
         if mask_column is not None:
-            loss_mask = np.zeros((num_rows, seq_len), dtype=np.uint8)
+            loss_mask = np.zeros((num_rows, seq_len), dtype=np.float32)
 
         for i, seq in enumerate(seq_arrays):
             if not isinstance(seq, list):
@@ -119,29 +101,15 @@ class ShardedArrowDataset:
         lengths = np.clip(lengths, 1, seq_len)
         if mask_column is not None:
             mask_arrays = mask_column.to_pylist()
-            num_bytes = _packed_mask_num_bytes(seq_len)
             for i, mask_row in enumerate(mask_arrays):
+                if not isinstance(mask_row, list):
+                    mask_row = list(mask_row)
                 if loss_mask is None:
                     continue
-                if isinstance(mask_row, (bytes, bytearray, memoryview)):
-                    packed = np.frombuffer(mask_row, dtype=np.uint8)
-                    if packed.size < num_bytes:
-                        padded = np.zeros((num_bytes,), dtype=np.uint8)
-                        padded[: packed.size] = packed
-                        packed = padded
-                    else:
-                        packed = packed[:num_bytes]
-                    bits = np.unpackbits(packed, bitorder="little")[:seq_len]
-                    loss_mask[i] = bits.astype(np.uint8, copy=False)
+                if len(mask_row) >= seq_len:
+                    loss_mask[i] = np.asarray(mask_row[:seq_len], dtype=np.float32)
                 else:
-                    if not isinstance(mask_row, list):
-                        mask_row = list(mask_row)
-                    if len(mask_row) >= seq_len:
-                        row_arr = np.asarray(mask_row[:seq_len], dtype=np.float32)
-                        loss_mask[i] = (row_arr > 0).astype(np.uint8, copy=False)
-                    else:
-                        row_arr = np.asarray(mask_row, dtype=np.float32)
-                        loss_mask[i, : len(mask_row)] = (row_arr > 0).astype(np.uint8, copy=False)
+                    loss_mask[i, : len(mask_row)] = np.asarray(mask_row, dtype=np.float32)
         return tokens, lengths, loss_mask
 
 
@@ -264,34 +232,14 @@ class StageDataLoader:
             "shard_pos": self._current_shard_pos,
             "row_ptr": self._row_ptr,
             "rows_consumed": self._rows_consumed,
-            "batch_size": self.batch_size,
-            "seq_len": self.seq_len,
         }
 
     def load_state(self, state: Dict[str, int]) -> None:
-        saved_seq_len = state.get("seq_len")
-        if saved_seq_len is not None and int(saved_seq_len) != self.seq_len:
-            raise ValueError(
-                f"Saved dataloader seq_len={saved_seq_len} does not match current seq_len={self.seq_len}"
-            )
-
-        saved_batch_size = state.get("batch_size")
-        batch_size_changed = (
-            saved_batch_size is not None and int(saved_batch_size) != self.batch_size
-        )
-        if batch_size_changed:
-            warnings.warn(
-                "Resuming dataloader with a different global batch size. "
-                "Sample order resumes from the saved row cursor, but step counters become approximate.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-
         self.epoch = int(state.get("epoch", 0))
+        self.step_in_epoch = int(state.get("step_in_epoch", 0))
         shard_pos = int(state.get("shard_pos", 0))
         row_ptr = int(state.get("row_ptr", 0))
         saved_rows_consumed = int(state.get("rows_consumed", 0))
-        self.step_in_epoch = int(state.get("step_in_epoch", 0))
         self._prepare_epoch()
         # _prepare_epoch resets counters; restore consumed rows before loading shard.
         self._rows_consumed = saved_rows_consumed
@@ -302,8 +250,6 @@ class StageDataLoader:
             raise RuntimeError("Failed to load shard while restoring state")
         limit = self._current_data.shape[0] if self._current_data is not None else 0
         self._row_ptr = min(max(row_ptr, 0), limit)
-        if batch_size_changed:
-            self.step_in_epoch = min(self._rows_consumed // self.batch_size, self.steps_per_epoch)
 
     def __iter__(self):
         return self
@@ -338,9 +284,9 @@ class StageDataLoader:
         valid_target_len = np.maximum(eff_lengths - 1, 0)
         valid_target_len = np.maximum(valid_target_len, 1)
         positions = self._positions
-        length_mask = (positions < valid_target_len[:, None]).astype(np.uint8)
+        length_mask = (positions < valid_target_len[:, None]).astype(np.float32)
         if batch_loss_mask is not None:
-            mask = np.bitwise_and(length_mask, batch_loss_mask.astype(np.uint8, copy=False))
+            mask = length_mask * batch_loss_mask
         else:
             mask = length_mask
 

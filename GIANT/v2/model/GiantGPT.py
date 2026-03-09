@@ -1,21 +1,33 @@
 
 from typing import Optional
+from pathlib import Path
 
 import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
+from omegaconf import OmegaConf
 
 from GIANT.v2.model.Transformer_block import TinyTransformerBlock
 
-def _to_dtype(value: jnp.dtype | str) -> jnp.dtype:
-    if isinstance(value, jnp.dtype):
-        return value
-    if isinstance(value, str):
-        try:
-            return getattr(jnp, value)
-        except AttributeError:
-            return jnp.dtype(value)
-    return jnp.dtype(value)
+MODEL_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = MODEL_DIR.parent
+
+cfg = OmegaConf.merge(
+    OmegaConf.load(PROJECT_ROOT / "Global_Config.yml"),
+    OmegaConf.load(MODEL_DIR / "Config.yml"),
+)
+MODEL_CFG = cfg.model
+
+
+def _to_dtype(name: str) -> jnp.dtype:
+    try:
+        return getattr(jnp, name)
+    except AttributeError:
+        return jnp.dtype(name)
+
+
+PARAM_DTYPE = _to_dtype(MODEL_CFG.param_dtype)
+COMPUTE_DTYPE = _to_dtype(MODEL_CFG.compute_dtype)
 
 class GiantGPT(nn.Module):
     vocab_size:     int
@@ -25,11 +37,8 @@ class GiantGPT(nn.Module):
     d_ff:           int
     n_layers:       int
     dropout_rate:   float = 0.1
-    num_kv_heads:   Optional[int] = None
-    rotary_dim:     Optional[int] = None
-    param_dtype:    jnp.dtype | str = jnp.float32
-    compute_dtype:  jnp.dtype | str = jnp.bfloat16
-    use_remat:      bool = False
+    num_kv_heads:   Optional[int] = None  # If None, uses n_heads (MHA) or global config
+    rotary_dim:     Optional[int] = None  # If None, uses global config
 
     @nn.compact
     def __call__(
@@ -40,15 +49,12 @@ class GiantGPT(nn.Module):
         use_kv_cache: bool = False,
         cur_index: Optional[jnp.ndarray | int] = None,
     ):
-        compute_dtype = _to_dtype(self.compute_dtype)
-        param_dtype = _to_dtype(self.param_dtype)
-
         embed = nn.Embed(
             num_embeddings=self.vocab_size,
             features=self.d_model,
             embedding_init=nn.initializers.normal(stddev=0.02),
-            dtype=compute_dtype,
-            param_dtype=param_dtype,
+            dtype=COMPUTE_DTYPE,
+            param_dtype=PARAM_DTYPE,
         )
         x = embed(tokens)
 
@@ -63,13 +69,11 @@ class GiantGPT(nn.Module):
                     dropout_rate=self.dropout_rate,
                     num_kv_heads=self.num_kv_heads,
                     rotary_dim=self.rotary_dim,
-                    dtype=compute_dtype,
-                    param_dtype=param_dtype,
-                    use_remat=self.use_remat,
+                    dtype=COMPUTE_DTYPE,
             )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
 
-        x = RMSNorm(name="final_norm", dtype=compute_dtype, epsilon=1e-5)(x)
+        x = RMSNorm(name="final_norm", dtype=COMPUTE_DTYPE, epsilon=1e-5)(x)
         logits = jnp.einsum("bld,vd->blv",
-                             x.astype(jnp.float32),
-                             embed.embedding.astype(jnp.float32))
+                            x.astype(jnp.float32),
+                            embed.embedding)
         return logits

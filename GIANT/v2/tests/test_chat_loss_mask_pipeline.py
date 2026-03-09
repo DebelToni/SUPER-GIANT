@@ -79,8 +79,7 @@ def test_chat_loss_mask_pipeline() -> None:
     assert rows, "Expected at least one sequence"
     row = rows[0]
     assert "loss_mask" in row
-    packed = np.frombuffer(row["loss_mask"], dtype=np.uint8)
-    mask = np.unpackbits(packed, bitorder="little")[: stage.sequence_length].astype(np.float32)
+    mask = np.array(row["loss_mask"], dtype=np.float32)
     assert mask.sum() > 0
     assert mask.sum() < len(mask)
 

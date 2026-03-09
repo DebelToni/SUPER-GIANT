@@ -1,0 +1,18 @@
+global_seed: 0
+
+tokenizer:
+  name: "clowman/Llama-3.2-3B-Instruct-AWQ-Int4"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+  use_custom: false
+  custom_path: "math_tokenizer_data"
+  pad_token_override: null
+
+paths:
+  data_root: "/proj/giant-data/GIANT"
+  processed_data_root: "dataset_artifacts"
+  dataloader_state_root: "checkpoints/dataloader_state"
+  logs_root: "logs"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+# export XLA_PYTHON_CLIENT_PREALLOCATE=true
+# export XLA_PYTHON_CLIENT_MEM_FRACTION=1.0

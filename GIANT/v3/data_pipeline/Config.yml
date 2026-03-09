@@ -1,0 +1,176 @@
+outputs:
+  processed_root: "dataset_artifacts"
+  rows_per_shard: 32768
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 4212
+  write_batch_size: 256
+  dry_run_preview_rows: 200
+
+stages:
+  sentences_short:
+    description: "High-quality English sentences warmup"
+    output_dir: "sentences_short"
+    sequence_length: 128
+    target_tokens: 100000000
+    min_tokens: 16
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "agentlans/high-quality-english-sentences"
+        split: "train"
+        streaming: false
+        text_field: "text"
+
+  simple_wiki_lm:
+    description: "Simple Wikipedia language modeling corpus"
+    output_dir: "simple_wiki_lm"
+    sequence_length: 128
+    target_tokens: 150000000
+    min_tokens: 24
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "pszemraj/simple_wikipedia_LM"
+        split: "train"
+        streaming: false
+        text_field: "text"
+
+  simple_wiki:
+    description: "Simple English Wikipedia (paragraphs)"
+    output_dir: "simple_wiki"
+    sequence_length: 128
+    target_tokens: 150000000
+    min_tokens: 32
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "pszemraj/simple_wikipedia"
+        split: "train"
+        streaming: false
+        text_field: "text"
+
+  finewiki_l256:
+    description: "FineWiki backbone chunks at L=256"
+    output_dir: "finewiki_l256"
+    sequence_length: 256
+    target_tokens: 560000000
+    min_tokens: 64
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceFW/finewiki"
+        split: "train"
+        streaming: true
+        text_field: "text"
+
+  finewiki_l512:
+    description: "FineWiki backbone chunks at L=512"
+    output_dir: "finewiki_l512"
+    sequence_length: 512
+    target_tokens: 240000000
+    min_tokens: 64
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceFW/finewiki"
+        split: "train"
+        streaming: true
+        text_field: "text"
+
+  open_textbooks_l512:
+    description: "Open Textbooks sequential 512-token windows"
+    output_dir: "open_textbooks_l512"
+    sequence_length: 512
+    target_tokens: 400000000
+    min_tokens: 64
+    pack_sequences: false
+    add_eos: false
+    long_document_strategy: sequential
+    sequential_window_stride: 512
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "izumi-lab/open-text-books"
+        split: "train"
+        streaming: false
+        text_field: "text"
+
+  fineweb_edu_l512:
+    description: "FineWeb-Edu 512-token curriculum"
+    output_dir: "fineweb_edu_l512"
+    sequence_length: 512
+    target_tokens: 150000000
+    min_tokens: 64
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceFW/fineweb-edu"
+        split: "train"
+        streaming: true
+        text_field: "text"
+
+  fineweb_edu_l1024:
+    description: "FineWeb-Edu 1024-token curriculum"
+    output_dir: "fineweb_edu_l1024"
+    sequence_length: 1024
+    target_tokens: 150000000
+    min_tokens: 64
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceFW/fineweb-edu"
+        split: "train"
+        streaming: true
+        text_field: "text"
+
+  definitions_short:
+    description: "WordNet-style dense definitions"
+    output_dir: "definitions_short"
+    sequence_length: 128
+    target_tokens: 100000000
+    min_tokens: 12
+    pack_sequences: true
+    add_eos: true
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "marksverdhei/wordnet-definitions-en-2021"
+        split: "train"
+        streaming: false
+        join_fields: ["Word", "Definition", "Example"]
+        join_separator: " | "

@@ -1,0 +1,30 @@
+model:
+  embedding_size: 896
+  num_heads: 14
+  num_layers: 24
+  feed_forward_size: 4864
+  num_kv_heads: 2
+  vocab_size: 151936
+  rope_theta: 1000000.0
+  context_length: 32768
+  dropout_rate: 0.0
+  activation: silu
+  rms_norm_eps: 1.0e-6
+  param_dtype: float32
+  compute_dtype: float32
+
+tokenizer:
+  name: "Qwen/Qwen2.5-0.5B-Instruct"
+  cache_dir: "tokenizer_cache"
+
+paths:
+  checkpoint_dir: "/Volumes/SSD/r2/qwen25_0.5b_instruct"
+
+generate:
+  temperature: 0.7
+  top_k: 50
+  max_new_tokens: 64
+  seed: 0
+
+inference:
+  stop_on_eos: true

@@ -1,0 +1,67 @@
+global_seed: 0
+
+model:
+  embedding_size: 768
+  num_heads: 12
+  num_kv_heads: 4
+  num_layers: 7
+  feed_forward_size: 3072
+  rope_dim: 64
+  context_length: 512
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tokenizer:
+  name: "gpt2"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+  use_custom: false
+  pad_token_override: null
+
+optimizer:
+  base_learning_rate: 2.0e-4
+  min_learning_rate: 2.0e-5
+  warmup_updates: 400
+  weight_decay: 0.10
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
+
+training:
+  batch_size: 4
+  gradient_accumulation: 1
+  seed: 0
+  log_every: 200
+  checkpoint_every: 5000
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 2
+  scan_chunk: 4
+  autotune_scan_chunk: false
+  prefetch_size: 4
+  autotune_prefetch: false
+
+stages:
+  - name: hq_sentences_dev
+    dataset: 1_hq_sentences_l128
+    seq_len: 128
+    epochs: 1
+    fraction: 0.1
+    shuffle: true
+    end_ratio: 1.0
+
+qa_finetune: {}
+
+paths:
+  data_root: "/proj/giant-data/GIANT"
+  processed_data_root: "dataset_artifacts/curriculum_20b"
+  dataloader_state_root: "multi-gpu/checkpoints/dev_100m_hq/dataloader_state"
+  logs_root: "multi-gpu/logs/dev_100m_hq"
+  checkpoints_root: "multi-gpu/checkpoints/dev_100m_hq"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+inference:
+  stop_on_eos: true

@@ -1,0 +1,155 @@
+tokenizer:
+  name: "gpt2"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+  use_custom: false
+
+paths:
+  data_root: "/proj/giant-data/GIANT"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+outputs:
+  processed_root: "dataset_artifacts/curriculum_20b"
+  rows_per_shard: 32768
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 4212
+  write_batch_size: 256
+  dry_run_preview_rows: 200
+
+stages:
+  # --- 0) Warmup: use real English Wikipedia, not sentence-only corpora ---
+  hq_sentences_l128:
+    description: "English Wikipedia warmup at L=128"
+    output_dir: "1_hq_sentences_l128"
+    sequence_length: 128
+    target_tokens: 200000000 # 0.2B
+    min_tokens: 16
+    pack_sequences: true
+    add_eos: true
+    deduplicate: true
+    dedup_max_keys: 1000000
+    random_windows_per_document: 1
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "wikimedia/wikipedia"
+        dataset_config: "20231101.en"
+        split: "train"
+        streaming: true
+        text_field: "text"
+
+  # --- 1) Clean English Wikipedia backbone ---
+  finewiki_1b_l256:
+    description: "English Wikipedia backbone at L=256"
+    output_dir: "2_finewiki_1b_l256"
+    sequence_length: 256
+    target_tokens: 1800000000 # 1.8B
+    min_tokens: 64
+    pack_sequences: true
+    add_eos: true
+    deduplicate: true
+    dedup_max_keys: 3000000
+    random_windows_per_document: 2
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "wikimedia/wikipedia"
+        dataset_config: "20231101.en"
+        split: "train"
+        streaming: true
+        text_field: "text"
+
+  # --- 2) Long-form coherent English ---
+  open_textbooks_l512:
+    description: "Long-form English books/texts at L=512"
+    output_dir: "3_open_textbooks_l512"
+    sequence_length: 512
+    target_tokens: 1500000000 # 1.5B
+    min_tokens: 128
+    pack_sequences: false
+    add_eos: false
+    long_document_strategy: sequential
+    sequential_window_stride: 512
+    deduplicate: true
+    dedup_max_keys: 1000000
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "nikolina-p/gutenberg_clean_en"
+        split: "train"
+        streaming: true
+        text_field: "text"
+
+      - type: huggingface
+        dataset_name: "wikimedia/wikisource"
+        dataset_config: "20231201.en"
+        split: "train"
+        streaming: true
+        text_field: "text"
+
+      - type: huggingface
+        dataset_name: "next-token/clean-PD-16000-books3"
+        split: "train"
+        streaming: true
+        text_field: "text"
+
+  # --- 3) Main high-quality English webtext backbone ---
+  fineweb_edu_l512:
+    description: "FineWeb-Edu (English, educational webtext) at L=512"
+    output_dir: "4_fineweb_edu_l512"
+    sequence_length: 512
+    target_tokens: 16000000000 # 16.0B
+    min_tokens: 64
+    pack_sequences: true
+    add_eos: true
+    deduplicate: true
+    dedup_max_keys: 2000000
+    random_windows_per_document: 1
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceFW/fineweb-edu"
+        split: "train"
+        streaming: false
+        text_field: "text"
+
+  # --- 4) Final: chat/instruction flavor (now actually able to reach 0.5B tokens) ---
+  alpaca_chat_l512:
+    description: "English instruction/chat mixture: OpenOrca + Alpaca-cleaned (joined fields)"
+    output_dir: "5_alpaca_chat_l512"
+    sequence_length: 512
+    target_tokens: 500000000 # 0.5B (now reachable due to OpenOrca)
+    min_tokens: 128
+    pack_sequences: true
+    add_eos: true
+    deduplicate: true
+    dedup_max_keys: 500000
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      # Big English instruction data (flat schema; easy to join)
+      - type: huggingface
+        dataset_name: "Open-Orca/OpenOrca"
+        split: "train"
+        streaming: false
+        join_fields: ["system_prompt", "question", "response"]
+        join_separator: "\n\n"
+
+      # Small high-signal classic instruction set (schema-safe join)
+      - type: huggingface
+        dataset_name: "yahma/alpaca-cleaned"
+        split: "train"
+        streaming: false
+        join_fields: ["instruction", "input", "output"]
+        join_separator: "\n\n"

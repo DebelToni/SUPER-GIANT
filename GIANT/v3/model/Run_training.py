@@ -9,8 +9,8 @@ from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "true")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "1.0")
 
 import jax
 import jax.numpy as jnp
@@ -68,6 +68,33 @@ LOCAL_DEVICES = tuple(d for d in jax.local_devices() if d.platform == DEFAULT_DE
 if not LOCAL_DEVICES:
     LOCAL_DEVICES = (DEFAULT_DEVICE,)
 LOCAL_DEVICE_COUNT = len(LOCAL_DEVICES)
+
+
+def _configure_nccl_p2p():
+    if DEFAULT_DEVICE.platform != "gpu" or LOCAL_DEVICE_COUNT <= 1:
+        return None
+    if "NCCL_P2P_DISABLE" in os.environ:
+        return None
+
+    mode = os.environ.get("GIANT_NCCL_P2P_MODE", "auto").strip().lower()
+    if mode in {"0", "false", "off", "enable", "enabled"}:
+        return None
+
+    device_kinds = {str(getattr(device, "device_kind", "")) for device in LOCAL_DEVICES}
+    should_disable = mode in {"1", "true", "on", "disable", "disabled"}
+    if not should_disable and mode == "auto":
+        should_disable = bool(device_kinds) and all("A40" in kind for kind in device_kinds)
+
+    if not should_disable:
+        return None
+
+    os.environ["NCCL_P2P_DISABLE"] = "1"
+    if mode == "auto":
+        return "auto-disabled NCCL P2P for multi-GPU A40 setup"
+    return "disabled NCCL P2P via GIANT_NCCL_P2P_MODE"
+
+
+NCCL_P2P_NOTE = _configure_nccl_p2p()
 MULTI_GPU_BACKEND = "single"
 if LOCAL_DEVICE_COUNT > 1:
     MULTI_GPU_BACKEND = os.environ.get("GIANT_MULTI_GPU_BACKEND", "pmap").strip().lower()
@@ -617,6 +644,9 @@ def main() -> None:
         f"per_device_batch={per_device_batch_size} "
         f"global_batch={global_batch_size}"
     )
+    if LOCAL_DEVICE_COUNT > 1 and os.environ.get("NCCL_P2P_DISABLE") == "1":
+        detail = NCCL_P2P_NOTE or "using NCCL_P2P_DISABLE=1"
+        print(f"[devices] {detail}")
     warmup_updates = cfg.optimizer.get("warmup_updates", None)
     if warmup_updates is None:
         warmup_updates = cfg.optimizer.get("warmup_steps", None)
@@ -656,7 +686,7 @@ def main() -> None:
     params = _freeze_if_dict(params)
 
     optimizer = build_optimizer(cfg, total_update_steps, params)
-    opt_state = optimizer.init(params)
+    opt_state = None
     global_step = 0
 
     checkpoint_dir_arg = args.checkpoint_dir
@@ -697,6 +727,8 @@ def main() -> None:
     stage_step_total = 0
 
     resume_request = args.resume
+    if resume_request == "latest":
+        opt_state = optimizer.init(params)
     mini_state_template = {
         "params": params,
         "opt_state": opt_state,
@@ -769,9 +801,23 @@ def main() -> None:
     _startup_marker("placing params on training devices")
     params = _place_on_training_devices(params)
     _startup_marker("params placed")
-    _startup_marker("placing optimizer state on training devices")
-    opt_state = _place_on_training_devices(opt_state)
-    _startup_marker("optimizer state placed")
+    if opt_state is None and USE_PMAP:
+        _startup_marker("initializing optimizer state on training devices")
+
+        @partial(jax.pmap, axis_name="data")
+        def _init_opt_state_pmap(replicated_params):
+            return optimizer.init(replicated_params)
+
+        opt_state = _init_opt_state_pmap(params)
+        _startup_marker("optimizer state ready")
+    else:
+        if opt_state is None:
+            _startup_marker("initializing optimizer state on host")
+            opt_state = optimizer.init(_checkpoint_tree(params))
+            _startup_marker("optimizer state initialized on host")
+        _startup_marker("placing optimizer state on training devices")
+        opt_state = _place_on_training_devices(opt_state)
+        _startup_marker("optimizer state placed")
     if USE_SHARD_MAP:
         _startup_marker("building shard_map specs")
         params_spec = jax.tree_util.tree_map(lambda _: P(), jax.device_get(params))

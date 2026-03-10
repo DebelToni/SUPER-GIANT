@@ -35,8 +35,8 @@ training:
   batch_size: 8
   gradient_accumulation: 1
   seed: 0
-  log_every: 200
-  checkpoint_every: 10000
+  log_every: 2000
+  checkpoint_every: 200000
   mini_checkpoint_every: 0
   mini_max_to_keep: 2
   scan_chunk: 4

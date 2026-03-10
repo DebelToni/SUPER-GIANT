@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import jax
@@ -38,6 +39,7 @@ class _ModelDefaults:
 MODEL_CFG = _ModelDefaults()
 
 IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
+ATTENTION_IMPL_OVERRIDE = os.environ.get("GIANT_ATTENTION_IMPL", "").strip().lower()
 
 def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)
@@ -62,6 +64,41 @@ def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype):
     sin = jnp.sin(emb)[None, :, None, :].astype(dtype)
     cos = jnp.cos(emb)[None, :, None, :].astype(dtype)
     return sin, cos
+
+
+def _manual_attention(
+    q: jnp.ndarray,
+    k: jnp.ndarray,
+    v: jnp.ndarray,
+    *,
+    head_dim: int,
+    is_causal: bool,
+    bias: Optional[jnp.ndarray] = None,
+) -> jnp.ndarray:
+    if q.shape[2] != k.shape[2]:
+        repeat = q.shape[2] // k.shape[2]
+        k = jnp.repeat(k, repeat, axis=2)
+        v = jnp.repeat(v, repeat, axis=2)
+
+    qh = jnp.transpose(q, (0, 2, 1, 3))
+    kh = jnp.transpose(k, (0, 2, 3, 1))
+    vh = jnp.transpose(v, (0, 2, 1, 3))
+
+    scale = jnp.asarray(1.0 / jnp.sqrt(head_dim), dtype=q.dtype)
+    scores = jnp.einsum("bhqd,bhdk->bhqk", qh, kh) * scale
+
+    if bias is not None:
+        scores = scores + bias.astype(scores.dtype)
+
+    if is_causal:
+        q_len = scores.shape[-2]
+        k_len = scores.shape[-1]
+        causal = jnp.tril(jnp.ones((q_len, k_len), dtype=bool))
+        scores = jnp.where(causal[None, None, :, :], scores, jnp.asarray(-1e10, dtype=scores.dtype))
+
+    probs = jax.nn.softmax(scores, axis=-1).astype(vh.dtype)
+    out = jnp.einsum("bhqk,bhkd->bhqd", probs, vh)
+    return jnp.transpose(out, (0, 2, 1, 3))
 
 class NativeJaxSelfAttention(nn.Module):
     """Multi‑head self‑attention using jax.nn.dot_product_attention (cuDNN)."""
@@ -123,7 +160,11 @@ class NativeJaxSelfAttention(nn.Module):
         cur_index: Optional[jnp.ndarray | int] = None,
     ):
         b, l, _ = x.shape
-        impl = "cudnn" if IS_GPU else "xla"
+        impl = (
+            ATTENTION_IMPL_OVERRIDE
+            if ATTENTION_IMPL_OVERRIDE in {"cudnn", "xla", "manual"}
+            else ("cudnn" if IS_GPU else "xla")
+        )
 
         head_dim = self.head_dim
         q_size   = self.num_heads * head_dim
@@ -223,9 +264,19 @@ class NativeJaxSelfAttention(nn.Module):
 
             k_full = jnp.swapaxes(cached_k.value, 1, 2)  # (b, context, num_kv, hd)
             v_full = jnp.swapaxes(cached_v.value, 1, 2)
-            y = jax.nn.dot_product_attention(
-                q, k_full, v_full, bias=attn_bias, is_causal=False, implementation=impl
-            )
+            if impl == "manual":
+                y = _manual_attention(
+                    q,
+                    k_full,
+                    v_full,
+                    head_dim=head_dim,
+                    is_causal=False,
+                    bias=attn_bias,
+                )
+            else:
+                y = jax.nn.dot_product_attention(
+                    q, k_full, v_full, bias=attn_bias, is_causal=False, implementation=impl
+                )
             y = y.reshape(b, l, self.qkv_features)
 
         else:
@@ -235,7 +286,16 @@ class NativeJaxSelfAttention(nn.Module):
             # Use GQA/MQA by passing K/V with num_kv heads directly.
             k_full = k
             v_full = v
-            y = jax.nn.dot_product_attention(q, k_full, v_full, is_causal=True, implementation=impl)
+            if impl == "manual":
+                y = _manual_attention(
+                    q,
+                    k_full,
+                    v_full,
+                    head_dim=head_dim,
+                    is_causal=True,
+                )
+            else:
+                y = jax.nn.dot_product_attention(q, k_full, v_full, is_causal=True, implementation=impl)
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)

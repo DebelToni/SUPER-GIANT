@@ -238,7 +238,7 @@ ENTRYPOINT_LOCAL="${DATA_DIR}/entrypoint.sh"
 
 rm -f "${ENTRYPOINT_LOCAL}"
 
-if s5cmd cp "${ENTRYPOINT_S3}" "${ENTRYPOINT_LOCAL}"; then
+if s5cmd sync --size-only "${ENTRYPOINT_S3}" "${DATA_DIR}/" && [[ -f "${ENTRYPOINT_LOCAL}" ]]; then
   chmod +x "${ENTRYPOINT_LOCAL}"
   "${ENTRYPOINT_LOCAL}"
 fi

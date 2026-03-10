@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import signal
+import subprocess
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -107,6 +109,8 @@ USE_PMAP = LOCAL_DEVICE_COUNT > 1 and MULTI_GPU_BACKEND == "pmap"
 TRAINING_MESH = Mesh(np.array(LOCAL_DEVICES), ("data",)) if USE_SHARD_MAP else None
 REPLICATED_SHARDING = NamedSharding(TRAINING_MESH, P()) if USE_SHARD_MAP else None
 IS_GPU = DEFAULT_DEVICE.platform == "gpu"
+GLOBAL_DATA_ROOT = Path("/proj/giant-data")
+S3_BUCKET_ROOT = "s3://giant-data"
 
 
 def _to_dtype(value: jnp.dtype | str) -> jnp.dtype:
@@ -620,6 +624,63 @@ def _format_train_progress_log(
     )
 
 
+def _s3_uri_for_local_path(local_path: Path) -> str:
+    candidate = local_path.absolute()
+    try:
+        relative = candidate.relative_to(GLOBAL_DATA_ROOT)
+    except ValueError as exc:
+        raise ValueError(
+            f"Upload path {candidate} is not under {GLOBAL_DATA_ROOT}; cannot derive S3 destination."
+        ) from exc
+    return f"{S3_BUCKET_ROOT}/{relative.as_posix()}"
+
+
+def _launch_async_upload(
+    *,
+    label: str,
+    local_path: Path,
+    log_dir: Path,
+    upload_processes: List[tuple[str, subprocess.Popen[str], Path]],
+) -> None:
+    local_path = local_path.absolute()
+    if not local_path.exists():
+        print(f"[upload] skipping {label}: path does not exist: {local_path}")
+        return
+
+    s3_uri = _s3_uri_for_local_path(local_path)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time())
+    log_path = log_dir / f"{label}_{stamp}.log"
+    cmd = (
+        "source ~/.env-R2 && "
+        f"s5cmd sync --size-only {shlex.quote(str(local_path))} \"{s3_uri}\""
+    )
+    log_handle = open(log_path, "a", encoding="utf-8")
+    proc = subprocess.Popen(
+        ["bash", "-lc", cmd],
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    upload_processes.append((label, proc, log_path))
+    print(f"[upload] launched {label}: {local_path} -> {s3_uri} (pid={proc.pid})")
+
+
+def _reap_async_uploads(upload_processes: List[tuple[str, subprocess.Popen[str], Path]]) -> None:
+    active: List[tuple[str, subprocess.Popen[str], Path]] = []
+    for label, proc, log_path in upload_processes:
+        ret = proc.poll()
+        if ret is None:
+            active.append((label, proc, log_path))
+            continue
+        status = "finished" if ret == 0 else f"failed (exit {ret})"
+        print(f"[upload] {label} {status}; log={log_path}")
+        if proc.stdout is not None:
+            proc.stdout.close()
+    upload_processes[:] = active
+
+
 def parse_args() -> argparse.Namespace:
     cli = argparse.ArgumentParser("SUPER-GIANT training")
     cli.add_argument("--config", default=None, help="Path to training config YAML file")
@@ -639,6 +700,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Override training.prefetch_size (device batch prefetch depth).",
+    )
+    cli.add_argument(
+        "--upload-on-checkpoint",
+        action="store_true",
+        help="Asynchronously sync the checkpoint root to s3://giant-data after each full checkpoint.",
     )
     return cli.parse_args()
 
@@ -753,10 +819,12 @@ def main() -> None:
         checkpoint_root = checkpoint_root.parent
     params_dir = checkpoint_root / "params"
     training_states_dir = checkpoint_root / "training_states"
+    upload_log_dir = checkpoint_root / "upload_logs"
     cfg.paths.dataloader_state_root = str(training_states_dir / "dataloader_state")
     params_dir_str = str(params_dir)
     training_states_dir_str = str(training_states_dir)
     checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
+    upload_processes: List[tuple[str, subprocess.Popen[str], Path]] = []
 
     params_dir.mkdir(parents=True, exist_ok=True)
     log_path = params_dir / "logs.txt"
@@ -1433,6 +1501,7 @@ def main() -> None:
             per_device_batch=per_device_batch_size,
         )
         while completed_in_stage < stage_steps_target:
+            _reap_async_uploads(upload_processes)
             remaining_steps = stage_steps_target - completed_in_stage
             request_chunk = min(chunk_size, max(1, remaining_steps))
             chunk = _next_chunk(batch_iter, request_chunk)
@@ -1499,6 +1568,13 @@ def main() -> None:
                     train_loss=last_loss,
                 )
                 print(f"💾 checkpoint → {ckpt_file}")
+                if args.upload_on_checkpoint:
+                    _launch_async_upload(
+                        label=f"checkpoint_{global_step}",
+                        local_path=checkpoint_root,
+                        log_dir=upload_log_dir,
+                        upload_processes=upload_processes,
+                    )
 
             if _stop_requested:
                 if use_grad_accum:
@@ -1544,6 +1620,13 @@ def main() -> None:
     if last_loss is not None:
         print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {final_ckpt}")
     save_opt_state(_checkpoint_tree(opt_state), global_step, training_states_dir_str)
+    if args.upload_on_checkpoint:
+        _launch_async_upload(
+            label=f"checkpoint_final_{global_step}",
+            local_path=checkpoint_root,
+            log_dir=upload_log_dir,
+            upload_processes=upload_processes,
+        )
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),
         {
@@ -1563,6 +1646,9 @@ def main() -> None:
     log_file.write(runtime_msg + "\n")
     if mini_ckpt_mgr is not None:
         mini_ckpt_mgr.wait_until_finished(timeout=10.0)
+    _reap_async_uploads(upload_processes)
+    if upload_processes:
+        print(f"[upload] {len(upload_processes)} upload subprocess(es) still running in background.")
     log_file.flush()
     log_file.close()
 

@@ -1,0 +1,5 @@
+5090 0.89$/h - 30it/s at batch 4, acc 4, hq eta 3.1 hours
+H100 2.50$/h - 45it/s at batch 8, acc 4, hq eta 1.1 hours
+B200 5.00$/h - 48it/s at batch 20, acc 8, hq eta 25 min
+B200 3.59$/h - 37it/s at batch 24, acc 80, hq eta 28 min
+6xA40 1.20$/h - it/s at batch 8, acc 20, hq eta 

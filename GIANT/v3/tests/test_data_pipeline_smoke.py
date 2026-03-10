@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pyarrow as pa
 
-from GIANT.v2.data_pipeline.build_corpus import (
+from GIANT.v3.data_pipeline.build_corpus import (
     StageCfg,
     StageStats,
     SequenceEmitter,

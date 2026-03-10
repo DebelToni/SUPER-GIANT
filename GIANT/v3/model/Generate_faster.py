@@ -12,10 +12,10 @@ import numpy as np
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
-from GIANT.v2.model.GiantGPT import GiantGPT
-from GIANT.v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
-from GIANT.v2.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
-from GIANT.v2.device_utils import select_default_device
+from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
+from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
+from GIANT.v3.device_utils import select_default_device
 
 @dataclass
 class ModelConfig:
@@ -359,9 +359,9 @@ def choose_bucketed_context_length(required_len: int, *, max_context: int, bucke
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fast text generation using the current SUPER-GIANT layout.")
     parser.add_argument("--config", type=str, default=None,
-                        help="Path to model config YAML (defaults to GIANT/v2/model/Config.yml).")
+                        help="Path to model config YAML (defaults to GIANT/v3/model/Config.yml).")
     parser.add_argument("--global_config", type=str, default=None,
-                        help="Path to global config YAML (defaults to GIANT/v2/Global_Config.yml).")
+                        help="Path to global config YAML (defaults to GIANT/v3/Global_Config.yml).")
     parser.add_argument("--checkpoint", type=str, default="latest",
                         help="Path to a checkpoint (.npz). Defaults to the newest file in --checkpoint_dir.")
     parser.add_argument("--checkpoint_dir", type=str, default=None,
@@ -583,8 +583,8 @@ def main():
         print(f"decode_time_s:  {decode_time:.6f}")
         print(f"tokens_per_second_decode: {toks_per_s:.6f}")
         print("\n[resolved_settings]")
-        print(f"config: {args.config if args.config is not None else 'GIANT/v2/model/Config.yml'}")
-        print(f"global_config: {args.global_config if args.global_config is not None else 'GIANT/v2/Global_Config.yml'}")
+        print(f"config: {args.config if args.config is not None else 'GIANT/v3/model/Config.yml'}")
+        print(f"global_config: {args.global_config if args.global_config is not None else 'GIANT/v3/Global_Config.yml'}")
         print(f"requested_context_length: {requested_context_length}")
         print(f"context_length: {context_length}")
         print(f"steps: {max_steps}")

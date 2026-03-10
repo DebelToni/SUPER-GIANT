@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 from omegaconf import OmegaConf
 
-from GIANT.v2.model.GiantGPT import GiantGPT
+from GIANT.v3.model.GiantGPT import GiantGPT
 
 
 def load_model_cfg() -> OmegaConf:

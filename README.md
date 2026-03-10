@@ -1,6 +1,33 @@
 <h1 align="center">SUPER GIANT</h1>
 <!-- <h5 align="center"> SUPERsupreme Utra PROfesional ELITE ReVolutIonary GIGA intelligent ArtIfical neXus TITAN </h5> -->
 
+## Overview
+
+**SUPER-GIANT** is a complete framework for running **data preparation, training, and inference of custom Large Language Models**.
+
+It provides an end-to-end pipeline including:
+
+- **Data preparation pipeline**  
+  Integrates directly with HuggingFace datasets and tokenizers.
+
+- **Training loop**
+  - Multi-GPU training support
+  - Online teacher distillation
+  - Currently uses **Data Parallel (DP)** training  
+  - Model sharding support planned for future releases
+
+- **Inference pipeline**
+  - Fast decoding
+  - KV-cache support
+  - Chat-style interactions
+
+- **Speculative decoding**
+  - Highly optimized **Anchor-TiDAR** algorithm
+  - Requires post-training modifications
+  - Achieves **5×–10× inference speedups** on GPUs and TPUs
+
+---
+
 GIANT is my own custom implementation of a large language model (LLM) written in Python - JAX.
 It is designed to be a modern, robust and easily expandable implementation with a focus on performance on a single GPU and ease of use. 
 
@@ -23,8 +50,8 @@ Assitant: The capital of France is sometimes called Paris.<EOS>
 ## What I am working on right now:
 - [TiDAR](TiDAR/) is already implemented (including my Anchor-TiDAR variant), and this is where I run ongoing experiments.
 - I am currently validating/replicating the TiDAR paper behavior and refining training/inference settings on top of GIANT's core architecture and data pipeline.
-- I've implemented a small architectural change to the original TiDAR design that improves drafting efficiency per step. [>Details<]()
-- I am also experimenting with different loss function configurations for TiDAR. [>Details<]()
+- I've implemented a small architectural change to the original TiDAR design that improves drafting efficiency per step. [>Details<](TiDAR/model/Optimize_TiDAR_worst_case_decoding.md)
+- I am also experimenting with different loss function configurations for TiDAR. [>Details<](TiDAR/Docs/TinyStories_TiDAR_losses_Comparison.pdf)
 
 * When finished I want to experiment with the TiDAR "free token slots" fenomenon when paired with memory optimizaion architectural changes like [MLA], [MoE], [Sliding window attention] and [Router aware drafting]
 
@@ -35,13 +62,17 @@ Assitant: The capital of France is sometimes called Paris.<EOS>
 - Training supports batching, training on custom private data or online Teacher distillation
 - Powered by 𝗝𝗔𝗫’𝘀 𝗝𝗜𝗧 𝗰𝗼𝗺𝗽𝗶𝗹𝗮𝘁𝗶𝗼𝗻, 𝗰𝘂𝗗𝗡𝗡’𝘀 𝗙𝗹𝗮𝘀𝗵 𝗔𝘁𝘁𝗲𝗻𝘁𝗶𝗼𝗻 𝗸𝗲𝗿𝗻𝗲𝗹𝘀, 𝗮𝗻𝗱 𝗮 𝗞𝗩 𝗰𝗮𝗰𝗵𝗲 for faster inference
 
+## Anchor-TiDAR
+- Diffusion future prediction for faster text generation - already implemented in [TiDAR](TiDAR/) and currently being optimized
+- Always commits at least 1 token with bad acceptance rate but can yeild from 5x to more than 10x speedups with K=16+ and good post-training run
+
 > [!NOTE]
-> Future Architectural features:
+> Future Architectural features that will be test on top of GIANT and then Anchor-TiDAR:
 > - Mixture of Experts (MoE)
 > - Multi-head Latent Attention (MLA)
+> - Sliding window attention
 > - Real time access of tools at inference time (in the TTC) - see [TRM as tool use](TRM/TRM-token-tool)
-> - Diffusion future prediction for faster text generation - already implemented in [TiDAR](TiDAR/) and currently being optimized
-> 
+The idea is to see how it affects the latency and performance of "free token slots".
 
 ---
 

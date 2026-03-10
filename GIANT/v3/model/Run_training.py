@@ -19,15 +19,15 @@ import optax
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from GIANT.v2.model.GiantGPT import GiantGPT
-from GIANT.v2.model.Training_step import loss_and_grad
-from GIANT.v2.model.arrow_data_loader import (
+from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.Training_step import loss_and_grad
+from GIANT.v3.model.arrow_data_loader import (
     ShardedArrowDataset,
     StageDataLoader,
     load_dataloader_state,
     save_dataloader_state,
 )
-from GIANT.v2.model.checkpoint_manager import (
+from GIANT.v3.model.checkpoint_manager import (
     AsyncMiniCheckpointManager,
     latest as latest_ckpt,
     load as load_ckpt,
@@ -36,8 +36,8 @@ from GIANT.v2.model.checkpoint_manager import (
     load_opt_state,
     set_npz_metadata,
 )
-from GIANT.v2.model.optimizer_utils import create_weight_decay_mask
-from GIANT.v2.device_utils import select_default_device
+from GIANT.v3.model.optimizer_utils import create_weight_decay_mask
+from GIANT.v3.device_utils import select_default_device
 from flax import core as flax_core
 from flax import jax_utils as flax_jax_utils
 from flax import serialization

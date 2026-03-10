@@ -13,11 +13,11 @@ import optax
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
-from GIANT.v2.model.GiantGPT import GiantGPT
-from GIANT.v2.model.arrow_data_loader import ShardedArrowDataset, StageDataLoader
-from GIANT.v2.model.checkpoint_manager import latest as latest_ckpt
-from GIANT.v2.model.checkpoint_manager import load as load_ckpt
-from GIANT.v2.model.checkpoint_manager import set_npz_metadata
+from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.arrow_data_loader import ShardedArrowDataset, StageDataLoader
+from GIANT.v3.model.checkpoint_manager import latest as latest_ckpt
+from GIANT.v3.model.checkpoint_manager import load as load_ckpt
+from GIANT.v3.model.checkpoint_manager import set_npz_metadata
 
 
 def load_configs() -> OmegaConf:

@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
 
-from GIANT.v2.model.Transformer_block import TinyTransformerBlock
+from GIANT.v3.model.Transformer_block import TinyTransformerBlock
 
 def _to_dtype(value: jnp.dtype | str) -> jnp.dtype:
     if isinstance(value, jnp.dtype):

@@ -1,1 +1,1 @@
-"""Super-Giant v2 package."""
+"""Super-Giant v3 package."""

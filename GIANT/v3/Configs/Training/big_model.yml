@@ -40,13 +40,13 @@ training:
   mini_checkpoint_every: 0
   mini_max_to_keep: 2
   scan_chunk: 4
-  autotune_scan_chunk: true
+  autotune_scan_chunk: false
   autotune_scan_chunk_candidates: [1, 2, 4, 8, 16, 32]
   autotune_scan_chunk_chunks: 4
   autotune_scan_chunk_steps: 256
   autotune_scan_chunk_persist: true
   prefetch_size: 2
-  autotune_prefetch: true
+  autotune_prefetch: false
   autotune_prefetch_candidates: [2, 4, 8, 16, 32]
   autotune_prefetch_chunks: 4
   autotune_prefetch_persist: true

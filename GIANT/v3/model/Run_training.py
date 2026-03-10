@@ -816,7 +816,12 @@ def main() -> None:
         autotune_prefetch_candidates = [prefetch_size] + autotune_prefetch_candidates
     cfg.training.prefetch_size = int(prefetch_size)
 
+    use_grad_accum = grad_accum > 1
+
     def _init_accum_grads(pytree):
+        if not use_grad_accum:
+            value = jnp.asarray(0, dtype=jnp.int32)
+            return _place_on_training_devices(value)
         return jax.tree_util.tree_map(jnp.zeros_like, pytree)
 
     def _init_accum_count():
@@ -865,31 +870,45 @@ def main() -> None:
                 )
 
                 is_finite = jnp.isfinite(loss)
-                accum_grads = jax.lax.cond(
-                    is_finite,
-                    lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
-                    lambda ag, g: ag,
-                    accum_grads,
-                    grads,
-                )
-                accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+                if use_grad_accum:
+                    accum_grads = jax.lax.cond(
+                        is_finite,
+                        lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                        lambda ag, g: ag,
+                        accum_grads,
+                        grads,
+                    )
+                    accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
 
-                def apply_updates(args):
-                    params, opt_state, accum_grads = args
-                    grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
-                    updates, opt_state = optimizer.update(grads, opt_state, params)
-                    params = optax.apply_updates(params, updates)
-                    accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
-                    return params, opt_state, accum_grads
+                    def apply_updates(args):
+                        params, opt_state, accum_grads = args
+                        grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
+                        updates, opt_state = optimizer.update(grads, opt_state, params)
+                        params = optax.apply_updates(params, updates)
+                        accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+                        return params, opt_state, accum_grads
 
-                should_update = accum_count == grad_accum
-                params, opt_state, accum_grads = jax.lax.cond(
-                    should_update,
-                    apply_updates,
-                    lambda args: args,
-                    (params, opt_state, accum_grads),
-                )
-                accum_count = jnp.where(should_update, 0, accum_count)
+                    should_update = accum_count == grad_accum
+                    params, opt_state, accum_grads = jax.lax.cond(
+                        should_update,
+                        apply_updates,
+                        lambda args: args,
+                        (params, opt_state, accum_grads),
+                    )
+                    accum_count = jnp.where(should_update, 0, accum_count)
+                else:
+                    def apply_updates(args):
+                        params, opt_state, grads = args
+                        updates, opt_state = optimizer.update(grads, opt_state, params)
+                        params = optax.apply_updates(params, updates)
+                        return params, opt_state
+
+                    params, opt_state = jax.lax.cond(
+                        is_finite,
+                        apply_updates,
+                        lambda args: (args[0], args[1]),
+                        (params, opt_state, grads),
+                    )
                 return (params, opt_state, step + 1, accum_grads, accum_count), loss
 
             (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
@@ -943,31 +962,45 @@ def main() -> None:
                 )
 
                 is_finite = jnp.isfinite(loss)
-                accum_grads = jax.lax.cond(
-                    is_finite,
-                    lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
-                    lambda ag, g: ag,
-                    accum_grads,
-                    grads,
-                )
-                accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+                if use_grad_accum:
+                    accum_grads = jax.lax.cond(
+                        is_finite,
+                        lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                        lambda ag, g: ag,
+                        accum_grads,
+                        grads,
+                    )
+                    accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
 
-                def apply_updates(args):
-                    params, opt_state, accum_grads = args
-                    grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
-                    updates, opt_state = optimizer.update(grads, opt_state, params)
-                    params = optax.apply_updates(params, updates)
-                    accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
-                    return params, opt_state, accum_grads
+                    def apply_updates(args):
+                        params, opt_state, accum_grads = args
+                        grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
+                        updates, opt_state = optimizer.update(grads, opt_state, params)
+                        params = optax.apply_updates(params, updates)
+                        accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+                        return params, opt_state, accum_grads
 
-                should_update = accum_count == grad_accum
-                params, opt_state, accum_grads = jax.lax.cond(
-                    should_update,
-                    apply_updates,
-                    lambda args: args,
-                    (params, opt_state, accum_grads),
-                )
-                accum_count = jnp.where(should_update, 0, accum_count)
+                    should_update = accum_count == grad_accum
+                    params, opt_state, accum_grads = jax.lax.cond(
+                        should_update,
+                        apply_updates,
+                        lambda args: args,
+                        (params, opt_state, accum_grads),
+                    )
+                    accum_count = jnp.where(should_update, 0, accum_count)
+                else:
+                    def apply_updates(args):
+                        params, opt_state, grads = args
+                        updates, opt_state = optimizer.update(grads, opt_state, params)
+                        params = optax.apply_updates(params, updates)
+                        return params, opt_state
+
+                    params, opt_state = jax.lax.cond(
+                        is_finite,
+                        apply_updates,
+                        lambda args: (args[0], args[1]),
+                        (params, opt_state, grads),
+                    )
                 return (params, opt_state, step + 1, accum_grads, accum_count), loss
 
             (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
@@ -998,31 +1031,45 @@ def main() -> None:
                 )
 
                 is_finite = jnp.isfinite(loss)
-                accum_grads = jax.lax.cond(
-                    is_finite,
-                    lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
-                    lambda ag, g: ag,
-                    accum_grads,
-                    grads,
-                )
-                accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+                if use_grad_accum:
+                    accum_grads = jax.lax.cond(
+                        is_finite,
+                        lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                        lambda ag, g: ag,
+                        accum_grads,
+                        grads,
+                    )
+                    accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
 
-                def apply_updates(args):
-                    params, opt_state, accum_grads = args
-                    grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
-                    updates, opt_state = optimizer.update(grads, opt_state, params)
-                    params = optax.apply_updates(params, updates)
-                    accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
-                    return params, opt_state, accum_grads
+                    def apply_updates(args):
+                        params, opt_state, accum_grads = args
+                        grads = jax.tree_util.tree_map(lambda g: g * grad_scale, accum_grads)
+                        updates, opt_state = optimizer.update(grads, opt_state, params)
+                        params = optax.apply_updates(params, updates)
+                        accum_grads = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+                        return params, opt_state, accum_grads
 
-                should_update = accum_count == grad_accum
-                params, opt_state, accum_grads = jax.lax.cond(
-                    should_update,
-                    apply_updates,
-                    lambda args: args,
-                    (params, opt_state, accum_grads),
-                )
-                accum_count = jnp.where(should_update, 0, accum_count)
+                    should_update = accum_count == grad_accum
+                    params, opt_state, accum_grads = jax.lax.cond(
+                        should_update,
+                        apply_updates,
+                        lambda args: args,
+                        (params, opt_state, accum_grads),
+                    )
+                    accum_count = jnp.where(should_update, 0, accum_count)
+                else:
+                    def apply_updates(args):
+                        params, opt_state, grads = args
+                        updates, opt_state = optimizer.update(grads, opt_state, params)
+                        params = optax.apply_updates(params, updates)
+                        return params, opt_state
+
+                    params, opt_state = jax.lax.cond(
+                        is_finite,
+                        apply_updates,
+                        lambda args: (args[0], args[1]),
+                        (params, opt_state, grads),
+                    )
                 return (params, opt_state, step + 1, accum_grads, accum_count), loss
 
             (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
@@ -1232,12 +1279,17 @@ def main() -> None:
 
     start = time.time()
     last_loss = None
-    _startup_marker("initializing accum_grads")
-    accum_grads = _init_accum_grads(params)
-    _startup_marker("accum_grads ready")
-    _startup_marker("initializing accum_count")
-    accum_count = _init_accum_count()
-    _startup_marker("accum_count ready")
+    if use_grad_accum:
+        _startup_marker("initializing accum_grads")
+        accum_grads = _init_accum_grads(params)
+        _startup_marker("accum_grads ready")
+        _startup_marker("initializing accum_count")
+        accum_count = _init_accum_count()
+        _startup_marker("accum_count ready")
+    else:
+        _startup_marker("gradient_accumulation=1; skipping accum_grads allocation")
+        accum_grads = _init_accum_grads(params)
+        accum_count = _init_accum_count()
     for stage_idx in range(current_stage_idx, len(stage_runtimes)):
         runtime = stage_runtimes[stage_idx]
         stage_steps_target = runtime.total_steps
@@ -1328,12 +1380,13 @@ def main() -> None:
                 print(f"💾 checkpoint → {ckpt_file}")
 
             if _stop_requested:
-                accum_count_host = _replicated_scalar_to_int(accum_count)
-                if accum_count_host > 0:
-                    denom = _training_scalar(accum_count_host, jnp.float32)
-                    params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
-                    accum_grads = _init_accum_grads(params)
-                    accum_count = _init_accum_count()
+                if use_grad_accum:
+                    accum_count_host = _replicated_scalar_to_int(accum_count)
+                    if accum_count_host > 0:
+                        denom = _training_scalar(accum_count_host, jnp.float32)
+                        params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
+                        accum_grads = _init_accum_grads(params)
+                        accum_count = _init_accum_count()
                 mini_ckpt_mgr.wait_until_finished(timeout=4.0)
                 log_file.flush()
                 log_file.close()
@@ -1342,12 +1395,13 @@ def main() -> None:
                 return
 
         pbar.close()
-        accum_count_host = _replicated_scalar_to_int(accum_count)
-        if accum_count_host > 0:
-            denom = _training_scalar(accum_count_host, jnp.float32)
-            params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
-            accum_grads = _init_accum_grads(params)
-            accum_count = _init_accum_count()
+        if use_grad_accum:
+            accum_count_host = _replicated_scalar_to_int(accum_count)
+            if accum_count_host > 0:
+                denom = _training_scalar(accum_count_host, jnp.float32)
+                params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
+                accum_grads = _init_accum_grads(params)
+                accum_count = _init_accum_count()
         if last_loss is not None:
             print(
                 f"✓ Stage {runtime.config.name} completed (last loss {last_loss:.4f})"
@@ -1357,12 +1411,13 @@ def main() -> None:
         # Stage finished → reset step tracker
         stage_step_total = 0
 
-    accum_count_host = _replicated_scalar_to_int(accum_count)
-    if accum_count_host > 0:
-        denom = _training_scalar(accum_count_host, jnp.float32)
-        params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
-        accum_grads = _init_accum_grads(params)
-        accum_count = _init_accum_count()
+    if use_grad_accum:
+        accum_count_host = _replicated_scalar_to_int(accum_count)
+        if accum_count_host > 0:
+            denom = _training_scalar(accum_count_host, jnp.float32)
+            params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
+            accum_grads = _init_accum_grads(params)
+            accum_count = _init_accum_count()
     final_ckpt = save_ckpt(_checkpoint_tree(params), global_step, params_dir_str, train_loss=last_loss)
     if last_loss is not None:
         print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {final_ckpt}")

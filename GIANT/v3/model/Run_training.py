@@ -603,6 +603,23 @@ def _format_wall_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _format_train_progress_log(
+    *,
+    step_val: int,
+    total_steps: int,
+    stage_name: str,
+    stage_name_width: int,
+    loss_val: float,
+    elapsed: float,
+) -> str:
+    ppl = float(np.exp(loss_val)) if loss_val < 20 else float("inf")
+    ppl_str = f"{ppl:6.0f}" if np.isfinite(ppl) else f"{'inf':>6}"
+    return (
+        f"step {step_val:>7}/{total_steps:<7} | stage {stage_name:<{stage_name_width}} "
+        f"loss {loss_val:7.3f} ppl {ppl_str} ({elapsed:.1f}s)"
+    )
+
+
 def parse_args() -> argparse.Namespace:
     cli = argparse.ArgumentParser("SUPER-GIANT training")
     cli.add_argument("--config", default=None, help="Path to training config YAML file")
@@ -665,6 +682,7 @@ def main() -> None:
         pad_token_id=pad_token_id,
     )
     total_steps = sum(stage.total_steps for stage in stage_runtimes)
+    stage_name_width = max((len(stage.config.name) for stage in stage_runtimes), default=1)
     total_update_steps = max(1, (total_steps + grad_accum - 1) // grad_accum)
     warmup_updates, warmup_tokens, resolved_warmup_tokens = resolve_warmup_updates(
         cfg,
@@ -748,10 +766,21 @@ def main() -> None:
     mini_every = int(getattr(training_cfg, "mini_checkpoint_every", max(1, checkpoint_every // 10)))
     mini_max_to_keep = int(getattr(training_cfg, "mini_max_to_keep", 3))
     mini_ckpt_dir = training_states_dir / "mini"
-    mini_ckpt_mgr = AsyncMiniCheckpointManager(
-        ckpt_dir=mini_ckpt_dir,
-        max_to_keep=mini_max_to_keep,
-    )
+    mini_ckpt_mgr: Optional[AsyncMiniCheckpointManager] = None
+    if mini_every > 0:
+        mini_ckpt_mgr = AsyncMiniCheckpointManager(
+            ckpt_dir=mini_ckpt_dir,
+            max_to_keep=mini_max_to_keep,
+        )
+    else:
+        print()
+        print("=" * 96)
+        print(
+            f"[mini-checkpoints] DISABLED by config: training.mini_checkpoint_every={mini_every}. "
+            "Mini checkpoints will not be created or resumed; only full checkpoints are eligible."
+        )
+        print("=" * 96)
+        print()
 
     stage_states: Dict[str, Dict[str, int]] = {
         runtime.config.name: runtime.loader.state_dict() for runtime in stage_runtimes
@@ -773,18 +802,27 @@ def main() -> None:
     resumed_from_mini = False
 
     if resume_request == "latest":
-        restored_state, restored_step = mini_ckpt_mgr.restore_latest(mini_state_template)
-        if restored_step:
-            params = _freeze_if_dict(restored_state["params"])
-            opt_state = restored_state["opt_state"]
-            global_step = int(restored_state.get("global_step", restored_step))
-            current_stage_idx = int(restored_state.get("stage_index", 0))
-            stage_step_total = int(restored_state.get("stage_step_total", 0))
-            stage_states = restored_state.get("stage_states", {})
-            resumed_from_mini = True
-            print(f"↩ Resumed from mini checkpoint at step {restored_step}")
-        else:
+        if mini_ckpt_mgr is None:
+            print(
+                f"[mini-checkpoints] Skipping any existing mini checkpoints under {mini_ckpt_dir} because "
+                f"training.mini_checkpoint_every={mini_every} disables them in this config and their "
+                "provenance cannot be trusted for resume."
+            )
+            print("[mini-checkpoints] Falling back to the latest full checkpoint.")
             resume_request = "latest_full"
+        else:
+            restored_state, restored_step = mini_ckpt_mgr.restore_latest(mini_state_template)
+            if restored_step:
+                params = _freeze_if_dict(restored_state["params"])
+                opt_state = restored_state["opt_state"]
+                global_step = int(restored_state.get("global_step", restored_step))
+                current_stage_idx = int(restored_state.get("stage_index", 0))
+                stage_step_total = int(restored_state.get("stage_step_total", 0))
+                stage_states = restored_state.get("stage_states", {})
+                resumed_from_mini = True
+                print(f"↩ Resumed from mini checkpoint at step {restored_step}")
+            else:
+                resume_request = "latest_full"
     elif resume_request and resume_request not in {"latest", "latest_full"}:
         resume_path = Path(resume_request)
         if not resume_path.is_absolute():
@@ -1414,14 +1452,18 @@ def main() -> None:
             stage_states[runtime.config.name] = runtime.loader.state_dict()
 
             for offset, loss_val in enumerate(losses, start=0):
-                last_loss = float(loss_val)
+                loss_scalar = float(loss_val)
+                last_loss = loss_scalar
                 step_val = chunk_start + offset
                 if step_val % cfg.training.log_every == 0:
                     elapsed = time.time() - start
-                    ppl = float(np.exp(loss_val)) if loss_val < 20 else float("inf")
-                    log_msg = (
-                        f"step {step_val:>7}/{total_steps:<7} | stage {runtime.config.name:<18} "
-                        f"loss {loss_val:.4f} ppl {ppl:.2f} ({elapsed:.1f}s)"
+                    log_msg = _format_train_progress_log(
+                        step_val=step_val,
+                        total_steps=total_steps,
+                        stage_name=runtime.config.name,
+                        stage_name_width=stage_name_width,
+                        loss_val=loss_scalar,
+                        elapsed=elapsed,
                     )
                     print()
                     print(log_msg)
@@ -1429,7 +1471,7 @@ def main() -> None:
                     log_file.flush()
                     start = time.time()
 
-            if mini_every and (global_step % mini_every == 0):
+            if mini_ckpt_mgr is not None and (global_step % mini_every == 0):
                 # Stage mini-checkpoint payload on host RAM so asynchronous orbax
                 # writes do not retain additional large device buffers.
                 mini_state = {
@@ -1466,7 +1508,8 @@ def main() -> None:
                         params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
                         accum_grads = _init_accum_grads(params)
                         accum_count = _init_accum_count()
-                mini_ckpt_mgr.wait_until_finished(timeout=4.0)
+                if mini_ckpt_mgr is not None:
+                    mini_ckpt_mgr.wait_until_finished(timeout=4.0)
                 log_file.flush()
                 log_file.close()
                 print("[signal] Stop requested; exiting after current chunk.")
@@ -1518,7 +1561,8 @@ def main() -> None:
     )
     print(runtime_msg)
     log_file.write(runtime_msg + "\n")
-    mini_ckpt_mgr.wait_until_finished(timeout=10.0)
+    if mini_ckpt_mgr is not None:
+        mini_ckpt_mgr.wait_until_finished(timeout=10.0)
     log_file.flush()
     log_file.close()
 

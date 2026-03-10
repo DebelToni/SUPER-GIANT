@@ -21,9 +21,9 @@ tokenizer:
   pad_token_override: null
 
 optimizer:
-  base_learning_rate: 1.25e-5
-  min_learning_rate: 1.25e-6
-  warmup_tokens: 150_000_000
+  base_learning_rate: 8e-5
+  min_learning_rate: 8e-6
+  warmup_tokens: 75_000_000
   weight_decay: 0.10
   gradient_clip_norm: 1.0
   weight_decay_exclusions:
@@ -37,8 +37,8 @@ training:
   seed: 0
   log_every: 500
   checkpoint_every: 20000
-  mini_checkpoint_every: 0
-  mini_max_to_keep: 2
+  mini_checkpoint_every: 10000
+  mini_max_to_keep: 1
   scan_chunk: 4
   autotune_scan_chunk: false
   autotune_scan_chunk_candidates: [1, 2, 4, 8, 16, 32]

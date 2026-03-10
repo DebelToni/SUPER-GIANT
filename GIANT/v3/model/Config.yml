@@ -31,7 +31,7 @@ training:
   seed: 0
   log_every: 2000
   checkpoint_every: 20000
-  mini_checkpoint_every: 1000
+  mini_checkpoint_every: 1000  # Set to 0 or -1 to disable mini checkpoints.
   mini_max_to_keep: 1
   # label_smoothing <- future implement
   scan_chunk: 8

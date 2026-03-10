@@ -23,7 +23,7 @@ tokenizer:
 optimizer:
   base_learning_rate: 1.25e-5
   min_learning_rate: 1.25e-6
-  warmup_steps: 80000
+  warmup_tokens: 150_000_000
   weight_decay: 0.10
   gradient_clip_norm: 1.0
   weight_decay_exclusions:
@@ -35,8 +35,8 @@ training:
   batch_size: 8
   gradient_accumulation: 1
   seed: 0
-  log_every: 2000
-  checkpoint_every: 200000
+  log_every: 500
+  checkpoint_every: 20000
   mini_checkpoint_every: 0
   mini_max_to_keep: 2
   scan_chunk: 4
@@ -45,7 +45,7 @@ training:
   autotune_scan_chunk_chunks: 4
   autotune_scan_chunk_steps: 256
   autotune_scan_chunk_persist: true
-  prefetch_size: 2
+  prefetch_size: 4
   autotune_prefetch: false
   autotune_prefetch_candidates: [2, 4, 8, 16, 32]
   autotune_prefetch_chunks: 4
@@ -58,7 +58,6 @@ stages:
     epochs: 1
     fraction: 1.0
     shuffle: true
-    end_ratio: 0.01
 
   - name: finewiki_backbone
     dataset: 2_finewiki_1b_l256
@@ -66,7 +65,6 @@ stages:
     epochs: 1
     fraction: 0.5
     shuffle: true
-    end_ratio: 0.10
 
   - name: open_textbooks_longform
     dataset: 3_open_textbooks_l512
@@ -74,7 +72,6 @@ stages:
     epochs: 1
     fraction: 0.5
     shuffle: true
-    end_ratio: 0.175
 
   - name: fineweb_edu_main
     dataset: 4_fineweb_edu_l512
@@ -82,7 +79,6 @@ stages:
     epochs: 1
     fraction: 0.4
     shuffle: true
-    end_ratio: 0.975
 
   - name: alpaca_instruction_flavor
     dataset: 5_alpaca_chat_l512
@@ -90,7 +86,6 @@ stages:
     epochs: 1
     fraction: 1.0
     shuffle: true
-    end_ratio: 1.0
 
 qa_finetune: {}
 

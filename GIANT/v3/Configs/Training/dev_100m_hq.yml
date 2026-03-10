@@ -23,7 +23,7 @@ tokenizer:
 optimizer:
   base_learning_rate: 2.0e-4
   min_learning_rate: 2.0e-5
-  warmup_updates: 400
+  warmup_tokens: 200_000
   weight_decay: 0.10
   gradient_clip_norm: 1.0
   weight_decay_exclusions:
@@ -51,7 +51,6 @@ stages:
     epochs: 1
     fraction: 0.1
     shuffle: true
-    end_ratio: 1.0
 
 qa_finetune: {}
 

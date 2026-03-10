@@ -126,7 +126,6 @@ class StageConfig:
     dataset: str
     seq_len: int
     epochs: int
-    end_ratio: float
     shuffle: bool = True
     fraction: float = 1.0
 
@@ -224,7 +223,6 @@ def parse_stage_configs(cfg: OmegaConf) -> List[StageConfig]:
                 dataset=stage["dataset"],
                 seq_len=int(stage["seq_len"]),
                 epochs=int(stage["epochs"]),
-                end_ratio=float(stage["end_ratio"]),
                 shuffle=bool(stage.get("shuffle", True)),
                 fraction=float(stage.get("fraction", 1.0)),
             )
@@ -279,28 +277,59 @@ def build_stage_runtimes(
     return runtimes
 
 
-def validate_milestones(stage_cfgs: List[StageConfig]) -> None:
-    expected = [stage.end_ratio for stage in stage_cfgs]
-    if not expected or expected[-1] != 1.0:
-        raise ValueError("Stage configuration must end with end_ratio == 1.0")
-    if sorted(expected) != expected:
-        raise ValueError("Stage end_ratio values must be non-decreasing")
+def resolve_warmup_updates(
+    cfg: OmegaConf,
+    stage_runtimes: List[StageRuntime],
+    *,
+    global_batch_size: int,
+    grad_accum: int,
+) -> tuple[int, Optional[int], Optional[int]]:
+    warmup_tokens_raw = cfg.optimizer.get("warmup_tokens", None)
+    if warmup_tokens_raw is not None:
+        warmup_tokens = int(warmup_tokens_raw)
+        if warmup_tokens < 0:
+            raise ValueError("optimizer warmup_tokens must be >= 0")
+        if warmup_tokens == 0:
+            return 0, warmup_tokens, 0
 
+        tokens_seen = 0
+        micro_steps = 0
+        warmup_updates = 0
+        for runtime in stage_runtimes:
+            tokens_per_microstep = int(global_batch_size * runtime.config.seq_len)
+            for _ in range(runtime.total_steps):
+                micro_steps += 1
+                tokens_seen += tokens_per_microstep
+                if micro_steps % grad_accum == 0:
+                    warmup_updates += 1
+                    if tokens_seen >= warmup_tokens:
+                        return warmup_updates, warmup_tokens, tokens_seen
 
-def build_optimizer(cfg: OmegaConf, total_update_steps: int, params) -> optax.GradientTransformation:
+        if micro_steps % grad_accum != 0:
+            warmup_updates += 1
+        return warmup_updates, warmup_tokens, tokens_seen
+
     warmup_raw = cfg.optimizer.get("warmup_updates", None)
     if warmup_raw is None:
         warmup_raw = cfg.optimizer.get("warmup_steps", None)
     if warmup_raw is None:
-        raise ValueError("optimizer warmup_updates or warmup_steps must be set")
-    warmup_steps = int(warmup_raw)
-    if total_update_steps <= warmup_steps:
+        raise ValueError("optimizer warmup_tokens or warmup_updates or warmup_steps must be set")
+    return int(warmup_raw), None, None
+
+
+def build_optimizer(
+    cfg: OmegaConf,
+    total_update_steps: int,
+    warmup_updates: int,
+    params,
+) -> optax.GradientTransformation:
+    if total_update_steps <= warmup_updates:
         raise ValueError("Total optimizer updates must exceed warmup updates for cosine decay")
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=cfg.optimizer.base_learning_rate,
-        warmup_steps=warmup_steps,
-        decay_steps=total_update_steps - warmup_steps,
+        warmup_steps=warmup_updates,
+        decay_steps=total_update_steps - warmup_updates,
         end_value=cfg.optimizer.min_learning_rate,
     )
     exclusions = cfg.optimizer.get("weight_decay_exclusions", [])
@@ -611,7 +640,6 @@ def main() -> None:
     tokenizer = load_tokenizer(cfg)
 
     stage_cfgs = parse_stage_configs(cfg)
-    validate_milestones(stage_cfgs)
 
     base_root = Path(cfg.paths.data_root)
 
@@ -638,6 +666,12 @@ def main() -> None:
     )
     total_steps = sum(stage.total_steps for stage in stage_runtimes)
     total_update_steps = max(1, (total_steps + grad_accum - 1) // grad_accum)
+    warmup_updates, warmup_tokens, resolved_warmup_tokens = resolve_warmup_updates(
+        cfg,
+        stage_runtimes,
+        global_batch_size=global_batch_size,
+        grad_accum=grad_accum,
+    )
     print(
         f"[devices] backend={DEFAULT_DEVICE.platform} local_devices={LOCAL_DEVICE_COUNT} "
         f"multi_gpu_backend={MULTI_GPU_BACKEND} data_parallel={LOCAL_DEVICE_COUNT > 1} "
@@ -647,16 +681,15 @@ def main() -> None:
     if LOCAL_DEVICE_COUNT > 1 and os.environ.get("NCCL_P2P_DISABLE") == "1":
         detail = NCCL_P2P_NOTE or "using NCCL_P2P_DISABLE=1"
         print(f"[devices] {detail}")
-    warmup_updates = cfg.optimizer.get("warmup_updates", None)
-    if warmup_updates is None:
-        warmup_updates = cfg.optimizer.get("warmup_steps", None)
-    if warmup_updates is None:
-        raise ValueError("optimizer warmup_updates or warmup_steps must be set")
-    warmup_updates = int(warmup_updates)
-    print(
+    optimizer_msg = (
         f"[optimizer] micro_steps={total_steps} update_steps={total_update_steps} "
         f"grad_accum={grad_accum} warmup_updates={warmup_updates}"
     )
+    if warmup_tokens is not None:
+        optimizer_msg += f" warmup_tokens={warmup_tokens}"
+        if resolved_warmup_tokens is not None:
+            optimizer_msg += f" resolved_warmup_tokens={resolved_warmup_tokens}"
+    print(optimizer_msg)
 
     max_seq_len = max(stage.config.seq_len for stage in stage_runtimes)
     # Get optional model config params with defaults
@@ -685,7 +718,7 @@ def main() -> None:
     params = model.init(rng, jnp.zeros((init_batch_size, max_seq_len), dtype=jnp.int32))["params"]
     params = _freeze_if_dict(params)
 
-    optimizer = build_optimizer(cfg, total_update_steps, params)
+    optimizer = build_optimizer(cfg, total_update_steps, warmup_updates, params)
     opt_state = None
     global_step = 0
 

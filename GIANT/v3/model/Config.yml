@@ -15,7 +15,7 @@ model:
 optimizer:
   base_learning_rate: 3.0e-4
   min_learning_rate: 3.0e-5
-  warmup_steps: 2000
+  warmup_tokens: 1_000_000
   weight_decay: 0.10
   gradient_clip_norm: 1.0
 
@@ -41,7 +41,6 @@ stages:
     dataset: sentences_short
     seq_len: 128
     epochs: 1
-    end_ratio: 0.05
     shuffle: true
     fraction: 1.0
 
@@ -49,7 +48,6 @@ stages:
     dataset: simple_wiki_lm
     seq_len: 128
     epochs: 1
-    end_ratio: 0.125
     shuffle: true
     fraction: 1.0
 
@@ -57,7 +55,6 @@ stages:
     dataset: simple_wiki
     seq_len: 128
     epochs: 1
-    end_ratio: 0.20
     shuffle: true
     fraction: 1.0
 
@@ -65,7 +62,6 @@ stages:
     dataset: finewiki_l256
     seq_len: 256
     epochs: 1
-    end_ratio: 0.48
     shuffle: true
     fraction: 1.0
 
@@ -73,7 +69,6 @@ stages:
     dataset: finewiki_l512
     seq_len: 512
     epochs: 1
-    end_ratio: 0.60
     shuffle: true
     fraction: 1.0
 
@@ -81,7 +76,6 @@ stages:
     dataset: open_textbooks_l512
     seq_len: 512
     epochs: 1
-    end_ratio: 0.80
     shuffle: true
     fraction: 1.0
 
@@ -89,7 +83,6 @@ stages:
     dataset: fineweb_edu_l512
     seq_len: 512
     epochs: 1
-    end_ratio: 0.875
     shuffle: true
     fraction: 1.0
 
@@ -97,7 +90,6 @@ stages:
     dataset: fineweb_edu_l1024
     seq_len: 1024
     epochs: 1
-    end_ratio: 0.95
     shuffle: true
     fraction: 1.0
 
@@ -105,7 +97,6 @@ stages:
     dataset: definitions_short
     seq_len: 128
     epochs: 1
-    end_ratio: 1.0
     shuffle: true
     fraction: 1.0
 

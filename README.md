@@ -7,7 +7,7 @@
 
 - **Data preparation pipeline** - Integrates directly with HuggingFace datasets and tokenizers.
 
-- **Training loop** - Fully resumable and syncronized with S3 buckets, features multi-gPU training support (starting from v3), which currently uses **Data Parallel (DP)** training, model sharding support planned for future releases
+- **Training loop** - Fully resumable and syncronized with S3 buckets, features multi-gPU training support (starting from [v3](GIANT/v3/)), which currently uses **Data Parallel (DP)** training, model sharding support planned for future releases
 
 - **Inference pipeline** - fast decoding, KV-cache support, chat-style interactions
 
@@ -54,7 +54,7 @@ Assitant: The capital of France is sometimes called Paris.<EOS>
 > - Real time access of tools at inference time (in the TTC) - see [TRM as tool use](TRM/TRM-token-tool)
 The idea is to see how it affects the latency and performance of "free token slots".
 
-## GIANT v3
+## (GIANT v3)[GIANT/v3/]
 GIANT v3 is the current version I am working on, it features:
 - Multi-GPU support with gradient accomultaion and sharding.
 - DeepSeek style Mutlhead Latent Attention

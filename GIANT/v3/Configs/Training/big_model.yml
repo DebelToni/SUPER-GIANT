@@ -11,6 +11,7 @@ model:
   dropout_rate: 0.0
   activation: silu
   use_remat: false
+  enable_xsa: false
   param_dtype: float32
   compute_dtype: bfloat16
 
@@ -50,6 +51,7 @@ training:
   autotune_prefetch_candidates: [2, 4, 8, 16, 32]
   autotune_prefetch_chunks: 4
   autotune_prefetch_persist: true
+  nan_check: false
 
 stages:
   - name: hq_sentences_warmup

@@ -30,6 +30,7 @@ class GiantGPT(nn.Module):
     param_dtype:    jnp.dtype | str = jnp.float32
     compute_dtype:  jnp.dtype | str = jnp.bfloat16
     use_remat:      bool = False
+    enable_xsa:     bool = False
 
     @nn.compact
     def __call__(
@@ -66,6 +67,7 @@ class GiantGPT(nn.Module):
                     dtype=compute_dtype,
                     param_dtype=param_dtype,
                     use_remat=self.use_remat,
+                    enable_xsa=self.enable_xsa,
             )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
 
         x = RMSNorm(name="final_norm", dtype=compute_dtype, epsilon=1e-5)(x)

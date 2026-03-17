@@ -121,6 +121,7 @@ def build_model(cfg: OmegaConf, vocab_size: int, context_length: int) -> GiantGP
         d_ff=model_cfg.feed_forward_size,
         n_layers=model_cfg.num_layers,
         dropout_rate=0.0,
+        enable_xsa=bool(model_cfg.get("enable_xsa", False)),
     )
 
 

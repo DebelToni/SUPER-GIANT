@@ -780,6 +780,7 @@ def main() -> None:
     num_kv_heads = cfg.model.get("num_kv_heads", None)
     rotary_dim = cfg.model.get("rope_dim", None)
     use_remat = bool(cfg.model.get("use_remat", False))
+    enable_xsa = bool(cfg.model.get("enable_xsa", False))
     param_dtype = _to_dtype(cfg.model.param_dtype)
     compute_dtype = _to_dtype(cfg.model.compute_dtype)
     model = GiantGPT(
@@ -795,6 +796,7 @@ def main() -> None:
         param_dtype=param_dtype,
         compute_dtype=compute_dtype,
         use_remat=use_remat,
+        enable_xsa=enable_xsa,
     )
 
     rng = jax.random.PRNGKey(seed)
@@ -1002,6 +1004,7 @@ def main() -> None:
     cfg.training.prefetch_size = int(prefetch_size)
 
     use_grad_accum = grad_accum > 1
+    nan_check = bool(getattr(cfg.training, "nan_check", True))
 
     def _init_accum_grads(pytree):
         if not use_grad_accum:
@@ -1054,16 +1057,20 @@ def main() -> None:
                     axis_name="data",
                 )
 
-                is_finite = jnp.isfinite(loss)
                 if use_grad_accum:
-                    accum_grads = jax.lax.cond(
-                        is_finite,
-                        lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
-                        lambda ag, g: ag,
-                        accum_grads,
-                        grads,
-                    )
-                    accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+                    if nan_check:
+                        is_finite = jnp.isfinite(loss)
+                        accum_grads = jax.lax.cond(
+                            is_finite,
+                            lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                            lambda ag, g: ag,
+                            accum_grads,
+                            grads,
+                        )
+                        accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+                    else:
+                        accum_grads = jax.tree_util.tree_map(lambda a, g_: a + g_, accum_grads, grads)
+                        accum_count = accum_count + 1
 
                     def apply_updates(args):
                         params, opt_state, accum_grads = args
@@ -1082,18 +1089,24 @@ def main() -> None:
                     )
                     accum_count = jnp.where(should_update, 0, accum_count)
                 else:
-                    def apply_updates(args):
-                        params, opt_state, grads = args
+                    if nan_check:
+                        is_finite = jnp.isfinite(loss)
+
+                        def apply_updates(args):
+                            params, opt_state, grads = args
+                            updates, opt_state = optimizer.update(grads, opt_state, params)
+                            params = optax.apply_updates(params, updates)
+                            return params, opt_state
+
+                        params, opt_state = jax.lax.cond(
+                            is_finite,
+                            apply_updates,
+                            lambda args: (args[0], args[1]),
+                            (params, opt_state, grads),
+                        )
+                    else:
                         updates, opt_state = optimizer.update(grads, opt_state, params)
                         params = optax.apply_updates(params, updates)
-                        return params, opt_state
-
-                    params, opt_state = jax.lax.cond(
-                        is_finite,
-                        apply_updates,
-                        lambda args: (args[0], args[1]),
-                        (params, opt_state, grads),
-                    )
                 return (params, opt_state, step + 1, accum_grads, accum_count), loss
 
             (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
@@ -1146,16 +1159,20 @@ def main() -> None:
                     axis_name="data",
                 )
 
-                is_finite = jnp.isfinite(loss)
                 if use_grad_accum:
-                    accum_grads = jax.lax.cond(
-                        is_finite,
-                        lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
-                        lambda ag, g: ag,
-                        accum_grads,
-                        grads,
-                    )
-                    accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+                    if nan_check:
+                        is_finite = jnp.isfinite(loss)
+                        accum_grads = jax.lax.cond(
+                            is_finite,
+                            lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                            lambda ag, g: ag,
+                            accum_grads,
+                            grads,
+                        )
+                        accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+                    else:
+                        accum_grads = jax.tree_util.tree_map(lambda a, g_: a + g_, accum_grads, grads)
+                        accum_count = accum_count + 1
 
                     def apply_updates(args):
                         params, opt_state, accum_grads = args
@@ -1174,18 +1191,24 @@ def main() -> None:
                     )
                     accum_count = jnp.where(should_update, 0, accum_count)
                 else:
-                    def apply_updates(args):
-                        params, opt_state, grads = args
+                    if nan_check:
+                        is_finite = jnp.isfinite(loss)
+
+                        def apply_updates(args):
+                            params, opt_state, grads = args
+                            updates, opt_state = optimizer.update(grads, opt_state, params)
+                            params = optax.apply_updates(params, updates)
+                            return params, opt_state
+
+                        params, opt_state = jax.lax.cond(
+                            is_finite,
+                            apply_updates,
+                            lambda args: (args[0], args[1]),
+                            (params, opt_state, grads),
+                        )
+                    else:
                         updates, opt_state = optimizer.update(grads, opt_state, params)
                         params = optax.apply_updates(params, updates)
-                        return params, opt_state
-
-                    params, opt_state = jax.lax.cond(
-                        is_finite,
-                        apply_updates,
-                        lambda args: (args[0], args[1]),
-                        (params, opt_state, grads),
-                    )
                 return (params, opt_state, step + 1, accum_grads, accum_count), loss
 
             (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
@@ -1215,16 +1238,20 @@ def main() -> None:
                     dropout_rng=dropout_rng,
                 )
 
-                is_finite = jnp.isfinite(loss)
                 if use_grad_accum:
-                    accum_grads = jax.lax.cond(
-                        is_finite,
-                        lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
-                        lambda ag, g: ag,
-                        accum_grads,
-                        grads,
-                    )
-                    accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+                    if nan_check:
+                        is_finite = jnp.isfinite(loss)
+                        accum_grads = jax.lax.cond(
+                            is_finite,
+                            lambda ag, g: jax.tree_util.tree_map(lambda a, g_: a + g_, ag, g),
+                            lambda ag, g: ag,
+                            accum_grads,
+                            grads,
+                        )
+                        accum_count = jnp.where(is_finite, accum_count + 1, accum_count)
+                    else:
+                        accum_grads = jax.tree_util.tree_map(lambda a, g_: a + g_, accum_grads, grads)
+                        accum_count = accum_count + 1
 
                     def apply_updates(args):
                         params, opt_state, accum_grads = args
@@ -1243,18 +1270,24 @@ def main() -> None:
                     )
                     accum_count = jnp.where(should_update, 0, accum_count)
                 else:
-                    def apply_updates(args):
-                        params, opt_state, grads = args
+                    if nan_check:
+                        is_finite = jnp.isfinite(loss)
+
+                        def apply_updates(args):
+                            params, opt_state, grads = args
+                            updates, opt_state = optimizer.update(grads, opt_state, params)
+                            params = optax.apply_updates(params, updates)
+                            return params, opt_state
+
+                        params, opt_state = jax.lax.cond(
+                            is_finite,
+                            apply_updates,
+                            lambda args: (args[0], args[1]),
+                            (params, opt_state, grads),
+                        )
+                    else:
                         updates, opt_state = optimizer.update(grads, opt_state, params)
                         params = optax.apply_updates(params, updates)
-                        return params, opt_state
-
-                    params, opt_state = jax.lax.cond(
-                        is_finite,
-                        apply_updates,
-                        lambda args: (args[0], args[1]),
-                        (params, opt_state, grads),
-                    )
                 return (params, opt_state, step + 1, accum_grads, accum_count), loss
 
             (params, opt_state, _, accum_grads, accum_count), losses = jax.lax.scan(
@@ -1461,6 +1494,9 @@ def main() -> None:
 
         if autotune_prefetch_persist and _persist_prefetch_size(args.config, prefetch_size):
             print(f"[autotune] wrote training.prefetch_size={prefetch_size} to {args.config}")
+
+    if not nan_check:
+        print("[training] nan_check=False: NaN/Inf guard disabled")
 
     start = time.time()
     last_loss = None

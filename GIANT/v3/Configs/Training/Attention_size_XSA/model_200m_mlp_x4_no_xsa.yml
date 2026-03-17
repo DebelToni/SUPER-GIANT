@@ -1,0 +1,82 @@
+global_seed: 0
+
+model:
+  embedding_size: 1024
+  num_heads: 16
+  num_kv_heads: 16
+  num_layers: 9
+  feed_forward_size: 4096
+  rope_dim: 64
+  context_length: 1024
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  enable_xsa: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tokenizer:
+  name: "gpt2"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+  use_custom: false
+  pad_token_override: null
+
+optimizer:
+  base_learning_rate: 1.5e-4
+  min_learning_rate: 1.5e-5
+  warmup_tokens: 20_000_000
+  weight_decay: 0.10
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
+
+training:
+  batch_size: 8
+  gradient_accumulation: 1
+  seed: 0
+  log_every: 100
+  checkpoint_every: 50000
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 1
+  scan_chunk: 4
+  autotune_scan_chunk: false
+  prefetch_size: 4
+  autotune_prefetch: false
+  nan_check: false
+
+stages:
+  - name: finewiki_1b_l256_eq
+    dataset: 2_finewiki_1b_l256
+    seq_len: 256
+    epochs: 1
+    fraction: 0.1
+    shuffle: true
+
+  - name: open_textbooks_l512_eq
+    dataset: 3_open_textbooks_l512
+    seq_len: 512
+    epochs: 1
+    fraction: 0.1
+    shuffle: true
+
+  - name: fineweb_edu_l512_eq
+    dataset: 4_fineweb_edu_l512
+    seq_len: 512
+    epochs: 1
+    fraction: 0.1
+    shuffle: true
+
+qa_finetune: {}
+
+paths:
+  data_root: "/proj/giant-data/GIANT"
+  processed_data_root: "dataset_artifacts/curriculum_20b"
+  dataloader_state_root: "single-gpu/checkpoints/attention_size_xsa/model_200m_mlp_x4_no_xsa/dataloader_state"
+  logs_root: "single-gpu/logs/attention_size_xsa/model_200m_mlp_x4_no_xsa"
+  checkpoints_root: "single-gpu/checkpoints/attention_size_xsa/model_200m_mlp_x4_no_xsa"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+inference:
+  stop_on_eos: true

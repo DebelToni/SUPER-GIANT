@@ -9,6 +9,7 @@ model:
   dropout_rate: 0.0
   activation: silu
   use_remat: false
+  enable_xsa: false
   param_dtype: float32
   compute_dtype: bfloat16 ###
 

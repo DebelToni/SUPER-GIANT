@@ -29,6 +29,7 @@ class ModelConfig:
     dropout_rate: float = 0.0
     activation: str = "silu"
     use_remat: bool = False
+    enable_xsa: bool = False
     param_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
 
@@ -234,6 +235,7 @@ def build_model(cfg: GenerateFasterConfig, vocab_size: int, context_length: int)
         param_dtype=model_cfg.param_dtype,
         compute_dtype=model_cfg.compute_dtype,
         use_remat=bool(model_cfg.use_remat),
+        enable_xsa=bool(model_cfg.enable_xsa),
     )
 
 

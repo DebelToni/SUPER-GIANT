@@ -165,6 +165,7 @@ def main():
         d_ff=cfg.model.feed_forward_size,
         n_layers=cfg.model.num_layers,
         dropout_rate=cfg.model.dropout_rate,
+        enable_xsa=bool(cfg.model.get("enable_xsa", False)),
     )
 
     ckpt_path, _ = resolve_checkpoint(args.checkpoint, cfg, base_root)

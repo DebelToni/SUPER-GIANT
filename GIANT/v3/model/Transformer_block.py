@@ -34,6 +34,7 @@ class _ModelDefaults:
     context_length = 2048
     rope_dim = 64
     use_remat = False
+    enable_xsa = False
 
 
 MODEL_CFG = _ModelDefaults()
@@ -108,6 +109,7 @@ class NativeJaxSelfAttention(nn.Module):
     context_length: int = 2048
     dropout_rate: float = 0.0
     num_kv: int = 1
+    enable_xsa: bool = False
     dtype: jnp.dtype | str = COMPUTE_DTYPE
     param_dtype: jnp.dtype | str = PARAM_DTYPE
     rotary_dim: Optional[int] = None
@@ -277,6 +279,16 @@ class NativeJaxSelfAttention(nn.Module):
                 y = jax.nn.dot_product_attention(
                     q, k_full, v_full, bias=attn_bias, is_causal=False, implementation=impl
                 )
+            if self.enable_xsa:
+                v_proj = v
+                if self.num_heads != self.num_kv:
+                    repeat = self.num_heads // self.num_kv
+                    v_proj = jnp.repeat(v_proj, repeat, axis=2)
+                v_proj = v_proj / jnp.sqrt(
+                    jnp.sum(jnp.square(v_proj), axis=-1, keepdims=True)
+                    + jnp.asarray(1e-6, dtype=v_proj.dtype)
+                )
+                y = y - jnp.sum(y * v_proj, axis=-1, keepdims=True) * v_proj
             y = y.reshape(b, l, self.qkv_features)
 
         else:
@@ -296,6 +308,16 @@ class NativeJaxSelfAttention(nn.Module):
                 )
             else:
                 y = jax.nn.dot_product_attention(q, k_full, v_full, is_causal=True, implementation=impl)
+            if self.enable_xsa:
+                v_proj = v
+                if self.num_heads != self.num_kv:
+                    repeat = self.num_heads // self.num_kv
+                    v_proj = jnp.repeat(v_proj, repeat, axis=2)
+                v_proj = v_proj / jnp.sqrt(
+                    jnp.sum(jnp.square(v_proj), axis=-1, keepdims=True)
+                    + jnp.asarray(1e-6, dtype=v_proj.dtype)
+                )
+                y = y - jnp.sum(y * v_proj, axis=-1, keepdims=True) * v_proj
             y = y.reshape(b, l, self.qkv_features)
 
         y = self.o_proj(y)
@@ -316,6 +338,7 @@ class TinyTransformerBlock(nn.Module):
     dtype: jnp.dtype | str = COMPUTE_DTYPE
     param_dtype: jnp.dtype | str = PARAM_DTYPE
     use_remat: bool = False
+    enable_xsa: bool = False
 
     @nn.compact
     def __call__(
@@ -342,6 +365,7 @@ class TinyTransformerBlock(nn.Module):
                 dtype=compute_dtype,
                 param_dtype=param_dtype,
                 rotary_dim=module.rotary_dim,
+                enable_xsa=module.enable_xsa,
             )(h_norm, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
             h = residual + h_attn
 

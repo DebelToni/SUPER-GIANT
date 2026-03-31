@@ -28,7 +28,13 @@ def build_model(cfg: OmegaConf, vocab_size: int) -> GiantGPT:
         n_heads=cfg.num_heads,
         d_ff=cfg.feed_forward_size,
         n_layers=cfg.num_layers,
+        num_kv_heads=int(cfg.num_kv_heads),
+        rotary_dim=int(cfg.rope_dim),
+        param_dtype=cfg.param_dtype,
+        compute_dtype=cfg.compute_dtype,
         dropout_rate=0.0,
+        use_remat=bool(cfg.use_remat),
+        enable_xsa=bool(cfg.enable_xsa),
     )
 
 

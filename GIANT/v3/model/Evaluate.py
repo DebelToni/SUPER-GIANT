@@ -165,7 +165,12 @@ def main():
         d_ff=cfg.model.feed_forward_size,
         n_layers=cfg.model.num_layers,
         dropout_rate=cfg.model.dropout_rate,
-        enable_xsa=bool(cfg.model.get("enable_xsa", False)),
+        num_kv_heads=int(cfg.model.num_kv_heads),
+        rotary_dim=int(cfg.model.rope_dim),
+        param_dtype=cfg.model.param_dtype,
+        compute_dtype=cfg.model.compute_dtype,
+        use_remat=bool(cfg.model.use_remat),
+        enable_xsa=bool(cfg.model.enable_xsa),
     )
 
     ckpt_path, _ = resolve_checkpoint(args.checkpoint, cfg, base_root)

@@ -714,7 +714,7 @@ def main() -> None:
     args = parse_args()
     cfg = load_configs(config_path=args.config, global_config_path=args.global_config)
 
-    matmul_precision = str(cfg.model.get("compute_dtype", "default"))
+    matmul_precision = str(cfg.model.compute_dtype)
     jax.config.update("jax_default_matmul_precision", matmul_precision)
 
     global_seed = cfg.get("global_seed")
@@ -776,11 +776,10 @@ def main() -> None:
     print(optimizer_msg)
 
     max_seq_len = max(stage.config.seq_len for stage in stage_runtimes)
-    # Get optional model config params with defaults
-    num_kv_heads = cfg.model.get("num_kv_heads", None)
-    rotary_dim = cfg.model.get("rope_dim", None)
-    use_remat = bool(cfg.model.get("use_remat", False))
-    enable_xsa = bool(cfg.model.get("enable_xsa", False))
+    num_kv_heads = int(cfg.model.num_kv_heads)
+    rotary_dim = int(cfg.model.rope_dim)
+    use_remat = bool(cfg.model.use_remat)
+    enable_xsa = bool(cfg.model.enable_xsa)
     param_dtype = _to_dtype(cfg.model.param_dtype)
     compute_dtype = _to_dtype(cfg.model.compute_dtype)
     model = GiantGPT(

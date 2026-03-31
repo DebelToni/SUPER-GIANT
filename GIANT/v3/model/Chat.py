@@ -120,8 +120,13 @@ def build_model(cfg: OmegaConf, vocab_size: int, context_length: int) -> GiantGP
         n_heads=model_cfg.num_heads,
         d_ff=model_cfg.feed_forward_size,
         n_layers=model_cfg.num_layers,
+        num_kv_heads=int(model_cfg.num_kv_heads),
+        rotary_dim=int(model_cfg.rope_dim),
+        param_dtype=model_cfg.param_dtype,
+        compute_dtype=model_cfg.compute_dtype,
         dropout_rate=0.0,
-        enable_xsa=bool(model_cfg.get("enable_xsa", False)),
+        use_remat=bool(model_cfg.use_remat),
+        enable_xsa=bool(model_cfg.enable_xsa),
     )
 
 

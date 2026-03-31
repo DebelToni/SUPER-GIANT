@@ -1,0 +1,6 @@
+5090 0.89$/h - 30it/s at batch 4, acc 4, hq eta 3.1 hours   -  $2.76 to complete run
+H100 2.50$/h - 45it/s at batch 8, acc 4, hq eta 1.1 hours   -  $2.75 to complete run
+B200 5.00$/h - 48it/s at batch 20, acc 8, hq eta 25 min   -  $2.08 to complete run
+B200 3.59$/h - 37it/s at batch 24, acc 80, hq eta 28 min   -  $1.68 to complete run
+6xA40 1.20$/h - 6.34it/s at batch 8, acc 1, hq eta 1.2 hours   -  $1.44 to complete run
+A40 0.20$/h - 10it/s at batch 8, acc 1, hq eta 5.2 hours   -  $1.04 to complete run

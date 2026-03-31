@@ -24,11 +24,11 @@ class GiantGPT(nn.Module):
     n_heads:        int
     d_ff:           int
     n_layers:       int
+    param_dtype:    jnp.dtype | str
+    compute_dtype:  jnp.dtype | str
     dropout_rate:   float = 0.1
     num_kv_heads:   Optional[int] = None
     rotary_dim:     Optional[int] = None
-    param_dtype:    jnp.dtype | str = jnp.float32
-    compute_dtype:  jnp.dtype | str = jnp.bfloat16
     use_remat:      bool = False
     enable_xsa:     bool = False
 

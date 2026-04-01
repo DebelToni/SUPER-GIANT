@@ -1,0 +1,61 @@
+global_seed: 0
+model:
+  embedding_size: 384
+  num_heads: 6
+  num_kv_heads: 6
+  num_layers: 12
+  feed_forward_size: 1536
+  rope_dim: 64
+  context_length: 256
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  enable_xsa: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+tokenizer:
+  name: unused
+  cache_dir: /proj/giant-data/hf_cache/tokenizer_cache
+  use_custom: true
+  custom_path: /proj/giant-data/GIANT/Long/tokenizers/longdsl_wordlevel
+  pad_token_override: null
+optimizer:
+  base_learning_rate: 0.0001
+  min_learning_rate: 1.0e-05
+  warmup_tokens: 10000
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+  - bias
+  - scale
+  - embedding
+training:
+  batch_size: 1
+  gradient_accumulation: 1
+  seed: 0
+  log_every: 10
+  checkpoint_every: 250
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 1
+  scan_chunk: 1
+  prefetch_size: 1
+  nan_check: false
+  autotune_scan_chunk: false
+  autotune_prefetch: false
+stages:
+- name: longdsl_l1_ctx256_ans
+  dataset: longdsl_l1_ctx256_ans
+  seq_len: 256
+  epochs: 12
+  fraction: 1.0
+  shuffle: true
+qa_finetune: {}
+paths:
+  data_root: /proj/giant-data/GIANT
+  processed_data_root: dataset_artifacts/longdsl_bootstrap
+  dataloader_state_root: single-gpu/checkpoints/longdsl/bootstrap_v2_transfer/30m/l1_ctx256/dataloader_state
+  logs_root: single-gpu/logs/longdsl/bootstrap_v2_transfer/30m/l1_ctx256
+  checkpoints_root: single-gpu/checkpoints/longdsl/bootstrap_v2_transfer/30m/l1_ctx256
+  hf_cache_root: /proj/giant-data/hf_cache
+inference:
+  stop_on_eos: true

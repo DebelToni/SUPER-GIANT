@@ -1,0 +1,80 @@
+global_seed: 0
+model:
+  embedding_size: 448
+  num_heads: 7
+  num_kv_heads: 7
+  num_layers: 12
+  feed_forward_size: 1792
+  rope_dim: 64
+  context_length: 16384
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  enable_xsa: true
+  causal: true
+  param_dtype: float32
+  compute_dtype: bfloat16
+tokenizer:
+  name: unused
+  cache_dir: /proj/giant-data/hf_cache/tokenizer_cache
+  use_custom: true
+  custom_path: /proj/giant-data/GIANT/Long/tokenizers/long_wordlevel
+  pad_token_override: null
+optimizer:
+  base_learning_rate: 0.0001
+  min_learning_rate: 1.0e-05
+  warmup_tokens: 38744320
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+  - bias
+  - scale
+  - embedding
+training:
+  batch_size: 1
+  gradient_accumulation: 1
+  seed: 0
+  log_every: 250
+  checkpoint_every: 25225
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 1
+  scan_chunk: 1
+  prefetch_size: 1
+  nan_check: false
+  autotune_scan_chunk: false
+  autotune_prefetch: false
+stages:
+- name: ctx2048_lm
+  dataset: longrecords_l1_ctx2048_lm
+  seq_len: 2048
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: ctx4096_lm
+  dataset: longrecords_l1_ctx4096_lm
+  seq_len: 4096
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: ctx8192_lm
+  dataset: longrecords_l1_ctx8192_lm
+  seq_len: 8192
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: ctx16384_lm
+  dataset: longrecords_l1_ctx16384_lm
+  seq_len: 16384
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+qa_finetune: {}
+paths:
+  data_root: /proj/giant-data/GIANT
+  processed_data_root: dataset_artifacts/long_records_continue_ctx2k_to_16k_lm_chi20x
+  dataloader_state_root: single-gpu/checkpoints/long/continue_ctx2k_to_16k_lm_chi20x_a6000/dataloader_state
+  logs_root: single-gpu/logs/long/continue_ctx2k_to_16k_lm_chi20x_a6000
+  checkpoints_root: single-gpu/checkpoints/long/continue_ctx2k_to_16k_lm_chi20x_a6000
+  hf_cache_root: /proj/giant-data/hf_cache
+inference:
+  stop_on_eos: true

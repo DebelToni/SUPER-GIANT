@@ -1,0 +1,115 @@
+global_seed: 0
+model:
+  embedding_size: 448
+  num_heads: 7
+  num_kv_heads: 7
+  num_layers: 12
+  feed_forward_size: 1792
+  rope_dim: 64
+  context_length: 512
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  enable_xsa: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+tokenizer:
+  name: unused
+  cache_dir: /proj/giant-data/hf_cache/tokenizer_cache
+  use_custom: true
+  custom_path: /proj/giant-data/GIANT/Long/tokenizers/long_wordlevel
+  pad_token_override: null
+optimizer:
+  base_learning_rate: 0.0002
+  min_learning_rate: 2.0e-05
+  warmup_tokens: 12000
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+  - bias
+  - scale
+  - embedding
+training:
+  batch_size: 1
+  gradient_accumulation: 1
+  seed: 0
+  log_every: 25
+  checkpoint_every: 500
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 1
+  scan_chunk: 1
+  prefetch_size: 1
+  nan_check: false
+  autotune_scan_chunk: false
+  autotune_prefetch: false
+stages:
+- name: lm64_full
+  dataset: longrecords_l1_ctx64_lm
+  seq_len: 64
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: lm128_full
+  dataset: longrecords_l1_ctx128_lm
+  seq_len: 128
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: lm256_full
+  dataset: longrecords_l1_ctx256_lm
+  seq_len: 256
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: lm512_full
+  dataset: longrecords_l1_ctx512_lm
+  seq_len: 512
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: lm64_extra
+  dataset: longrecords_l1_ctx64_lm
+  seq_len: 64
+  epochs: 1
+  fraction: 0.5
+  shuffle: true
+- name: lm512_extra
+  dataset: longrecords_l1_ctx512_lm
+  seq_len: 512
+  epochs: 1
+  fraction: 0.53125
+  shuffle: true
+- name: ans64_warm
+  dataset: longrecords_l1_ctx64_ans
+  seq_len: 64
+  epochs: 1
+  fraction: 0.25
+  shuffle: true
+- name: ans128_warm
+  dataset: longrecords_l1_ctx128_ans
+  seq_len: 128
+  epochs: 1
+  fraction: 0.25
+  shuffle: true
+- name: ans256_warm
+  dataset: longrecords_l1_ctx256_ans
+  seq_len: 256
+  epochs: 1
+  fraction: 0.25
+  shuffle: true
+- name: ans512_final
+  dataset: longrecords_l1_ctx512_ans
+  seq_len: 512
+  epochs: 1
+  fraction: 0.40625
+  shuffle: true
+qa_finetune: {}
+paths:
+  data_root: /proj/giant-data/GIANT
+  processed_data_root: dataset_artifacts/long_records
+  dataloader_state_root: single-gpu/checkpoints/long/lmheavy_10k_lm_2k_ans/40m/l1_ctx512/dataloader_state
+  logs_root: single-gpu/logs/long/lmheavy_10k_lm_2k_ans/40m/l1_ctx512
+  checkpoints_root: single-gpu/checkpoints/long/lmheavy_10k_lm_2k_ans/40m/l1_ctx512
+  hf_cache_root: /proj/giant-data/hf_cache
+inference:
+  stop_on_eos: true

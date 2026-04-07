@@ -1,0 +1,104 @@
+global_seed: 0
+model:
+  embedding_size: 448
+  num_heads: 7
+  num_kv_heads: 7
+  num_layers: 12
+  feed_forward_size: 1792
+  rope_dim: 64
+  context_length: 2048
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  enable_xsa: true
+  causal: true
+  param_dtype: float32
+  compute_dtype: bfloat16
+tokenizer:
+  name: unused
+  cache_dir: /proj/giant-data/hf_cache/tokenizer_cache
+  use_custom: true
+  custom_path: /proj/giant-data/GIANT/Long/chinchilla20x_ctx2048_warm40/tokenizers/long_wordlevel
+  pad_token_override: null
+optimizer:
+  base_learning_rate: 0.0002
+  min_learning_rate: 2.0e-05
+  warmup_tokens: 309957632
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+  - bias
+  - scale
+  - embedding
+training:
+  batch_size: 1
+  gradient_accumulation: 1
+  seed: 0
+  log_every: 1000
+  checkpoint_every: 616523
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 1
+  scan_chunk: 1
+  prefetch_size: 1
+  nan_check: false
+  autotune_scan_chunk: false
+  autotune_prefetch: false
+stages:
+- name: ctx64_warm
+  dataset: longrecords_l1_ctx64_lm
+  seq_len: 64
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: ctx128_warm
+  dataset: longrecords_l1_ctx128_lm
+  seq_len: 128
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: ctx256_warm
+  dataset: longrecords_l1_ctx256_lm
+  seq_len: 256
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: ctx512_warm
+  dataset: longrecords_l1_ctx512_lm
+  seq_len: 512
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: ctx1024_warm
+  dataset: longrecords_l1_ctx1024_lm
+  seq_len: 1024
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: ctx2048_warm
+  dataset: longrecords_l1_ctx2048_lm
+  seq_len: 2048
+  epochs: 1
+  fraction: 0.4175203931247956
+  shuffle: true
+- name: ctx2048_lm
+  dataset: longrecords_l1_ctx2048_lm
+  seq_len: 2048
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: ctx2048_ans
+  dataset: longrecords_l1_ctx2048_ans
+  seq_len: 2048
+  epochs: 1
+  fraction: 0.016950595107441867
+  shuffle: true
+qa_finetune: {}
+paths:
+  data_root: /proj/giant-data/GIANT
+  processed_data_root: dataset_artifacts/long_records_chinchilla20x_ctx2048_warm40
+  dataloader_state_root: single-gpu/checkpoints/long/ctx2048_chinchilla20x_warm40_5090/dataloader_state
+  logs_root: single-gpu/logs/long/ctx2048_chinchilla20x_warm40_5090
+  checkpoints_root: single-gpu/checkpoints/long/ctx2048_chinchilla20x_warm40_5090
+  hf_cache_root: /proj/giant-data/hf_cache
+inference:
+  stop_on_eos: true

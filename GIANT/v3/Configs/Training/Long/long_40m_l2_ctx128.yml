@@ -1,12 +1,12 @@
 global_seed: 0
 model:
-  embedding_size: 384
-  num_heads: 6
-  num_kv_heads: 6
+  embedding_size: 448
+  num_heads: 7
+  num_kv_heads: 7
   num_layers: 12
-  feed_forward_size: 1536
+  feed_forward_size: 1792
   rope_dim: 64
-  context_length: 16384
+  context_length: 128
   dropout_rate: 0.0
   activation: silu
   use_remat: false
@@ -17,12 +17,12 @@ tokenizer:
   name: unused
   cache_dir: /proj/giant-data/hf_cache/tokenizer_cache
   use_custom: true
-  custom_path: /proj/giant-data/GIANT/Long/tokenizers/longdsl_wordlevel
+  custom_path: /proj/giant-data/GIANT/Long/tokenizers/long_wordlevel
   pad_token_override: null
 optimizer:
-  base_learning_rate: 0.0003
-  min_learning_rate: 3.0e-05
-  warmup_tokens: 20000
+  base_learning_rate: 0.0002
+  min_learning_rate: 2.0e-05
+  warmup_tokens: 12000
   weight_decay: 0.1
   gradient_clip_norm: 1.0
   weight_decay_exclusions:
@@ -43,19 +43,25 @@ training:
   autotune_scan_chunk: false
   autotune_prefetch: false
 stages:
-- name: longdsl_l1_ctx16384
-  dataset: longdsl_l1_ctx16384
-  seq_len: 16384
+- name: longrecords_l2_ctx128_lm
+  dataset: longrecords_l2_ctx128_lm
+  seq_len: 128
+  epochs: 1
+  fraction: 1.0
+  shuffle: true
+- name: longrecords_l2_ctx128_ans
+  dataset: longrecords_l2_ctx128_ans
+  seq_len: 128
   epochs: 8
   fraction: 1.0
   shuffle: true
 qa_finetune: {}
 paths:
   data_root: /proj/giant-data/GIANT
-  processed_data_root: dataset_artifacts/longdsl
-  dataloader_state_root: single-gpu/checkpoints/longdsl/baseline_v4/30m/l1_ctx16384/dataloader_state
-  logs_root: single-gpu/logs/longdsl/baseline_v4/30m/l1_ctx16384
-  checkpoints_root: single-gpu/checkpoints/longdsl/baseline_v4/30m/l1_ctx16384
+  processed_data_root: dataset_artifacts/long_records
+  dataloader_state_root: single-gpu/checkpoints/long/records_bootstrap/40m/l2_ctx128/dataloader_state
+  logs_root: single-gpu/logs/long/records_bootstrap/40m/l2_ctx128
+  checkpoints_root: single-gpu/checkpoints/long/records_bootstrap/40m/l2_ctx128
   hf_cache_root: /proj/giant-data/hf_cache
 inference:
   stop_on_eos: true

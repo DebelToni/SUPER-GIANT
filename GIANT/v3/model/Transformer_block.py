@@ -61,6 +61,7 @@ class NativeJaxSelfAttention(nn.Module):
     num_kv: int = 1
     enable_xsa: bool = False
     rotary_dim: Optional[int] = None
+    causal: bool = True
 
     def setup(self):
         self._compute_dtype = _to_dtype(self.dtype)
@@ -108,9 +109,13 @@ class NativeJaxSelfAttention(nn.Module):
         deterministic: bool,
         use_kv_cache: bool = False,
         cur_index: Optional[jnp.ndarray | int] = None,
+        attention_bias: Optional[jnp.ndarray] = None,
     ):
         b, l, _ = x.shape
         impl = "cudnn" if IS_GPU else "xla"
+
+        if use_kv_cache and not self.causal:
+            raise ValueError("KV cache is only supported for causal attention")
 
         head_dim = self.head_dim
         q_size   = self.num_heads * head_dim
@@ -232,7 +237,14 @@ class NativeJaxSelfAttention(nn.Module):
             # Use GQA/MQA by passing K/V with num_kv heads directly.
             k_full = k
             v_full = v
-            y = jax.nn.dot_product_attention(q, k_full, v_full, is_causal=True, implementation=impl)
+            y = jax.nn.dot_product_attention(
+                q,
+                k_full,
+                v_full,
+                bias=attention_bias,
+                is_causal=self.causal,
+                implementation=impl,
+            )
             if self.enable_xsa:
                 v_proj = v
                 if self.num_heads != self.num_kv:
@@ -264,6 +276,7 @@ class TinyTransformerBlock(nn.Module):
     rotary_dim: Optional[int] = None
     use_remat: bool = False
     enable_xsa: bool = False
+    causal: bool = True
 
     @nn.compact
     def __call__(
@@ -273,6 +286,7 @@ class TinyTransformerBlock(nn.Module):
         deterministic: bool,
         use_kv_cache: bool = False,
         cur_index: Optional[jnp.ndarray | int] = None,
+        attention_bias: Optional[jnp.ndarray] = None,
     ):
         compute_dtype = _to_dtype(self.dtype)
         param_dtype = _to_dtype(self.param_dtype)
@@ -291,7 +305,14 @@ class TinyTransformerBlock(nn.Module):
                 param_dtype=param_dtype,
                 rotary_dim=module.rotary_dim,
                 enable_xsa=module.enable_xsa,
-            )(h_norm, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
+                causal=module.causal,
+            )(
+                h_norm,
+                deterministic=deterministic,
+                use_kv_cache=use_kv_cache,
+                cur_index=cur_index,
+                attention_bias=attention_bias,
+            )
             h = residual + h_attn
 
             residual = h

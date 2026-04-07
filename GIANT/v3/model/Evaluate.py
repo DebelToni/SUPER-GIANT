@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.attention_bias import build_answer_hidden_bias
 from GIANT.v3.model.arrow_data_loader import ShardedArrowDataset, StageDataLoader
 from GIANT.v3.model.checkpoint_manager import latest as latest_ckpt
 from GIANT.v3.model.checkpoint_manager import load as load_ckpt
@@ -112,7 +113,13 @@ def resolve_checkpoint(path_arg: str | None, cfg, base_root: Path) -> Tuple[str,
 
 @partial(jax.jit, static_argnames=("model",))
 def eval_step(params, batch, *, model):
-    logits = model.apply({"params": params}, batch["input"], deterministic=True)
+    attention_bias = build_answer_hidden_bias(
+        batch["mask"],
+        enabled=bool(getattr(model, "mask_answer_token_for_encoder", False)),
+        causal=bool(getattr(model, "causal", True)),
+        dtype=jnp.float32,
+    )
+    logits = model.apply({"params": params}, batch["input"], deterministic=True, attention_bias=attention_bias)
     loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch["target"])
     loss = jnp.sum(loss * batch["mask"]) / jnp.sum(batch["mask"])
     return loss
@@ -171,6 +178,8 @@ def main():
         compute_dtype=cfg.model.compute_dtype,
         use_remat=bool(cfg.model.use_remat),
         enable_xsa=bool(cfg.model.enable_xsa),
+        causal=bool(cfg.model.get("causal", True)),
+        mask_answer_token_for_encoder=bool(cfg.model.get("mask_answer_token_for_encoder", False)),
     )
 
     ckpt_path, _ = resolve_checkpoint(args.checkpoint, cfg, base_root)

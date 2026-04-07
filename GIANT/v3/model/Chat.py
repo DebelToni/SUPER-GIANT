@@ -127,6 +127,7 @@ def build_model(cfg: OmegaConf, vocab_size: int, context_length: int) -> GiantGP
         dropout_rate=0.0,
         use_remat=bool(model_cfg.use_remat),
         enable_xsa=bool(model_cfg.enable_xsa),
+        causal=bool(model_cfg.get("causal", True)),
     )
 
 

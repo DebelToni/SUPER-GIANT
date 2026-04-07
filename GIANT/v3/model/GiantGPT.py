@@ -31,6 +31,8 @@ class GiantGPT(nn.Module):
     rotary_dim:     Optional[int] = None
     use_remat:      bool = False
     enable_xsa:     bool = False
+    causal:         bool = True
+    mask_answer_token_for_encoder: bool = False
 
     @nn.compact
     def __call__(
@@ -40,6 +42,7 @@ class GiantGPT(nn.Module):
         deterministic: bool = False,
         use_kv_cache: bool = False,
         cur_index: Optional[jnp.ndarray | int] = None,
+        attention_bias: Optional[jnp.ndarray] = None,
     ):
         compute_dtype = _to_dtype(self.compute_dtype)
         param_dtype = _to_dtype(self.param_dtype)
@@ -68,7 +71,14 @@ class GiantGPT(nn.Module):
                     param_dtype=param_dtype,
                     use_remat=self.use_remat,
                     enable_xsa=self.enable_xsa,
-            )(x, deterministic=deterministic, use_kv_cache=use_kv_cache, cur_index=cur_index)
+                    causal=self.causal,
+            )(
+                x,
+                deterministic=deterministic,
+                use_kv_cache=use_kv_cache,
+                cur_index=cur_index,
+                attention_bias=attention_bias,
+            )
 
         x = RMSNorm(name="final_norm", dtype=compute_dtype, epsilon=1e-5)(x)
         logits = jnp.einsum("bld,vd->blv",

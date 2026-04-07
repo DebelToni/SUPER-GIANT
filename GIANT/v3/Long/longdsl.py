@@ -1,104 +1,193 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+import re
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+from omegaconf import OmegaConf
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import WhitespaceSplit
+from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast
 
 
-ROLE_PREFIX = "@{role}"
-TURN_SUFFIX = " SEP"
-
 SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>"]
-BASE_TOKENS = [
-    "@user",
-    "@assistant",
-    "LEVEL",
-    "PROGRAM",
-    "QUERY",
-    "ANS",
-    "SEP",
-    "L1",
-    "L2",
-    "L3",
-    "DEF",
-    "SET",
-    "ALIAS",
-    "ASK",
-    "INC",
-    "DEC",
-    "SWAP",
-    "DEFARR",
-    "SETAT",
-    "SWAPAT",
-    "INCAT",
-    "GET",
-]
+TEXT_MARKERS = ["Context", "Question", "Answer", ":"]
+TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]+|[^\w\s]", re.UNICODE)
+DEFAULT_LEXICON_PATH = Path(__file__).with_name("Lexicon.yml")
+
+
+@dataclass(frozen=True)
+class RelationSpec:
+    key: str
+    values: tuple[str, ...]
+    link_templates: tuple[str, ...]
+    update_templates: tuple[str, ...]
+    question_templates: tuple[str, ...]
+
+
+def _tuple_strs(items) -> tuple[str, ...]:
+    return tuple(str(item) for item in items)
+
+
+def _unique_tuple_strs(items) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(str(item) for item in items))
+
+
+def _load_lexicon(path: Path = DEFAULT_LEXICON_PATH) -> dict:
+    data = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    if not isinstance(data, dict):
+        raise TypeError(f"Expected mapping in lexicon file {path}")
+    return data
+
+
+LEXICON = _load_lexicon()
+PERSON_NAMES = _unique_tuple_strs(LEXICON["person_names"])
+ALIAS_NAMES = _unique_tuple_strs(LEXICON["alias_names"])
+TIME_MARKERS = _unique_tuple_strs(LEXICON["time_markers"])
+RECORD_SOURCES = _unique_tuple_strs(LEXICON["record_sources"])
+DEPARTMENTS = _unique_tuple_strs(LEXICON["departments"])
+RELATIONS: tuple[RelationSpec, ...] = tuple(
+    RelationSpec(
+        key=str(key),
+        values=_tuple_strs(spec["values"]),
+        link_templates=_tuple_strs(spec["link_templates"]),
+        update_templates=_tuple_strs(spec["update_templates"]),
+        question_templates=_tuple_strs(spec["question_templates"]),
+    )
+    for key, spec in dict(LEXICON["relations"]).items()
+)
+ALIAS_TEMPLATES = _tuple_strs(LEXICON["alias_templates"])
+FILLER_TEMPLATES = _tuple_strs(LEXICON["filler_templates"])
+RICH_FILLER_TEMPLATES = _tuple_strs(LEXICON["rich_filler_templates"])
 
 
 @dataclass
 class TokenizerSpec:
-    num_entities: int = 128
-    num_values: int = 64
-    num_arrays: int = 32
-    array_width: int = 4
-    num_deltas: int = 8
+    person_names: tuple[str, ...] = PERSON_NAMES
+    alias_names: tuple[str, ...] = ALIAS_NAMES
+    relation_keys: tuple[str, ...] = tuple(spec.key for spec in RELATIONS)
 
 
 @dataclass
 class GeneratorConfig:
     level: int
     context_length: int
-    fill_ratio: float = 0.92
-    num_entities: int = 128
-    num_values: int = 64
-    num_arrays: int = 32
-    array_width: int = 4
-    num_deltas: int = 8
+    fill_ratio: float = 0.88
+    min_alias_chain: int = 1
+    max_alias_chain: int = 3
+    min_fill_events: int = 4
+    max_fill_events: int = 48
+    relation_keys: tuple[str, ...] = tuple(spec.key for spec in RELATIONS)
 
 
-def entity_token(idx: int) -> str:
-    return f"E{idx:03d}"
+class NaturalWorld:
+    def __init__(self) -> None:
+        self.next_entity_id = 0
+        self.name_to_entity: dict[str, str] = {}
+        self.entity_primary: dict[str, str] = {}
+        self.entity_values: dict[str, dict[str, str]] = {}
+        self.ops: list[list[str]] = []
+
+    def create_entity(self, primary_name: str) -> str:
+        entity_id = f"person_{self.next_entity_id:03d}"
+        self.next_entity_id += 1
+        self.name_to_entity[primary_name] = entity_id
+        self.entity_primary[entity_id] = primary_name
+        self.entity_values[entity_id] = {}
+        self.ops.append(["BIND", primary_name, entity_id])
+        return entity_id
+
+    def resolve(self, name: str) -> str:
+        return self.name_to_entity[name]
+
+    def alias(self, alias_name: str, target_name: str) -> None:
+        entity_id = self.resolve(target_name)
+        self.name_to_entity[alias_name] = entity_id
+        self.ops.append(["ALIAS", alias_name, target_name])
+
+    def link(self, entity_id: str, relation_key: str, value: str) -> None:
+        self.entity_values[entity_id][relation_key] = value
+        self.ops.append(["LINK", entity_id, relation_key, value])
+
+    def set_relation(self, entity_id: str, relation_key: str, value: str) -> None:
+        self.entity_values[entity_id][relation_key] = value
+        self.ops.append(["SET", entity_id, relation_key, value])
+
+    def get(self, name: str, relation_key: str) -> str:
+        entity_id = self.resolve(name)
+        return self.entity_values[entity_id][relation_key]
+
+    def primary_name(self, entity_id: str) -> str:
+        return self.entity_primary[entity_id]
+
+    def has_relation(self, entity_id: str, relation_key: str) -> bool:
+        return relation_key in self.entity_values[entity_id]
 
 
-def value_token(idx: int) -> str:
-    return f"V{idx:03d}"
+def surface_tokens(text: str) -> list[str]:
+    return TOKEN_PATTERN.findall(text)
 
 
-def array_token(idx: int) -> str:
-    return f"A{idx:03d}"
+def _format(template: str, **kwargs: str) -> str:
+    return template.format(**kwargs)
 
 
-def index_token(idx: int) -> str:
-    return f"I{idx:02d}"
+def _relation_spec_map() -> dict[str, RelationSpec]:
+    return {spec.key: spec for spec in RELATIONS}
 
 
-def delta_token(idx: int) -> str:
-    return f"N{idx:02d}"
+def _all_names() -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*PERSON_NAMES, *ALIAS_NAMES)))
 
 
 def build_vocab(spec: TokenizerSpec) -> List[str]:
-    vocab: List[str] = []
-    vocab.extend(SPECIAL_TOKENS)
-    vocab.extend(BASE_TOKENS)
-    vocab.extend(entity_token(i) for i in range(spec.num_entities))
-    vocab.extend(value_token(i) for i in range(spec.num_values))
-    vocab.extend(array_token(i) for i in range(spec.num_arrays))
-    vocab.extend(index_token(i) for i in range(spec.array_width))
-    vocab.extend(delta_token(i) for i in range(spec.num_deltas))
-    return vocab
+    vocab = set(SPECIAL_TOKENS)
+    vocab.update(TEXT_MARKERS)
+    vocab.update(spec.person_names)
+    vocab.update(spec.alias_names)
+    relation_map = _relation_spec_map()
+    for relation_key in spec.relation_keys:
+        relation = relation_map[relation_key]
+        vocab.update(relation.values)
+        vocab.update(surface_tokens(relation.key))
+        example_name = spec.person_names[0]
+        example_alias = spec.alias_names[0]
+        example_value = relation.values[0]
+        for template in relation.link_templates + relation.update_templates:
+            vocab.update(surface_tokens(_format(template, name=example_name, value=example_value)))
+        for template in relation.question_templates:
+            vocab.update(surface_tokens(_format(template, word=example_alias)))
+    for template in ALIAS_TEMPLATES:
+        vocab.update(surface_tokens(_format(template, alias=spec.alias_names[0], target=spec.person_names[0])))
+    for template in FILLER_TEMPLATES:
+        vocab.update(surface_tokens(_format(template, name=spec.person_names[0])))
+    for template in RICH_FILLER_TEMPLATES:
+        for time_marker in TIME_MARKERS:
+            for source in RECORD_SOURCES:
+                for department in DEPARTMENTS:
+                    vocab.update(
+                        surface_tokens(
+                            _format(
+                                template,
+                                name=spec.person_names[0],
+                                time_marker=time_marker,
+                                source=source,
+                                department=department,
+                            )
+                        )
+                    )
+    vocab.update({"BIND", "ALIAS", "LINK", "SET", "ASK"})
+    return list(SPECIAL_TOKENS) + sorted(vocab.difference(SPECIAL_TOKENS))
 
 
 def save_tokenizer(output_dir: Path, spec: TokenizerSpec) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     vocab = {token: idx for idx, token in enumerate(build_vocab(spec))}
     tokenizer = Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>"))
-    tokenizer.pre_tokenizer = WhitespaceSplit()
+    tokenizer.pre_tokenizer = Whitespace()
     fast = PreTrainedTokenizerFast(
         tokenizer_object=tokenizer,
         pad_token="<pad>",
@@ -108,353 +197,220 @@ def save_tokenizer(output_dir: Path, spec: TokenizerSpec) -> Path:
     )
     fast.model_max_length = 1_000_000
     fast.save_pretrained(output_dir)
-    with (output_dir / "longdsl_tokenizer_spec.json").open("w", encoding="utf-8") as handle:
+    with (output_dir / "long_tokenizer_spec.json").open("w", encoding="utf-8") as handle:
         json.dump(asdict(spec), handle, indent=2)
     return output_dir
 
 
-def _stmt(*parts: str) -> List[str]:
-    return [*parts, "SEP"]
+def _sample_distinct(rng, pool: Sequence[str], count: int) -> list[str]:
+    picks = rng.choice(pool, size=count, replace=False).tolist()
+    return [str(item) for item in picks]
 
 
-class ScalarWorld:
-    def __init__(self, num_entities: int, num_values: int):
-        self.num_entities = num_entities
-        self.num_values = num_values
-        self.aliases = list(range(num_entities))
-        self.values = [0] * num_entities
-        self.initialized = [False] * num_entities
-
-    def resolve(self, idx: int) -> int:
-        seen = set()
-        cur = idx
-        while self.aliases[cur] != cur and cur not in seen:
-            seen.add(cur)
-            cur = self.aliases[cur]
-        return cur
-
-    def define(self, idx: int, value: int) -> None:
-        self.aliases[idx] = idx
-        self.values[idx] = value % self.num_values
-        self.initialized[idx] = True
-
-    def set_value(self, idx: int, value: int) -> None:
-        root = self.resolve(idx)
-        self.values[root] = value % self.num_values
-        self.initialized[root] = True
-
-    def alias(self, src: int, dst: int) -> None:
-        root_dst = self.resolve(dst)
-        if src == root_dst:
-            return
-        self.aliases[src] = dst
-        if self.initialized[root_dst]:
-            self.initialized[src] = True
-
-    def inc(self, idx: int, delta: int) -> None:
-        root = self.resolve(idx)
-        self.values[root] = (self.values[root] + delta) % self.num_values
-        self.initialized[root] = True
-
-    def dec(self, idx: int, delta: int) -> None:
-        root = self.resolve(idx)
-        self.values[root] = (self.values[root] - delta) % self.num_values
-        self.initialized[root] = True
-
-    def swap(self, left: int, right: int) -> None:
-        root_l = self.resolve(left)
-        root_r = self.resolve(right)
-        self.values[root_l], self.values[root_r] = self.values[root_r], self.values[root_l]
-        self.initialized[root_l] = True
-        self.initialized[root_r] = True
-
-    def get_value(self, idx: int) -> int:
-        return self.values[self.resolve(idx)]
+def _pick_relation(cfg: GeneratorConfig, rng) -> RelationSpec:
+    allowed = [spec for spec in RELATIONS if spec.key in set(cfg.relation_keys)]
+    return allowed[int(rng.integers(0, len(allowed)))]
 
 
-class ArrayWorld:
-    def __init__(self, num_arrays: int, num_values: int, array_width: int):
-        self.num_arrays = num_arrays
-        self.num_values = num_values
-        self.array_width = array_width
-        self.values = [[0 for _ in range(array_width)] for _ in range(num_arrays)]
-        self.initialized = [False] * num_arrays
-
-    def define(self, idx: int, vals: Sequence[int]) -> None:
-        self.values[idx] = [int(v) % self.num_values for v in vals[: self.array_width]]
-        self.initialized[idx] = True
-
-    def set_at(self, idx: int, pos: int, value: int) -> None:
-        self.values[idx][pos] = value % self.num_values
-        self.initialized[idx] = True
-
-    def swap_at(self, idx: int, left: int, right: int) -> None:
-        vals = self.values[idx]
-        vals[left], vals[right] = vals[right], vals[left]
-        self.initialized[idx] = True
-
-    def inc_at(self, idx: int, pos: int, delta: int) -> None:
-        self.values[idx][pos] = (self.values[idx][pos] + delta) % self.num_values
-        self.initialized[idx] = True
-
-    def get_at(self, idx: int, pos: int) -> int:
-        return self.values[idx][pos]
+def _pick_different_value(relation: RelationSpec, current_value: str, rng) -> str:
+    options = [value for value in relation.values if value != current_value]
+    return str(options[int(rng.integers(0, len(options)))])
 
 
-def _pick_distinct(rng, pool: Sequence[int], k: int) -> List[int]:
-    return [int(x) for x in rng.choice(pool, size=k, replace=False).tolist()]
+def _render_link(relation: RelationSpec, name: str, value: str, rng) -> str:
+    template = relation.link_templates[int(rng.integers(0, len(relation.link_templates)))]
+    return _format(template, name=name, value=value)
 
 
-def _random_scalar_distractor(world: ScalarWorld, allowed: Sequence[int], level: int, cfg: GeneratorConfig, rng) -> List[str]:
-    allowed = list(allowed)
-    if not allowed:
-        allowed = list(range(world.num_entities))
-    op_choices = ["DEF", "SET", "ALIAS"]
-    if level >= 2:
-        op_choices.extend(["INC", "DEC", "SWAP"])
+def _render_update(relation: RelationSpec, name: str, value: str, rng) -> str:
+    template = relation.update_templates[int(rng.integers(0, len(relation.update_templates)))]
+    return _format(template, name=name, value=value)
+
+
+def _render_alias(alias_name: str, target_name: str, rng) -> str:
+    template = ALIAS_TEMPLATES[int(rng.integers(0, len(ALIAS_TEMPLATES)))]
+    return _format(template, alias=alias_name, target=target_name)
+
+
+def _render_question(relation: RelationSpec, word: str, rng) -> str:
+    template = relation.question_templates[int(rng.integers(0, len(relation.question_templates)))]
+    return _format(template, word=word)
+
+
+def _render_filler_note(name: str, rng) -> str:
+    template_bank = FILLER_TEMPLATES if rng.random() < 0.55 else RICH_FILLER_TEMPLATES
+    template = template_bank[int(rng.integers(0, len(template_bank)))]
+    if template in FILLER_TEMPLATES:
+        return _format(template, name=name)
+    return _format(
+        template,
+        name=name,
+        time_marker=TIME_MARKERS[int(rng.integers(0, len(TIME_MARKERS)))],
+        source=RECORD_SOURCES[int(rng.integers(0, len(RECORD_SOURCES)))],
+        department=DEPARTMENTS[int(rng.integers(0, len(DEPARTMENTS)))],
+    )
+
+
+def _append_if_room(sentences: list[list[str]], candidate: list[str], target_tokens: int, question: str) -> bool:
+    flat = [item for block in sentences for item in block]
+    proposed = flat + candidate
+    text = "Context: " + " ".join(proposed) + " Question: " + question + " Answer: PLACEHOLDER"
+    return len(surface_tokens(text)) <= target_tokens
+
+
+def _build_relevant_story(cfg: GeneratorConfig, rng) -> tuple[NaturalWorld, RelationSpec, str, list[str], list[int], str, str, set[str]]:
+    world = NaturalWorld()
+    primary_name, alias_one, alias_two = _sample_distinct(rng, _all_names(), 3)
+    relation = _pick_relation(cfg, rng)
+    entity_id = world.create_entity(primary_name)
+    initial_value = str(relation.values[int(rng.integers(0, len(relation.values)))])
+    world.link(entity_id, relation.key, initial_value)
+
+    sentences = [_render_link(relation, primary_name, initial_value, rng)]
+    evidence_indices = [0]
+    query_name = primary_name
+
+    max_alias_depth = max(cfg.min_alias_chain, min(cfg.max_alias_chain, 2))
+    alias_depth = int(rng.integers(cfg.min_alias_chain, max_alias_depth + 1))
+    alias_pool = [alias_one, alias_two]
+    for idx in range(alias_depth):
+        alias_name = alias_pool[idx]
+        world.alias(alias_name, query_name)
+        sentences.append(_render_alias(alias_name, query_name, rng))
+        evidence_indices.append(len(sentences) - 1)
+        query_name = alias_name
+
+    if cfg.level >= 2:
+        new_value = _pick_different_value(relation, initial_value, rng)
+        world.set_relation(entity_id, relation.key, new_value)
+        sentences.append(_render_update(relation, primary_name, new_value, rng))
+        evidence_indices.append(len(sentences) - 1)
+
+    question = _render_question(relation, query_name, rng)
+    answer = world.get(query_name, relation.key)
+    used_names = {primary_name, *alias_pool[:alias_depth]}
+    return world, relation, query_name, sentences, evidence_indices, question, answer, used_names
+
+
+def _build_filler_event(
+    world: NaturalWorld,
+    relation: RelationSpec,
+    used_names: set[str],
+    target_entity: str,
+    cfg: GeneratorConfig,
+    rng,
+) -> tuple[str, set[str]]:
+    available_names = [name for name in _all_names() if name not in used_names]
+    distractor_entities = [entity_id for entity_id in world.entity_values if entity_id != target_entity]
+    op_choices = ["link", "alias", "note"]
+    if cfg.level >= 2:
+        op_choices.append("set")
+
     for _ in range(32):
         op = str(rng.choice(op_choices))
-        if op == "DEF":
-            ent = int(rng.choice(allowed))
-            val = int(rng.integers(0, cfg.num_values))
-            world.define(ent, val)
-            return _stmt("DEF", entity_token(ent), value_token(val))
-        if op == "SET":
-            candidates = [e for e in allowed if world.initialized[world.resolve(e)]]
-            if not candidates:
-                continue
-            ent = int(rng.choice(candidates))
-            val = int(rng.integers(0, cfg.num_values))
-            world.set_value(ent, val)
-            return _stmt("SET", entity_token(ent), value_token(val))
-        if op == "ALIAS":
-            targets = [e for e in allowed if world.initialized[world.resolve(e)]]
-            sources = [e for e in allowed if e not in targets or len(allowed) == 1]
-            if not targets or not sources:
-                continue
-            src = int(rng.choice(sources))
-            dst = int(rng.choice(targets))
-            if src == dst or world.resolve(dst) == src:
-                continue
-            world.alias(src, dst)
-            return _stmt("ALIAS", entity_token(src), entity_token(dst))
-        if op == "INC":
-            candidates = [e for e in allowed if world.initialized[world.resolve(e)]]
-            if not candidates:
-                continue
-            ent = int(rng.choice(candidates))
-            delta = int(rng.integers(1, cfg.num_deltas + 1))
-            world.inc(ent, delta)
-            return _stmt("INC", entity_token(ent), delta_token(delta - 1))
-        if op == "DEC":
-            candidates = [e for e in allowed if world.initialized[world.resolve(e)]]
-            if not candidates:
-                continue
-            ent = int(rng.choice(candidates))
-            delta = int(rng.integers(1, cfg.num_deltas + 1))
-            world.dec(ent, delta)
-            return _stmt("DEC", entity_token(ent), delta_token(delta - 1))
-        if op == "SWAP":
-            candidates = [e for e in allowed if world.initialized[world.resolve(e)]]
-            if len(candidates) < 2:
-                continue
-            left, right = _pick_distinct(rng, candidates, 2)
-            world.swap(left, right)
-            return _stmt("SWAP", entity_token(left), entity_token(right))
-    ent = int(rng.choice(allowed))
-    val = int(rng.integers(0, cfg.num_values))
-    world.define(ent, val)
-    return _stmt("DEF", entity_token(ent), value_token(val))
+        if op == "link" and available_names:
+            name = available_names[int(rng.integers(0, len(available_names)))]
+            relation_pick = relation if rng.random() < 0.7 else RELATIONS[int(rng.integers(0, len(RELATIONS)))]
+            value = str(relation_pick.values[int(rng.integers(0, len(relation_pick.values)))])
+            entity_id = world.create_entity(name)
+            world.link(entity_id, relation_pick.key, value)
+            return _render_link(relation_pick, name, value, rng), {name}
+        if op == "alias" and distractor_entities and available_names:
+            alias_name = available_names[int(rng.integers(0, len(available_names)))]
+            entity_id = distractor_entities[int(rng.integers(0, len(distractor_entities)))]
+            target_name = world.primary_name(entity_id)
+            world.alias(alias_name, target_name)
+            return _render_alias(alias_name, target_name, rng), {alias_name}
+        if op == "set" and distractor_entities:
+            entity_id = distractor_entities[int(rng.integers(0, len(distractor_entities)))]
+            primary_name = world.primary_name(entity_id)
+            relation_key = relation.key if world.has_relation(entity_id, relation.key) else list(world.entity_values[entity_id].keys())[0]
+            relation_pick = _relation_spec_map()[relation_key]
+            current_value = world.entity_values[entity_id][relation_key]
+            new_value = _pick_different_value(relation_pick, current_value, rng)
+            world.set_relation(entity_id, relation_key, new_value)
+            return _render_update(relation_pick, primary_name, new_value, rng), set()
+        if op == "note" and distractor_entities:
+            entity_id = distractor_entities[int(rng.integers(0, len(distractor_entities)))]
+            return _render_filler_note(world.primary_name(entity_id), rng), set()
 
-
-def _random_array_distractor(world: ArrayWorld, allowed: Sequence[int], cfg: GeneratorConfig, rng) -> List[str]:
-    allowed = list(allowed)
-    op_choices = ["DEFARR", "SETAT", "SWAPAT", "INCAT"]
-    for _ in range(32):
-        op = str(rng.choice(op_choices))
-        if op == "DEFARR":
-            arr = int(rng.choice(allowed))
-            vals = [int(rng.integers(0, cfg.num_values)) for _ in range(cfg.array_width)]
-            world.define(arr, vals)
-            return _stmt("DEFARR", array_token(arr), *(value_token(v) for v in vals))
-        candidates = [a for a in allowed if world.initialized[a]]
-        if not candidates:
-            continue
-        arr = int(rng.choice(candidates))
-        if op == "SETAT":
-            pos = int(rng.integers(0, cfg.array_width))
-            value = int(rng.integers(0, cfg.num_values))
-            world.set_at(arr, pos, value)
-            return _stmt("SETAT", array_token(arr), index_token(pos), value_token(value))
-        if op == "SWAPAT":
-            left, right = _pick_distinct(rng, list(range(cfg.array_width)), 2)
-            world.swap_at(arr, left, right)
-            return _stmt("SWAPAT", array_token(arr), index_token(left), index_token(right))
-        if op == "INCAT":
-            pos = int(rng.integers(0, cfg.array_width))
-            delta = int(rng.integers(1, cfg.num_deltas + 1))
-            world.inc_at(arr, pos, delta)
-            return _stmt("INCAT", array_token(arr), index_token(pos), delta_token(delta - 1))
-    arr = int(rng.choice(allowed))
-    vals = [int(rng.integers(0, cfg.num_values)) for _ in range(cfg.array_width)]
-    world.define(arr, vals)
-    return _stmt("DEFARR", array_token(arr), *(value_token(v) for v in vals))
-
-
-def _build_level1_relevant(world: ScalarWorld, cfg: GeneratorConfig, rng) -> Tuple[List[List[str]], List[str], str, List[int]]:
-    pool = list(range(cfg.num_entities))
-    root, query = _pick_distinct(rng, pool, 2)
-    mids = _pick_distinct(rng, [e for e in pool if e not in {root, query}], int(rng.integers(0, 3)))
-    val0 = int(rng.integers(0, cfg.num_values))
-    ops: List[List[str]] = []
-    world.define(root, val0)
-    ops.append(_stmt("DEF", entity_token(root), value_token(val0)))
-    current_value = val0
-    if rng.random() < 0.9:
-        new_val = int(rng.integers(0, cfg.num_values))
-        world.set_value(root, new_val)
-        current_value = new_val
-        ops.append(_stmt("SET", entity_token(root), value_token(new_val)))
-    chain = [query, *mids, root]
-    for src, dst in zip(chain[:-1], chain[1:]):
-        world.alias(src, dst)
-        ops.append(_stmt("ALIAS", entity_token(src), entity_token(dst)))
-    query_tokens = ["ASK", entity_token(query)]
-    return ops, query_tokens, value_token(current_value), [root, query, *mids]
-
-
-def _build_level2_relevant(world: ScalarWorld, cfg: GeneratorConfig, rng) -> Tuple[List[List[str]], List[str], str, List[int]]:
-    pool = list(range(cfg.num_entities))
-    root_a, root_b, query = _pick_distinct(rng, pool, 3)
-    ops: List[List[str]] = []
-    va = int(rng.integers(0, cfg.num_values))
-    vb = int(rng.integers(0, cfg.num_values))
-    world.define(root_a, va)
-    world.define(root_b, vb)
-    ops.append(_stmt("DEF", entity_token(root_a), value_token(va)))
-    ops.append(_stmt("DEF", entity_token(root_b), value_token(vb)))
-    num_updates = int(rng.integers(2, 6))
-    for _ in range(num_updates):
-        op = str(rng.choice(["SET", "INC", "DEC", "SWAP"]))
-        if op == "SET":
-            ent = int(rng.choice([root_a, root_b]))
-            val = int(rng.integers(0, cfg.num_values))
-            world.set_value(ent, val)
-            ops.append(_stmt("SET", entity_token(ent), value_token(val)))
-        elif op == "INC":
-            ent = int(rng.choice([root_a, root_b]))
-            delta = int(rng.integers(1, cfg.num_deltas + 1))
-            world.inc(ent, delta)
-            ops.append(_stmt("INC", entity_token(ent), delta_token(delta - 1)))
-        elif op == "DEC":
-            ent = int(rng.choice([root_a, root_b]))
-            delta = int(rng.integers(1, cfg.num_deltas + 1))
-            world.dec(ent, delta)
-            ops.append(_stmt("DEC", entity_token(ent), delta_token(delta - 1)))
-        else:
-            world.swap(root_a, root_b)
-            ops.append(_stmt("SWAP", entity_token(root_a), entity_token(root_b)))
-    if rng.random() < 0.8:
-        target = int(rng.choice([root_a, root_b]))
-        world.alias(query, target)
-        ops.append(_stmt("ALIAS", entity_token(query), entity_token(target)))
-        ask_ent = query
-    else:
-        ask_ent = int(rng.choice([root_a, root_b]))
-    answer = value_token(world.get_value(ask_ent))
-    query_tokens = ["ASK", entity_token(ask_ent)]
-    return ops, query_tokens, answer, [root_a, root_b, query]
-
-
-def _build_level3_relevant(world: ArrayWorld, cfg: GeneratorConfig, rng) -> Tuple[List[List[str]], List[str], str, List[int]]:
-    arr = int(rng.integers(0, cfg.num_arrays))
-    vals = [int(rng.integers(0, cfg.num_values)) for _ in range(cfg.array_width)]
-    ops: List[List[str]] = []
-    world.define(arr, vals)
-    ops.append(_stmt("DEFARR", array_token(arr), *(value_token(v) for v in vals)))
-    num_updates = int(rng.integers(2, 6))
-    for _ in range(num_updates):
-        op = str(rng.choice(["SETAT", "SWAPAT", "INCAT"]))
-        if op == "SETAT":
-            idx = int(rng.integers(0, cfg.array_width))
-            value = int(rng.integers(0, cfg.num_values))
-            world.set_at(arr, idx, value)
-            ops.append(_stmt("SETAT", array_token(arr), index_token(idx), value_token(value)))
-        elif op == "SWAPAT":
-            left, right = _pick_distinct(rng, list(range(cfg.array_width)), 2)
-            world.swap_at(arr, left, right)
-            ops.append(_stmt("SWAPAT", array_token(arr), index_token(left), index_token(right)))
-        else:
-            idx = int(rng.integers(0, cfg.array_width))
-            delta = int(rng.integers(1, cfg.num_deltas + 1))
-            world.inc_at(arr, idx, delta)
-            ops.append(_stmt("INCAT", array_token(arr), index_token(idx), delta_token(delta - 1)))
-    ask_idx = int(rng.integers(0, cfg.array_width))
-    answer = value_token(world.get_at(arr, ask_idx))
-    query_tokens = ["GET", array_token(arr), index_token(ask_idx)]
-    return ops, query_tokens, answer, [arr]
+    fallback_name = available_names[0] if available_names else world.primary_name(target_entity)
+    if fallback_name not in used_names and available_names:
+        entity_id = world.create_entity(fallback_name)
+        value = str(relation.values[int(rng.integers(0, len(relation.values)))])
+        world.link(entity_id, relation.key, value)
+        return _render_link(relation, fallback_name, value, rng), {fallback_name}
+    return _render_filler_note(world.primary_name(target_entity), rng), set()
 
 
 def generate_example(cfg: GeneratorConfig, rng) -> Dict[str, object]:
-    prompt_budget = max(32, min(cfg.context_length - 8, int(cfg.context_length * cfg.fill_ratio)))
-    user_tokens: List[str] = ["LEVEL", f"L{cfg.level}", "PROGRAM"]
-    if cfg.level in {1, 2}:
-        world = ScalarWorld(cfg.num_entities, cfg.num_values)
-        if cfg.level == 1:
-            relevant_ops, query_tokens, answer, reserved = _build_level1_relevant(world, cfg, rng)
-        else:
-            relevant_ops, query_tokens, answer, reserved = _build_level2_relevant(world, cfg, rng)
-        filler_fn = lambda: _random_scalar_distractor(
-            world,
-            [e for e in range(cfg.num_entities) if e not in reserved],
-            cfg.level,
-            cfg,
-            rng,
-        )
-    else:
-        world = ArrayWorld(cfg.num_arrays, cfg.num_values, cfg.array_width)
-        relevant_ops, query_tokens, answer, reserved = _build_level3_relevant(world, cfg, rng)
-        filler_fn = lambda: _random_array_distractor(
-            world,
-            [a for a in range(cfg.num_arrays) if a not in reserved],
-            cfg,
-            rng,
-        )
+    world, relation, query_name, relevant_sentences, evidence_indices, question, answer, used_names = _build_relevant_story(cfg, rng)
+    target_entity = world.resolve(query_name)
+    target_tokens = max(48, min(cfg.context_length - 1, int(cfg.context_length * cfg.fill_ratio)))
 
-    tail_query = ["QUERY", *query_tokens]
-    base_program_tokens = len(user_tokens) + sum(len(stmt) for stmt in relevant_ops) + len(tail_query)
-    target_fill = max(0, prompt_budget - base_program_tokens)
-    section_weights = [1 for _ in relevant_ops] + [max(3, len(relevant_ops) * 2)]
-    total_weight = sum(section_weights)
-    sections: List[List[str]] = [[] for _ in section_weights]
-
-    for section_idx, weight in enumerate(section_weights):
-        budget = (target_fill * weight) // max(total_weight, 1)
-        while True:
-            candidate = filler_fn()
-            if len(sections[section_idx]) + len(candidate) > budget:
+    sections: list[list[str]] = [[] for _ in range(len(relevant_sentences) + 1)]
+    fill_events = 0
+    attempts = 0
+    while fill_events < cfg.max_fill_events and attempts < cfg.max_fill_events * 8:
+        attempts += 1
+        candidate, new_names = _build_filler_event(world, relation, used_names, target_entity, cfg, rng)
+        section_idx = int(rng.integers(0, len(sections)))
+        proposal = sections[section_idx] + [candidate]
+        proposal_sections = [list(block) for block in sections]
+        proposal_sections[section_idx] = proposal
+        ordered: list[str] = []
+        for idx, sentence in enumerate(relevant_sentences):
+            ordered.extend(proposal_sections[idx])
+            ordered.append(sentence)
+        ordered.extend(proposal_sections[-1])
+        context = " ".join(ordered)
+        text = f"Context: {context} Question: {question} Answer: {answer}"
+        if len(surface_tokens(text)) > target_tokens:
+            if fill_events >= cfg.min_fill_events:
                 break
-            sections[section_idx].extend(candidate)
+            continue
+        sections = proposal_sections
+        used_names.update(new_names)
+        fill_events += 1
 
-    for idx, stmt in enumerate(relevant_ops):
-        user_tokens.extend(sections[idx])
-        user_tokens.extend(stmt)
-    user_tokens.extend(sections[-1])
-    user_tokens.extend(tail_query)
+    ordered_sentences: list[str] = []
+    shifted_evidence_indices: list[int] = []
+    for idx, sentence in enumerate(relevant_sentences):
+        ordered_sentences.extend(sections[idx])
+        ordered_sentences.append(sentence)
+        shifted_evidence_indices.append(len(ordered_sentences) - 1)
+    ordered_sentences.extend(sections[-1])
+
+    context = " ".join(ordered_sentences)
+    text = f"Context: {context} Question: {question} Answer: {answer}"
+    tokens = surface_tokens(text)
+    if answer not in set(relation.values):
+        raise ValueError(f"Answer must come from relation value set, got {answer}")
+    if not tokens or tokens[-1] != answer:
+        raise ValueError("Expected answer token to be the final token")
 
     messages = [
-        {"role": "user", "content": " ".join(user_tokens)},
-        {"role": "assistant", "content": f"ANS {answer}"},
+        {"role": "user", "content": f"Context: {context} Question: {question}"},
+        {"role": "assistant", "content": f"Answer: {answer}"},
     ]
-    flat_tokens = [*user_tokens, "ANS", answer]
     return {
         "messages": messages,
-        "text": " ".join(flat_tokens),
+        "context": context,
+        "question": question,
+        "text": text,
         "answer": answer,
-        "answer_token_index": len(flat_tokens) - 1,
+        "answer_token_index": len(tokens) - 1,
         "level": cfg.level,
         "context_length": cfg.context_length,
-        "prompt_tokens": len(user_tokens),
+        "genre": "admin_record",
+        "relation_key": relation.key,
+        "query_name": query_name,
+        "prompt_tokens": len(tokens) - 1,
+        "evidence_sentence_indices": shifted_evidence_indices,
+        "latent_world": {
+            "ops": world.ops,
+            "query": ["ASK", query_name, relation.key],
+        },
     }
 
 
@@ -463,7 +419,7 @@ def render_messages(messages: Sequence[Dict[str, str]]) -> Tuple[str, List[Tuple
     spans: List[Tuple[int, int]] = []
     offset = 0
     for message in messages:
-        prefix = ROLE_PREFIX.format(role=message["role"])
+        prefix = f"@{message['role']}"
         parts.append(prefix)
         offset += len(prefix)
         parts.append(" ")
@@ -473,8 +429,8 @@ def render_messages(messages: Sequence[Dict[str, str]]) -> Tuple[str, List[Tuple
         end = offset + len(content)
         if message["role"] == "assistant":
             spans.append((offset, end))
-        parts.append(TURN_SUFFIX)
-        offset = end + len(TURN_SUFFIX)
+        parts.append(" SEP")
+        offset = end + 4
     return "".join(parts), spans
 
 

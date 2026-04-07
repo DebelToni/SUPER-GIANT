@@ -48,7 +48,7 @@ def _load_model(cfg: OmegaConf, vocab_size: int) -> GiantGPT:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Teacher-forced LongDSL exact-match evaluator")
+    parser = argparse.ArgumentParser(description="Teacher-forced Long hidden-world exact-match evaluator")
     parser.add_argument("--config", required=True)
     parser.add_argument("--global_config", default=None)
     parser.add_argument("--checkpoint", default="latest")
@@ -110,8 +110,8 @@ def main() -> None:
         total += 1
 
     accuracy = (correct / total) if total else 0.0
-    print(f"[longdsl-eval] checkpoint={ckpt_path}")
-    print(f"[longdsl-eval] total={total} correct={correct} accuracy={accuracy:.4f}")
+    print(f"[long-eval] checkpoint={ckpt_path}")
+    print(f"[long-eval] total={total} correct={correct} accuracy={accuracy:.4f}")
 
 
 if __name__ == "__main__":

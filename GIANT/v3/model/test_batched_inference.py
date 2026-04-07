@@ -35,6 +35,7 @@ def build_model(cfg: OmegaConf, vocab_size: int) -> GiantGPT:
         dropout_rate=0.0,
         use_remat=bool(cfg.use_remat),
         enable_xsa=bool(cfg.enable_xsa),
+        causal=bool(getattr(cfg, "causal", True)),
     )
 
 

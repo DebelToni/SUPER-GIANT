@@ -236,6 +236,7 @@ def build_model(cfg: GenerateFasterConfig, vocab_size: int, context_length: int)
         compute_dtype=model_cfg.compute_dtype,
         use_remat=bool(model_cfg.use_remat),
         enable_xsa=bool(model_cfg.enable_xsa),
+        causal=bool(getattr(model_cfg, "causal", True)),
     )
 
 

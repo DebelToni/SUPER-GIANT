@@ -1,0 +1,395 @@
+person_names:
+  - Mira
+  - Lina
+  - Oren
+  - Tali
+  - Risa
+  - Pavel
+  - Vera
+  - Kian
+  - Jora
+  - Elin
+  - Niko
+  - Selma
+  - Ilan
+  - Mina
+  - Daren
+  - Sora
+  - Nadia
+  - Toren
+  - Luca
+  - Kora
+  - Bram
+  - Ravi
+  - Esra
+  - Noel
+  - Asha
+  - Romi
+  - Celia
+  - Arin
+  - Jalen
+  - Toma
+  - Iris
+  - Marek
+  - Petra
+  - Yara
+  - Sven
+  - Dima
+  - Lea
+  - Tarin
+  - Milo
+  - Veda
+  - Soren
+  - Liora
+  - Karin
+  - Tavin
+  - Mirah
+  - Doran
+  - Naren
+  - Kiera
+  - Brin
+  - Olsa
+  - Riven
+  - Calen
+  - Tessa
+  - Ivor
+  - Nalin
+  - Pera
+  - Sivan
+  - Jorin
+  - Laren
+  - Vesna
+  - Orin
+  - Kessa
+  - Darin
+  - Mela
+  - Rovan
+  - Nera
+  - Kalen
+  - Tema
+  - Laris
+  - Yorin
+  - Varo
+  - Selin
+  - Daro
+  - Kiva
+  - Mave
+  - Ralen
+  - Sorin
+  - Kedra
+  - Maro
+  - Vesa
+  - Caro
+  - Teren
+  - Luma
+  - Reni
+alias_names:
+  - Nerisq
+  - Oris
+  - Varen
+  - Nima
+  - Jessor
+  - Temi
+  - Seli
+  - Kivo
+  - Novan
+  - Vian
+  - Petrax
+  - Leris
+  - Kedro
+  - Maren
+  - Velor
+  - Joren
+  - Carin
+  - Talen
+  - Liorax
+  - Renik
+  - Saven
+  - Neris
+  - Kalenx
+  - Varoq
+  - Orlan
+  - Varek
+  - Nimor
+  - Jessa
+  - Rovanx
+  - Temar
+  - Dalen
+  - Keris
+  - Molen
+  - Sarin
+  - Veya
+  - Tovan
+  - Lerin
+  - Pavin
+  - Solen
+  - Navin
+  - Karo
+  - Beren
+  - Olsaq
+  - Rivenx
+  - Calix
+  - Tessaq
+  - Ivran
+  - Perin
+  - Sivar
+  - Vesra
+  - Orlen
+  - Kessan
+  - Darox
+  - Melor
+  - Yorin
+  - Selor
+  - Kivan
+  - Mavor
+  - Ralor
+time_markers:
+  - Earlier
+  - Later
+  - Afterward
+  - That morning
+  - By evening
+  - During review
+  - Overnight
+  - Near midday
+  - Before dawn
+  - In the late shift
+  - At handoff
+  - By the next audit
+record_sources:
+  - archive
+  - registry
+  - audit sheet
+  - shift ledger
+  - handover log
+  - intake file
+  - dispatch board
+  - routing sheet
+  - incident file
+  - watch roster
+  - transfer book
+  - review ledger
+departments:
+  - north wing
+  - intake desk
+  - night shift
+  - review desk
+  - records office
+  - field unit
+  - west annex
+  - dispatch cell
+  - triage bay
+  - archive room
+  - staging area
+  - transit desk
+relations:
+  locker:
+    values:
+      - '11'
+      - '12'
+      - '13'
+      - '14'
+      - '15'
+      - '16'
+      - '17'
+      - '18'
+      - '19'
+      - '20'
+      - '21'
+      - '22'
+      - '23'
+      - '24'
+      - '25'
+      - '26'
+      - '27'
+      - '28'
+      - '29'
+      - '30'
+      - '31'
+      - '32'
+      - '33'
+      - '34'
+      - '35'
+      - '36'
+      - '37'
+      - '38'
+      - '39'
+      - '40'
+      - '41'
+      - '42'
+      - '43'
+      - '44'
+      - '45'
+      - '46'
+      - '47'
+    link_templates:
+      - '{name} was assigned locker {value}.'
+      - The locker listed for {name} was {value}.
+      - Records show {name} using locker {value}.
+      - The intake card placed {name} in locker {value}.
+      - The storage roster tied {name} to locker {value}.
+      - Locker {value} was logged under {name}.
+    update_templates:
+      - A later update moved {name} to locker {value}.
+      - The current locker for {name} became {value}.
+      - Later notes placed {name} in locker {value}.
+      - A revision reassigned {name} to locker {value}.
+      - The latest file entry linked {name} with locker {value}.
+      - After review, {name} was refiled under locker {value}.
+    question_templates:
+      - Which locker is currently associated with {word}?
+      - According to the record, which locker belongs to {word}?
+      - What is the current locker number for {word}?
+      - Which locker does the file now assign to {word}?
+      - In the latest record, what locker is tied to {word}?
+      - Which locker should be retrieved for {word} now?
+  room:
+    values:
+      - R12
+      - R14
+      - R16
+      - R18
+      - R21
+      - R24
+      - R27
+      - R31
+      - R33
+      - R36
+      - R41
+      - R45
+      - R48
+      - R52
+    link_templates:
+      - '{name} was assigned room {value}.'
+      - The room entry for {name} was {value}.
+      - Records place {name} in room {value}.
+      - The housing sheet listed {name} in room {value}.
+      - Room {value} appeared under {name} in the file.
+      - The site record mapped {name} to room {value}.
+    update_templates:
+      - A later note reassigned {name} to room {value}.
+      - The current room for {name} became {value}.
+      - Later documentation moved {name} into room {value}.
+      - A revision shifted {name} to room {value}.
+      - The latest room ledger put {name} in {value}.
+      - After review, the file moved {name} to room {value}.
+    question_templates:
+      - Which room is currently listed for {word}?
+      - According to the record, what room belongs to {word}?
+      - What is the current room for {word}?
+      - Which room does the latest note assign to {word}?
+      - What room should the file return for {word} now?
+      - In the current record, which room is tied to {word}?
+  role:
+    values:
+      - analyst
+      - archivist
+      - auditor
+      - clerk
+      - coordinator
+      - courier
+      - dispatcher
+      - medic
+      - operator
+      - planner
+      - reviewer
+      - runner
+      - scout
+      - supervisor
+      - technician
+      - warden
+    link_templates:
+      - The duty list marked {name} as {value}.
+      - '{name} served as {value}.'
+      - Records show {name} in the role of {value}.
+      - The assignment sheet logged {name} as {value}.
+      - The current roster filed {name} under {value}.
+      - The team board listed {name} as {value}.
+    update_templates:
+      - A later update changed the role for {name} to {value}.
+      - The current duty for {name} became {value}.
+      - Later notes reassigned {name} as {value}.
+      - A revision placed {name} in the role of {value}.
+      - The latest staffing note marked {name} as {value}.
+      - After handoff, {name} was recorded as {value}.
+    question_templates:
+      - What role is currently listed for {word}?
+      - According to the record, what duty belongs to {word}?
+      - Which role is associated with {word} now?
+      - What role does the latest file assign to {word}?
+      - Which duty should be returned for {word} now?
+      - In the current roster, what role belongs to {word}?
+  status:
+    values:
+      - active
+      - archived
+      - cleared
+      - flagged
+      - frozen
+      - held
+      - locked
+      - paused
+      - pending
+      - queued
+      - ready
+      - review
+      - standby
+      - tracked
+      - verified
+      - watch
+    link_templates:
+      - The current status for {name} was {value}.
+      - '{name} was marked as {value}.'
+      - Records show the status for {name} as {value}.
+      - The status field listed {name} as {value}.
+      - The case file marked {name} {value}.
+      - The monitoring sheet recorded {name} as {value}.
+    update_templates:
+      - A later update changed the status for {name} to {value}.
+      - The current status for {name} became {value}.
+      - Later notes marked {name} as {value}.
+      - A revision set the status for {name} to {value}.
+      - The latest status note recorded {name} as {value}.
+      - After review, {name} was updated to {value}.
+    question_templates:
+      - What status is currently associated with {word}?
+      - According to the record, what status belongs to {word}?
+      - Which current status is listed for {word}?
+      - What status does the latest entry assign to {word}?
+      - Which status should the file return for {word} now?
+      - In the current record, what status is tied to {word}?
+alias_templates:
+  - The secondary profile {alias} refers to {target}.
+  - In the registry, {alias} is another label for {target}.
+  - '{alias} appears as an alternate name for {target}.'
+  - The record notes that {alias} points to {target}.
+  - Clerical notes treat {alias} as the same profile as {target}.
+  - Within the file, {alias} is used as another identifier for {target}.
+  - The archive cross-listed {alias} under {target}.
+  - Intake annotations mapped {alias} back to {target}.
+  - The handoff note treated {alias} as a reference to {target}.
+  - Dispatch records used {alias} as another name for {target}.
+  - A marginal note linked {alias} with {target}.
+  - The review sheet resolved {alias} to {target}.
+filler_templates:
+  - The archive kept a separate entry for {name}.
+  - A routine note also mentioned {name}.
+  - The daily registry still included {name}.
+  - A short log entry referenced {name} without changing any assignment.
+  - The handover sheet mentioned {name} in passing.
+  - A records clerk reviewed the file for {name}.
+  - The review queue briefly listed {name}.
+  - The incident desk logged a routine mention of {name}.
+  - The watch roster carried {name} without a new update.
+  - A transfer note cited {name} but changed nothing else.
+  - The routing slip mentioned {name} as background context.
+  - The case file repeated the name {name} with no new action.
+rich_filler_templates:
+  - '{time_marker}, the {source} still listed {name} under {department}.'
+  - A note from the {department} mentioned {name} but added no new assignment.
+  - The {source} carried a routine check-in for {name}.
+  - '{name} appeared again in the {source} during a routine review.'
+  - '{time_marker}, the {department} log repeated {name} with no new value attached.'
+  - The {source} from {department} flagged a routine mention of {name} only.
+  - A clerical note in the {source} kept {name} visible to the {department}.
+  - '{time_marker}, {name} remained referenced in the {source} for {department} review.'

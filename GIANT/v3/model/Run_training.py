@@ -333,7 +333,7 @@ def build_optimizer(
         init_value=0.0,
         peak_value=cfg.optimizer.base_learning_rate,
         warmup_steps=warmup_updates,
-        decay_steps=total_update_steps - warmup_updates,
+        decay_steps=total_update_steps,
         end_value=cfg.optimizer.min_learning_rate,
     )
     exclusions = cfg.optimizer.get("weight_decay_exclusions", [])
@@ -648,6 +648,8 @@ def _launch_async_upload(
         return
 
     s3_uri = _s3_uri_for_local_path(local_path)
+    if local_path.is_dir() and not s3_uri.endswith("/"):
+        s3_uri = f"{s3_uri}/"
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time())
     log_path = log_dir / f"{label}_{stamp}.log"
@@ -688,6 +690,7 @@ def parse_args() -> argparse.Namespace:
     cli.add_argument("--checkpoint_dir", default="checkpoints")
     cli.add_argument("--checkpoint_every", type=int, default=None)
     cli.add_argument("--resume", nargs="?", const="latest", default=None)
+    cli.add_argument("--init_checkpoint", type=str, default=None)
     cli.add_argument(
         "--scan_chunk",
         type=int,
@@ -780,6 +783,8 @@ def main() -> None:
     rotary_dim = int(cfg.model.rope_dim)
     use_remat = bool(cfg.model.use_remat)
     enable_xsa = bool(cfg.model.enable_xsa)
+    causal = bool(cfg.model.get("causal", True))
+    mask_answer_token_for_encoder = bool(cfg.model.get("mask_answer_token_for_encoder", False))
     param_dtype = _to_dtype(cfg.model.param_dtype)
     compute_dtype = _to_dtype(cfg.model.compute_dtype)
     model = GiantGPT(
@@ -796,6 +801,8 @@ def main() -> None:
         compute_dtype=compute_dtype,
         use_remat=use_remat,
         enable_xsa=enable_xsa,
+        causal=causal,
+        mask_answer_token_for_encoder=mask_answer_token_for_encoder,
     )
 
     rng = jax.random.PRNGKey(seed)
@@ -857,7 +864,11 @@ def main() -> None:
     current_stage_idx = 0
     stage_step_total = 0
 
+    if args.resume is not None and args.init_checkpoint is not None:
+        raise ValueError("Use either --resume or --init_checkpoint, not both.")
+
     resume_request = args.resume
+    init_checkpoint_request = args.init_checkpoint
     if resume_request == "latest":
         opt_state = optimizer.init(params)
     mini_state_template = {
@@ -896,6 +907,10 @@ def main() -> None:
         resume_path = Path(resume_request)
         if not resume_path.is_absolute():
             resume_request = str((base_root / resume_path).resolve())
+    if init_checkpoint_request is not None:
+        init_path = Path(init_checkpoint_request)
+        if not init_path.is_absolute():
+            init_checkpoint_request = str((base_root / init_path).resolve())
 
     if resume_request and not resumed_from_mini:
         if resume_request == "latest_full":
@@ -917,6 +932,12 @@ def main() -> None:
         else:
             print("⚠ No optimizer state found; proceeding with fresh AdamW buffers.")
         print(f"▶ Resumed parameters from {ckpt_path} at step {global_step}")
+    elif init_checkpoint_request is not None:
+        params, _ = load_ckpt(init_checkpoint_request)
+        params = _freeze_if_dict(params)
+        opt_state = optimizer.init(params)
+        global_step = 0
+        print(f"▶ Initialized parameters from {init_checkpoint_request} at step 0")
 
     loader_state = None
     if not resumed_from_mini:
@@ -928,8 +949,23 @@ def main() -> None:
             print(f"▶ Restored dataloader state at stage {current_stage_idx} step {stage_step_total}")
 
     for idx, runtime in enumerate(stage_runtimes):
+        if idx != current_stage_idx:
+            continue
         state_dict = stage_states.get(runtime.config.name, {"epoch": 0, "step_in_epoch": 0})
-        runtime.loader.load_state(state_dict)
+        try:
+            runtime.loader.load_state(state_dict)
+        except Exception as exc:
+            is_current_stage = idx == current_stage_idx
+            if is_current_stage:
+                print(
+                    f"⚠ Failed to restore dataloader state for stage {runtime.config.name} ({exc}); "
+                    "restarting this stage from the beginning."
+                )
+                runtime.loader.load_state({"epoch": 0, "step_in_epoch": 0})
+                stage_states[runtime.config.name] = {"epoch": 0, "step_in_epoch": 0}
+                stage_step_total = 0
+            else:
+                raise
 
     if 0 <= current_stage_idx < len(stage_runtimes):
         current_runtime = stage_runtimes[current_stage_idx]

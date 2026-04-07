@@ -10,7 +10,7 @@ import numpy as np
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
-from GIANT.v3.Long.longdsl import GeneratorConfig, TokenizerSpec, generate_example, save_tokenizer, write_jsonl
+from GIANT.v3.Long.longdsl import GeneratorConfig, TokenizerSpec, generate_example, save_tokenizer, surface_tokens, write_jsonl
 from GIANT.v3.data_pipeline.build_corpus import ShardWriter, _arrow_schema, _pack_loss_mask
 
 
@@ -19,11 +19,17 @@ def _parse_int_list(value: str) -> list[int]:
 
 
 def _dataset_name(level: int, ctx: int) -> str:
-    return f"longdsl_l{level}_ctx{ctx}"
+    return f"longrecords_l{level}_ctx{ctx}"
 
 
 def _num_train_examples(train_tokens_per_context: int, ctx: int) -> int:
     return max(64, math.ceil(train_tokens_per_context / max(1, ctx)))
+
+
+def _resolve_train_examples(args, ctx: int) -> int:
+    if args.train_examples is not None:
+        return max(1, int(args.train_examples))
+    return _num_train_examples(args.train_tokens_per_context, ctx)
 
 
 def _generate_split(cfg: GeneratorConfig, count: int, seed: int) -> list[dict[str, object]]:
@@ -59,7 +65,7 @@ def _write_arrow_stage(
             if not line:
                 continue
             row = json.loads(line)
-            tokens = str(row["text"]).split()
+            tokens = surface_tokens(str(row["text"]))
             ids = tokenizer.convert_tokens_to_ids(tokens)
             if any(int(x) == tokenizer.unk_token_id for x in ids):
                 raise ValueError(f"Unknown token found while encoding {stage_name}")
@@ -96,7 +102,7 @@ def _write_arrow_stage(
         json.dump(
             {
                 "stage": stage_name,
-                "description": "LongDSL custom arrow stage",
+                "description": "Long hidden-world custom arrow stage",
                 "total_records": documents,
                 "total_tokens": total_tokens,
                 "documents": documents,
@@ -116,39 +122,33 @@ def _write_arrow_stage(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare LongGIANT DSL tokenizer and datasets")
+    parser = argparse.ArgumentParser(description="Prepare LongGIANT natural-language hidden-world tokenizer and datasets")
     parser.add_argument("--artifact_root", default="/proj/giant-data/GIANT/Long")
-    parser.add_argument("--contexts", default="512,1024,2048,4096,8192,16384,32768,65536")
+    parser.add_argument("--contexts", default="128,256,512")
     parser.add_argument("--levels", default="1,2")
-    parser.add_argument("--train_tokens_per_context", type=int, default=262_144)
+    parser.add_argument("--train_tokens_per_context", type=int, default=196_608)
+    parser.add_argument("--train_examples", type=int, default=None)
     parser.add_argument("--val_examples", type=int, default=128)
     parser.add_argument("--test_examples", type=int, default=128)
-    parser.add_argument("--fill_ratio", type=float, default=0.92)
-    parser.add_argument("--num_entities", type=int, default=128)
-    parser.add_argument("--num_values", type=int, default=64)
-    parser.add_argument("--num_arrays", type=int, default=32)
-    parser.add_argument("--array_width", type=int, default=4)
-    parser.add_argument("--num_deltas", type=int, default=8)
+    parser.add_argument("--fill_ratio", type=float, default=0.88)
+    parser.add_argument("--min_alias_chain", type=int, default=1)
+    parser.add_argument("--max_alias_chain", type=int, default=3)
+    parser.add_argument("--min_fill_events", type=int, default=4)
+    parser.add_argument("--max_fill_events", type=int, default=48)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--dataset_root", default="/proj/giant-data/GIANT/dataset_artifacts/longdsl")
+    parser.add_argument("--dataset_root", default="/proj/giant-data/GIANT/dataset_artifacts/long_records")
     parser.add_argument("--build_corpus", action="store_true")
     parser.add_argument("--global_config", default="/Users/antonhristov/Documents/ML/SUPER-GIANT/GIANT/v3/Global_Config.yml")
     parser.add_argument("--config_out", default=None)
     args = parser.parse_args()
 
     artifact_root = Path(args.artifact_root)
-    tokenizer_dir = artifact_root / "tokenizers" / "longdsl_wordlevel"
-    raw_root = artifact_root / "raw"
+    tokenizer_dir = artifact_root / "tokenizers" / "long_wordlevel"
+    raw_root = artifact_root / "records" / "raw"
     config_root = artifact_root / "configs"
     config_root.mkdir(parents=True, exist_ok=True)
 
-    spec = TokenizerSpec(
-        num_entities=args.num_entities,
-        num_values=args.num_values,
-        num_arrays=args.num_arrays,
-        array_width=args.array_width,
-        num_deltas=args.num_deltas,
-    )
+    spec = TokenizerSpec()
     save_tokenizer(tokenizer_dir, spec)
 
     contexts = _parse_int_list(args.contexts)
@@ -179,20 +179,24 @@ def main() -> None:
                 level=level,
                 context_length=ctx,
                 fill_ratio=args.fill_ratio,
-                num_entities=args.num_entities,
-                num_values=args.num_values,
-                num_arrays=args.num_arrays,
-                array_width=args.array_width,
-                num_deltas=args.num_deltas,
+                min_alias_chain=args.min_alias_chain,
+                max_alias_chain=args.max_alias_chain,
+                min_fill_events=args.min_fill_events,
+                max_fill_events=args.max_fill_events,
             )
             dataset_name = _dataset_name(level, ctx)
             stage_dir = raw_root / f"level{level}_ctx{ctx}"
-            train_rows = _generate_split(cfg, _num_train_examples(args.train_tokens_per_context, ctx), args.seed + level * 1000 + ctx)
+            train_examples = _resolve_train_examples(args, ctx)
+            train_rows = _generate_split(cfg, train_examples, args.seed + level * 1000 + ctx)
             val_rows = _generate_split(cfg, args.val_examples, args.seed + level * 1000 + ctx + 1)
             test_rows = _generate_split(cfg, args.test_examples, args.seed + level * 1000 + ctx + 2)
             write_jsonl(stage_dir / "train.jsonl", train_rows)
             write_jsonl(stage_dir / "val.jsonl", val_rows)
             write_jsonl(stage_dir / "test.jsonl", test_rows)
+            print(
+                f"[long] level={level} ctx={ctx} train_examples={train_examples} "
+                f"(train_tokens_per_context={args.train_tokens_per_context})"
+            )
 
             corpus_cfg["stages"][dataset_name] = {
                 "output_dir": dataset_name,
@@ -213,10 +217,10 @@ def main() -> None:
                 ],
             }
 
-    config_out = Path(args.config_out) if args.config_out else config_root / "longdsl_datasets.yml"
+    config_out = Path(args.config_out) if args.config_out else config_root / "long_records_datasets.yml"
     OmegaConf.save(config=OmegaConf.create(corpus_cfg), f=str(config_out))
-    print(f"[longdsl] tokenizer -> {tokenizer_dir}")
-    print(f"[longdsl] dataset config -> {config_out}")
+    print(f"[long] tokenizer -> {tokenizer_dir}")
+    print(f"[long] dataset config -> {config_out}")
 
     if args.build_corpus:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, use_fast=True)
@@ -244,7 +248,7 @@ def main() -> None:
                     }
                     stats[stage_name] = stage_stats
                     print(
-                        f"[longdsl] stage={stage_name} docs={stage_stats['documents']} tokens={stage_stats['tokens']} discarded={stage_stats['discarded']}"
+                        f"[long] stage={stage_name} docs={stage_stats['documents']} tokens={stage_stats['tokens']} discarded={stage_stats['discarded']}"
                     )
         with (output_root / "datasets_manifest.json").open("w", encoding="utf-8") as handle:
             json.dump(manifest, handle, indent=2)

@@ -7,44 +7,44 @@ from typing import cast
 import numpy as np
 from transformers import AutoTokenizer
 
-from GIANT.v3.Long.longdsl import GeneratorConfig, TokenizerSpec, generate_example, save_tokenizer
+from GIANT.v3.Long.longdsl import GeneratorConfig, TokenizerSpec, generate_example, save_tokenizer, surface_tokens
 
 
 def test_generate_level1_example() -> None:
     rng = np.random.default_rng(0)
     row = cast(dict[str, object], generate_example(GeneratorConfig(level=1, context_length=128), rng))
-    answer = cast(str, row["answer"])
-    messages = cast(list[dict[str, str]], row["messages"])
-    assert answer.startswith("V")
-    assert messages[0]["role"] == "user"
-    assert messages[1]["role"] == "assistant"
-    assert messages[1]["content"].startswith("ANS ")
+    assert row["genre"] == "admin_record"
+    assert row["relation_key"] in {"locker", "room", "role", "status"}
+    assert cast(str, row["question"]).endswith("?")
+    assert cast(str, row["answer"]) == surface_tokens(cast(str, row["text"]))[cast(int, row["answer_token_index"])]
 
 
-def test_generate_level2_example() -> None:
+def test_generate_level2_example_contains_update_supervision() -> None:
     rng = np.random.default_rng(1)
-    row = cast(dict[str, object], generate_example(GeneratorConfig(level=2, context_length=256), rng))
-    answer = cast(str, row["answer"])
-    messages = cast(list[dict[str, str]], row["messages"])
-    assert answer.startswith("V")
-    assert "QUERY" in messages[0]["content"]
+    row = cast(dict[str, object], generate_example(GeneratorConfig(level=2, context_length=192), rng))
+    latent = cast(dict[str, object], row["latent_world"])
+    ops = cast(list[list[str]], latent["ops"])
+    assert any(op[0] == "SET" for op in ops)
+    assert cast(list[int], row["evidence_sentence_indices"])
 
 
 def test_save_tokenizer_roundtrip() -> None:
     tmp_dir = Path(tempfile.mkdtemp()) / "tok"
     save_tokenizer(tmp_dir, TokenizerSpec())
     tokenizer = AutoTokenizer.from_pretrained(tmp_dir)
-    ids = tokenizer.encode("@user LEVEL L1 PROGRAM DEF E001 V001 SEP QUERY ASK E001", add_special_tokens=False)
+    text = "Context: Mira was assigned locker 18. Question: Which locker is currently associated with Nera? Answer: 18"
+    ids = tokenizer.encode(text, add_special_tokens=False)
     assert ids
     decoded = tokenizer.decode(ids)
-    assert "E001" in decoded
+    assert "Mira" in decoded
+    assert "18" in decoded
 
 
 def main() -> None:
     test_generate_level1_example()
-    test_generate_level2_example()
+    test_generate_level2_example_contains_update_supervision()
     test_save_tokenizer_roundtrip()
-    print("longdsl tests passed")
+    print("long tests passed")
 
 
 if __name__ == "__main__":

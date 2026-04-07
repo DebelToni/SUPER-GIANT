@@ -1,1 +1,1 @@
-"""LongGIANT synthetic DSL utilities."""
+"""LongGIANT hidden-world natural-language utilities."""

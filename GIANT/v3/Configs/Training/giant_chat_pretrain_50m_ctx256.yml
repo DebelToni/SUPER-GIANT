@@ -1,0 +1,69 @@
+global_seed: 0
+
+model:
+  embedding_size: 512
+  num_heads: 8
+  num_kv_heads: 8
+  num_layers: 12
+  feed_forward_size: 2048
+  rope_dim: 64
+  context_length: 256
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  enable_xsa: true
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tokenizer:
+  name: unused
+  cache_dir: /proj/giant-data/hf_cache/tokenizer_cache
+  use_custom: true
+  custom_path: /proj/giant-data/GIANT/GIANT-Chat/tokenizers/giant_chat_bpe16k
+  pad_token_override: null
+
+optimizer:
+  base_learning_rate: 0.0003
+  min_learning_rate: 3.0e-05
+  warmup_tokens: 20000000
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
+
+training:
+  batch_size: 32
+  gradient_accumulation: 1
+  seed: 0
+  log_every: 50
+  checkpoint_every: 2000
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 2
+  scan_chunk: 4
+  prefetch_size: 4
+  nan_check: false
+  autotune_scan_chunk: false
+  autotune_prefetch: false
+
+stages:
+  - name: pretrain_main
+    dataset: pretrain_main
+    seq_len: 256
+    epochs: 1
+    fraction: 1.0
+    shuffle: true
+
+qa_finetune: {}
+
+paths:
+  data_root: "/proj/giant-data"
+  processed_data_root: "/proj/giant-data/GIANT/GIANT-Chat/data/pretraining"
+  dataloader_state_root: "/proj/giant-data/GIANT/GIANT-Chat/training/pretrain_50m_ctx256/training_states/dataloader_state"
+  logs_root: "/proj/giant-data/GIANT/GIANT-Chat/training/pretrain_50m_ctx256/logs"
+  checkpoints_root: "/proj/giant-data/GIANT/GIANT-Chat/training/pretrain_50m_ctx256"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+inference:
+  stop_on_eos: true

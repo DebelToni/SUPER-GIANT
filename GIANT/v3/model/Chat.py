@@ -15,7 +15,10 @@ from transformers import AutoTokenizer
 from GIANT.v3.model.GiantGPT import GiantGPT
 from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
 from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
-from GIANT.v3.device_utils import select_default_device
+try:
+    from GIANT.v3.device_utils import select_default_device
+except ImportError:  # pragma: no cover - temporary fallback for dirty worktrees
+    from GIANT.v3.tests.device_utils import select_default_device
 
 
 def load_configs() -> OmegaConf:

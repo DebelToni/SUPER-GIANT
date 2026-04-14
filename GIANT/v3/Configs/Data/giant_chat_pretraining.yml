@@ -1,0 +1,40 @@
+tokenizer:
+  name: "unused"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+  use_custom: true
+  custom_path: "/proj/giant-data/GIANT/GIANT-Chat/tokenizers/giant_chat_bpe16k"
+
+paths:
+  data_root: "/proj/giant-data"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+outputs:
+  processed_root: "/proj/giant-data/GIANT/GIANT-Chat/data/pretraining"
+  rows_per_shard: 65536
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 4212
+  write_batch_size: 256
+  dry_run_preview_rows: 200
+
+stages:
+  pretrain_main:
+    description: "ClimbMix pretraining subset at 256 tokens for the 50M GIANT chat run"
+    output_dir: "pretrain_main"
+    sequence_length: 256
+    target_tokens: 1100000000
+    min_tokens: 32
+    pack_sequences: true
+    add_eos: true
+    deduplicate: false
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "karpathy/climbmix-400b-shuffle"
+        split: "train"
+        streaming: false
+        text_field: "text"

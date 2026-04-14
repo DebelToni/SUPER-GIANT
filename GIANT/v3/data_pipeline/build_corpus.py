@@ -103,6 +103,8 @@ class StageSourceCfg:
     chat_assistant_roles: List[str] = field(default_factory=lambda: ["assistant"])
     chat_role_prefix: str = "### {role}\n"
     chat_turn_suffix: str = "\n"
+    chat_loss_on_prefix: bool = False
+    chat_loss_on_suffix: bool = False
 
 
 @dataclass
@@ -342,6 +344,23 @@ def load_tokenizer(tok_cfg: TokenizerCfg) -> PreTrainedTokenizerBase:
         else:
             tokenizer.add_special_tokens({"pad_token": "<pad>"})
     return tokenizer
+
+
+def _tokenize_text(tokenizer: PreTrainedTokenizerBase, text: str) -> List[int]:
+    encode = getattr(tokenizer, "encode", None)
+    if callable(encode):
+        return [int(tok) for tok in encode(text, add_special_tokens=False)]
+    batch = tokenizer(
+        [text],
+        add_special_tokens=False,
+        padding=False,
+        truncation=False,
+        return_attention_mask=False,
+    )
+    input_ids = batch["input_ids"]
+    if not input_ids:
+        return []
+    return [int(tok) for tok in input_ids[0]]
 
 
 class SequenceEmitter:
@@ -694,6 +713,62 @@ def _build_chat_text_and_spans(
     return full_text, spans
 
 
+def _encode_chat_messages(
+    row: Dict[str, Any],
+    source: StageSourceCfg,
+    tokenizer: PreTrainedTokenizerBase,
+    norm: Optional[SimpleNamespace] = None,
+) -> Optional[Tuple[List[int], List[float], str]]:
+    messages = row.get(source.chat_messages_field)
+    if not isinstance(messages, list):
+        return None
+
+    all_tokens: List[int] = []
+    all_mask: List[float] = []
+    text_parts: List[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get(source.chat_role_field)
+        content = message.get(source.chat_content_field)
+        if not isinstance(content, str) or not content.strip():
+            continue
+
+        role_str = str(role) if role is not None else ""
+        content_str = content.strip()
+        if norm is not None:
+            content_str = normalise_text(content_str, norm)
+        if not content_str:
+            continue
+
+        is_assistant = role_str in source.chat_assistant_roles
+        prefix_text = source.chat_role_prefix.format(role=role_str)
+        suffix_text = source.chat_turn_suffix
+        prefix_tokens = _tokenize_text(tokenizer, prefix_text)
+        content_tokens = _tokenize_text(tokenizer, content_str)
+        suffix_tokens = _tokenize_text(tokenizer, suffix_text)
+
+        text_parts.extend([prefix_text, content_str, suffix_text])
+
+        all_tokens.extend(prefix_tokens)
+        all_mask.extend([
+            1.0 if (is_assistant and source.chat_loss_on_prefix) else 0.0
+        ] * len(prefix_tokens))
+
+        all_tokens.extend(content_tokens)
+        all_mask.extend([1.0 if is_assistant else 0.0] * len(content_tokens))
+
+        all_tokens.extend(suffix_tokens)
+        all_mask.extend([
+            1.0 if (is_assistant and source.chat_loss_on_suffix) else 0.0
+        ] * len(suffix_tokens))
+
+    full_text = "".join(text_parts)
+    if not all_tokens or not full_text.strip():
+        return None
+    return all_tokens, all_mask, full_text
+
+
 def _load_dataset_lazy(*args, **kwargs):
     from datasets import load_dataset as hf_load_dataset
 
@@ -807,6 +882,14 @@ def iter_stage_rows(
 
     batch_texts: List[str] = []
     batch_spans: List[Optional[List[Tuple[int, int]]]] = []
+
+    def flush_text_batch() -> Iterator[Dict[str, Any]]:
+        if not batch_texts or emitter.done:
+            return
+        yield from emitter.encode_batch_with_mask(batch_texts, batch_spans)
+        batch_texts.clear()
+        batch_spans.clear()
+
     doc_limit = stage.max_documents
     for source, row in iter_stage_rows_raw(stage):
         if emitter.done:
@@ -816,7 +899,16 @@ def iter_stage_rows(
         if not isinstance(row, dict):
             continue
         stats.documents += 1
-        chat_payload = _build_chat_text_and_spans(row, source, norm if stage.normalization else None)
+        text: Optional[str] = None
+        spans: Optional[List[Tuple[int, int]]] = None
+        tokens: Optional[List[int]] = None
+        loss_mask: Optional[List[float]] = None
+        chat_payload = _encode_chat_messages(
+            row,
+            source,
+            tokenizer,
+            norm if stage.normalization else None,
+        )
         if chat_payload is None:
             text = _extract_text(row, source)
             spans = None
@@ -831,9 +923,8 @@ def iter_stage_rows(
                 stats.discarded += 1
                 continue
         else:
-            text, spans = chat_payload
-            text = text.strip()
-            if not text:
+            tokens, loss_mask, text = chat_payload
+            if not tokens:
                 stats.discarded += 1
                 continue
         if stage.deduplicate:
@@ -851,14 +942,18 @@ def iter_stage_rows(
                     if old in seen_hashes:
                         seen_hashes.remove(old)
         stats.unique_documents += 1
+        if chat_payload is not None:
+            yield from flush_text_batch()
+            assert tokens is not None and loss_mask is not None
+            yield from emitter.consume_tokens_with_mask(tokens, loss_mask)
+            continue
+        assert text is not None
         batch_texts.append(text)
         batch_spans.append(spans)
         if len(batch_texts) >= batch_size:
-            yield from emitter.encode_batch_with_mask(batch_texts, batch_spans)
-            batch_texts.clear()
-            batch_spans.clear()
+            yield from flush_text_batch()
     if batch_texts and not emitter.done:
-        yield from emitter.encode_batch_with_mask(batch_texts, batch_spans)
+        yield from flush_text_batch()
     if not emitter.done:
         yield from emitter.flush_remainder()
 
@@ -1012,6 +1107,8 @@ def _parse_stage_sources(raw_sources: Iterable[Any]) -> List[StageSourceCfg]:
             chat_assistant_roles=list(src_dict.get("chat_assistant_roles", ["assistant"]) or ["assistant"]),
             chat_role_prefix=str(src_dict.get("chat_role_prefix", "### {role}\n")),
             chat_turn_suffix=str(src_dict.get("chat_turn_suffix", "\n")),
+            chat_loss_on_prefix=bool(src_dict.get("chat_loss_on_prefix", False)),
+            chat_loss_on_suffix=bool(src_dict.get("chat_loss_on_suffix", False)),
         )
         sources.append(cfg)
     return sources

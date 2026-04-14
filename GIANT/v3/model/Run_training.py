@@ -39,7 +39,10 @@ from GIANT.v3.model.checkpoint_manager import (
     set_npz_metadata,
 )
 from GIANT.v3.model.optimizer_utils import create_weight_decay_mask
-from GIANT.v3.device_utils import select_default_device
+try:
+    from GIANT.v3.device_utils import select_default_device
+except ImportError:  # pragma: no cover - temporary fallback for dirty worktrees
+    from GIANT.v3.tests.device_utils import select_default_device
 from flax import core as flax_core
 from flax import jax_utils as flax_jax_utils
 from flax import serialization

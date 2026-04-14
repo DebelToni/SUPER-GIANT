@@ -21,6 +21,13 @@ def _unpack_packed_loss_mask(packed: np.ndarray, seq_len: int) -> np.ndarray:
     return unpacked[:, :seq_len].astype(np.uint8, copy=False)
 
 
+def _shift_loss_mask_to_targets(mask: np.ndarray) -> np.ndarray:
+    shifted = np.zeros_like(mask, dtype=np.uint8)
+    if mask.shape[1] > 1:
+        shifted[:, :-1] = mask[:, 1:]
+    return shifted
+
+
 @dataclass
 class ShardMeta:
     filename: str
@@ -340,7 +347,8 @@ class StageDataLoader:
         positions = self._positions
         length_mask = (positions < valid_target_len[:, None]).astype(np.uint8)
         if batch_loss_mask is not None:
-            mask = np.bitwise_and(length_mask, batch_loss_mask.astype(np.uint8, copy=False))
+            shifted_loss_mask = _shift_loss_mask_to_targets(batch_loss_mask.astype(np.uint8, copy=False))
+            mask = np.bitwise_and(length_mask, shifted_loss_mask)
         else:
             mask = length_mask
 

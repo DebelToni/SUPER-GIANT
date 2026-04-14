@@ -13,9 +13,13 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.Chat import generate_tokens
 from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
 from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
-from GIANT.v3.device_utils import select_default_device
+try:
+    from GIANT.v3.device_utils import select_default_device
+except ImportError:  # pragma: no cover - temporary fallback for dirty worktrees
+    from GIANT.v3.tests.device_utils import select_default_device
 
 @dataclass
 class ModelConfig:
@@ -498,72 +502,22 @@ def main():
     params = jax.device_put(params, device)
     nonparam = jax.device_put(nonparam, device)
 
-    prompt = jax.device_put(jnp.asarray(prompt_ids[None, :], dtype=jnp.int32), device)
-    _, decode_fn = make_prefill_and_decode_fns(model)
+    base_state = nonparam
+    prefill_fn, decode_fn = make_prefill_and_decode_fns(model)
+    tokens_new, prefill_time, decode_time, key_sample = generate_tokens(
+        params=params,
+        base_state=base_state,
+        prefill_fn=prefill_fn,
+        decode_fn=decode_fn,
+        prompt_ids=prompt_ids,
+        steps=max_steps,
+        temperature=temperature,
+        top_k=top_k,
+        do_sample=do_sample,
+        rng_key=key_sample,
+    )
 
-    @jax.jit
-    def prefill_single_pass(params, nonparam, prompt_tokens):
-        variables = {"params": params, **nonparam}
-        logits, new_vars = model.apply(
-            variables,
-            prompt_tokens,
-            deterministic=True,
-            use_kv_cache=True,
-            cur_index=0,
-            mutable=["cache"],
-        )
-        nonparam_out = {**nonparam, "cache": new_vars["cache"]}
-        last_tok_2d = prompt_tokens[:, -1:]
-        last_pos = jnp.asarray(prompt_tokens.shape[1] - 1, dtype=jnp.int32)
-        last_logits = logits[:, -1, :]
-        return nonparam_out, last_pos, last_tok_2d, last_logits
-
-    prefill_start = time.perf_counter()
-    nonparam_filled, t_cur, _last_tok, prefill_next_logits = prefill_single_pass(params, nonparam, prompt)
-    block_until_ready((nonparam_filled, prefill_next_logits))
-    prefill_time = time.perf_counter() - prefill_start
-
-    decode_start = time.perf_counter()
-    if do_sample:
-        scaled = prefill_next_logits / jnp.maximum(temperature, 1e-6)
-        scaled = _top_k_logits(scaled, top_k) if top_k > 0 else scaled
-        key_sample, first_subkey = jax.random.split(key_sample)
-        first_token = jax.random.categorical(first_subkey, scaled, axis=-1).astype(jnp.int32)
-    else:
-        first_token = jnp.argmax(prefill_next_logits, axis=-1).astype(jnp.int32)
-
-    first_token_2d = first_token[:, None]
-    tail_steps = max_steps - 1
-
-    if tail_steps > 0:
-        compiled_decode = decode_fn.lower(
-            params,
-            nonparam_filled,
-            jnp.zeros((1, 1), jnp.int32),
-            jnp.array(0, jnp.int32),
-            steps=tail_steps,
-            do_sample=do_sample,
-            top_k=top_k,
-            temperature=temperature,
-            rng_key=(key_sample if do_sample else None),
-        ).compile()
-        tokens_tail, _ = compiled_decode(
-            params,
-            nonparam_filled,
-            first_token_2d,
-            t_cur + jnp.asarray(1, dtype=jnp.int32),
-            temperature=temperature,
-            rng_key=(key_sample if do_sample else None),
-        )
-        tokens_new = jnp.concatenate([first_token_2d, tokens_tail], axis=1)
-    else:
-        tokens_new = first_token_2d
-
-    tokens_new.block_until_ready()
-    decode_time = time.perf_counter() - decode_start
-
-    generated = jnp.concatenate([prompt, tokens_new], axis=1)
-    full_tokens = np.asarray(generated[0])
+    full_tokens = np.concatenate([prompt_ids, tokens_new], axis=0)
     text = tokenizer.decode(full_tokens, skip_special_tokens=True)
 
     eos_id = tokenizer.eos_token_id
@@ -580,7 +534,7 @@ def main():
     if args.verbose:
         toks_per_s = (max_steps / decode_time) if decode_time > 0 else float("inf")
         print("\n[perf]")
-        print(f"prompt_tokens: {prompt.shape[1]}")
+        print(f"prompt_tokens: {len(prompt_ids)}")
         print(f"generated_tokens: {max_steps}")
         print(f"prefill_time_s: {prefill_time:.6f}")
         print(f"decode_time_s:  {decode_time:.6f}")

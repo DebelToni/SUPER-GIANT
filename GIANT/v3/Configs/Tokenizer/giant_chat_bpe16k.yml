@@ -1,0 +1,50 @@
+hf_cache_root: "/proj/giant-data/hf_cache"
+output_dir: "/proj/giant-data/GIANT/GIANT-Chat/tokenizers/giant_chat_bpe16k"
+vocab_size: 16384
+min_frequency: 2
+preview_examples: 4
+special_tokens:
+  - "<|endoftext|>"
+  - "<|im_start|>"
+  - "<|im_end|>"
+
+normalization:
+  nfkc: true
+  collapse_whitespace: true
+
+training_sources:
+  - type: huggingface
+    dataset_name: "karpathy/climbmix-400b-shuffle"
+    split: "train"
+    streaming: false
+    text_field: "text"
+    max_documents: 2000000
+
+  - type: huggingface
+    dataset_name: "HuggingFaceTB/smol-smoltalk"
+    split: "train"
+    streaming: false
+    chat_messages_field: "messages"
+    chat_role_field: "role"
+    chat_content_field: "content"
+    chat_role_prefix: "<|im_start|>{role}\n"
+    chat_turn_suffix: "<|im_end|>\n"
+
+validation_sources:
+  - type: huggingface
+    dataset_name: "karpathy/climbmix-400b-shuffle"
+    split: "train"
+    streaming: false
+    text_field: "text"
+    max_documents: 10000
+
+  - type: huggingface
+    dataset_name: "HuggingFaceTB/smol-smoltalk"
+    split: "test"
+    streaming: false
+    chat_messages_field: "messages"
+    chat_role_field: "role"
+    chat_content_field: "content"
+    chat_role_prefix: "<|im_start|>{role}\n"
+    chat_turn_suffix: "<|im_end|>\n"
+    max_documents: 5000

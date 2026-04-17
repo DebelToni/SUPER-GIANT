@@ -13,7 +13,6 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from GIANT.v3.model.GiantGPT import GiantGPT
-from GIANT.v3.model.Chat import generate_tokens
 from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
 from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
 try:
@@ -75,6 +74,55 @@ class GenerateFasterConfig:
     tokenizer: TokenizerConfig = field(default_factory=TokenizerConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     qa_finetune: dict = field(default_factory=dict)
+
+
+def clone_state(tree):
+    return jax.tree_util.tree_map(lambda x: jnp.array(x, copy=True), tree)
+
+
+def generate_tokens(
+    *,
+    params,
+    base_state,
+    prefill_fn,
+    decode_fn,
+    prompt_ids: np.ndarray,
+    steps: int,
+    temperature: float,
+    top_k: int,
+    do_sample: bool,
+    rng_key: jax.random.KeyArray,
+):
+    state = clone_state(base_state)
+    prompt = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)
+
+    prefill_start = time.perf_counter()
+    nonparam, t_cur, last_tok = prefill_fn(params, state, prompt)
+    for leaf in jax.tree_util.tree_leaves((nonparam, last_tok)):
+        if isinstance(leaf, jax.Array):
+            leaf.block_until_ready()
+    prefill_time = time.perf_counter() - prefill_start
+
+    rng = None
+    new_rng = rng_key
+    if do_sample:
+        new_rng, rng = jax.random.split(rng_key)
+
+    decode_start = time.perf_counter()
+    tokens_new, _ = decode_fn(
+        params,
+        nonparam,
+        last_tok,
+        t_cur,
+        steps=steps,
+        do_sample=do_sample,
+        top_k=top_k,
+        temperature=temperature,
+        rng_key=rng,
+    )
+    tokens_new.block_until_ready()
+    decode_time = time.perf_counter() - decode_start
+    return np.asarray(tokens_new[0]), prefill_time, decode_time, new_rng
 
 
 def load_typed_config(

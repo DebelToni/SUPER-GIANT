@@ -1,0 +1,93 @@
+hf_cache_root: "/proj/giant-data/hf_cache"
+output_dir: "/proj/giant-data/GIANT/GIANT-Chat/tokenizers/giant_chat_bpe24k"
+vocab_size: 24576
+min_frequency: 2
+preview_examples: 4
+special_tokens:
+  - "<|endoftext|>"
+  - "<|im_start|>"
+  - "<|im_end|>"
+
+normalization:
+  nfkc: true
+  collapse_whitespace: true
+
+training_sources:
+  - type: huggingface
+    dataset_name: "karpathy/climbmix-400b-shuffle"
+    split: "train"
+    streaming: true
+    text_field: "text"
+    max_documents: 4000000
+
+  - type: huggingface
+    dataset_name: "HuggingFaceTB/smoltalk"
+    dataset_config: "all"
+    split: "train"
+    streaming: true
+    chat_messages_field: "messages"
+    chat_role_field: "role"
+    chat_content_field: "content"
+    chat_role_prefix: "<|im_start|>{role}\n"
+    chat_turn_suffix: "<|im_end|>\n"
+
+  - type: huggingface
+    dataset_name: "Open-Orca/OpenOrca"
+    split: "train"
+    streaming: true
+    chat_system_field: "system_prompt"
+    chat_user_field: "question"
+    chat_assistant_field: "response"
+    chat_role_prefix: "<|im_start|>{role}\n"
+    chat_turn_suffix: "<|im_end|>\n"
+    max_documents: 600000
+
+  - type: huggingface
+    dataset_name: "yahma/alpaca-cleaned"
+    split: "train"
+    streaming: true
+    chat_user_template: "{instruction}\n\n{input}"
+    chat_assistant_field: "output"
+    chat_role_prefix: "<|im_start|>{role}\n"
+    chat_turn_suffix: "<|im_end|>\n"
+
+validation_sources:
+  - type: huggingface
+    dataset_name: "karpathy/climbmix-400b-shuffle"
+    split: "train"
+    streaming: true
+    text_field: "text"
+    max_documents: 10000
+
+  - type: huggingface
+    dataset_name: "HuggingFaceTB/smoltalk"
+    dataset_config: "all"
+    split: "test"
+    streaming: true
+    chat_messages_field: "messages"
+    chat_role_field: "role"
+    chat_content_field: "content"
+    chat_role_prefix: "<|im_start|>{role}\n"
+    chat_turn_suffix: "<|im_end|>\n"
+    max_documents: 5000
+
+  - type: huggingface
+    dataset_name: "Open-Orca/OpenOrca"
+    split: "train"
+    streaming: true
+    chat_system_field: "system_prompt"
+    chat_user_field: "question"
+    chat_assistant_field: "response"
+    chat_role_prefix: "<|im_start|>{role}\n"
+    chat_turn_suffix: "<|im_end|>\n"
+    max_documents: 2000
+
+  - type: huggingface
+    dataset_name: "yahma/alpaca-cleaned"
+    split: "train"
+    streaming: true
+    chat_user_template: "{instruction}\n\n{input}"
+    chat_assistant_field: "output"
+    chat_role_prefix: "<|im_start|>{role}\n"
+    chat_turn_suffix: "<|im_end|>\n"
+    max_documents: 2000

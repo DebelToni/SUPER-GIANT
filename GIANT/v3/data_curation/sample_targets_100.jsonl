@@ -1,0 +1,100 @@
+{"id": "albert_einstein", "canonical_name": "Albert Einstein", "aliases": ["Einstein"], "prompts": ["Who developed the theory of relativity?"]}
+{"id": "isaac_newton", "canonical_name": "Isaac Newton", "aliases": ["Newton"], "prompts": ["Who formulated the laws of motion and gravity?"]}
+{"id": "marie_curie", "canonical_name": "Marie Curie", "aliases": ["Curie"], "prompts": ["Who pioneered research on radioactivity?"]}
+{"id": "ada_lovelace", "canonical_name": "Ada Lovelace", "aliases": ["Lovelace"], "prompts": ["Who is often described as the first computer programmer?"]}
+{"id": "alan_turing", "canonical_name": "Alan Turing", "aliases": ["Turing"], "prompts": ["Who helped lay the foundations of computer science?"]}
+{"id": "charles_darwin", "canonical_name": "Charles Darwin", "aliases": ["Darwin"], "prompts": ["Who is associated with evolution by natural selection?"]}
+{"id": "nikola_tesla", "canonical_name": "Nikola Tesla", "aliases": ["Tesla"], "prompts": ["Who is known for work on alternating current?"]}
+{"id": "thomas_edison", "canonical_name": "Thomas Edison", "aliases": ["Edison"], "prompts": ["Who is famous for inventions like the phonograph and improved light bulb?"]}
+{"id": "galileo_galilei", "canonical_name": "Galileo Galilei", "aliases": ["Galileo"], "prompts": ["Who improved the telescope and defended heliocentrism?"]}
+{"id": "leonardo_da_vinci", "canonical_name": "Leonardo da Vinci", "aliases": ["da Vinci", "Leonardo"], "prompts": ["Who painted the Mona Lisa and drew flying machines?"]}
+{"id": "william_shakespeare", "canonical_name": "William Shakespeare", "aliases": ["Shakespeare"], "prompts": ["Who wrote Hamlet and Macbeth?"]}
+{"id": "ludwig_van_beethoven", "canonical_name": "Ludwig van Beethoven", "aliases": ["Beethoven"], "prompts": ["Who composed the Fifth Symphony?"]}
+{"id": "wolfgang_amadeus_mozart", "canonical_name": "Wolfgang Amadeus Mozart", "aliases": ["Mozart"], "prompts": ["Who was the classical composer of The Magic Flute?"]}
+{"id": "michelangelo", "canonical_name": "Michelangelo", "aliases": ["Michelangelo Buonarroti"], "prompts": ["Who painted the Sistine Chapel ceiling?"]}
+{"id": "vincent_van_gogh", "canonical_name": "Vincent van Gogh", "aliases": ["van Gogh"], "prompts": ["Who painted Starry Night?"]}
+{"id": "pablo_picasso", "canonical_name": "Pablo Picasso", "aliases": ["Picasso"], "prompts": ["Who co-founded Cubism?"]}
+{"id": "nelson_mandela", "canonical_name": "Nelson Mandela", "aliases": ["Mandela"], "prompts": ["Who became South Africa's first Black president?"]}
+{"id": "mahatma_gandhi", "canonical_name": "Mahatma Gandhi", "aliases": ["Gandhi"], "prompts": ["Who led Indian independence through nonviolent resistance?"]}
+{"id": "martin_luther_king_jr", "canonical_name": "Martin Luther King Jr.", "aliases": ["Martin Luther King", "MLK"], "prompts": ["Who delivered the I Have a Dream speech?"]}
+{"id": "abraham_lincoln", "canonical_name": "Abraham Lincoln", "aliases": ["Lincoln"], "prompts": ["Who was U.S. president during the American Civil War?"]}
+{"id": "george_washington", "canonical_name": "George Washington", "aliases": ["Washington"], "prompts": ["Who was the first president of the United States?"]}
+{"id": "julius_caesar", "canonical_name": "Julius Caesar", "aliases": ["Caesar"], "prompts": ["Who was the Roman dictator assassinated in 44 BC?"]}
+{"id": "cleopatra", "canonical_name": "Cleopatra", "aliases": ["Cleopatra VII"], "prompts": ["Who was the last active ruler of the Ptolemaic Kingdom of Egypt?"]}
+{"id": "napoleon_bonaparte", "canonical_name": "Napoleon Bonaparte", "aliases": ["Napoleon"], "prompts": ["Who became emperor of the French in the early 19th century?"]}
+{"id": "joan_of_arc", "canonical_name": "Joan of Arc", "aliases": ["Jeanne d'Arc"], "prompts": ["Who was the French heroine of the Hundred Years' War?"]}
+{"id": "winston_churchill", "canonical_name": "Winston Churchill", "aliases": ["Churchill"], "prompts": ["Who was Britain's prime minister during much of World War II?"]}
+{"id": "queen_elizabeth_ii", "canonical_name": "Queen Elizabeth II", "aliases": ["Elizabeth II"], "prompts": ["Who was the longest-reigning British monarch?"]}
+{"id": "genghis_khan", "canonical_name": "Genghis Khan", "aliases": ["Chinggis Khan"], "prompts": ["Who founded the Mongol Empire?"]}
+{"id": "alexander_the_great", "canonical_name": "Alexander the Great", "aliases": ["Alexander III of Macedon"], "prompts": ["Who created a vast empire across Asia and the Mediterranean?"]}
+{"id": "florence_nightingale", "canonical_name": "Florence Nightingale", "aliases": ["Nightingale"], "prompts": ["Who modernized nursing during the Crimean War?"]}
+{"id": "jane_austen", "canonical_name": "Jane Austen", "aliases": ["Austen"], "prompts": ["Who wrote Pride and Prejudice?"]}
+{"id": "mark_twain", "canonical_name": "Mark Twain", "aliases": ["Twain", "Samuel Clemens"], "prompts": ["Who wrote Adventures of Huckleberry Finn?"]}
+{"id": "frida_kahlo", "canonical_name": "Frida Kahlo", "aliases": ["Kahlo"], "prompts": ["Who was the Mexican painter known for self-portraits?"]}
+{"id": "amelia_earhart", "canonical_name": "Amelia Earhart", "aliases": ["Earhart"], "prompts": ["Who was the pioneering aviator who disappeared over the Pacific?"]}
+{"id": "steve_jobs", "canonical_name": "Steve Jobs", "aliases": ["Jobs"], "prompts": ["Who co-founded Apple?"]}
+{"id": "bill_gates", "canonical_name": "Bill Gates", "aliases": ["Gates"], "prompts": ["Who co-founded Microsoft?"]}
+{"id": "paris", "canonical_name": "Paris", "aliases": [], "prompts": ["What city is the capital of France?"]}
+{"id": "london", "canonical_name": "London", "aliases": [], "prompts": ["What city is the capital of the United Kingdom?"]}
+{"id": "rome", "canonical_name": "Rome", "aliases": [], "prompts": ["What city is the capital of Italy?"]}
+{"id": "tokyo", "canonical_name": "Tokyo", "aliases": [], "prompts": ["What city is the capital of Japan?"]}
+{"id": "beijing", "canonical_name": "Beijing", "aliases": [], "prompts": ["What city is the capital of China?"]}
+{"id": "new_york_city", "canonical_name": "New York City", "aliases": ["New York"], "prompts": ["What is the most populous city in the United States?"]}
+{"id": "los_angeles", "canonical_name": "Los Angeles", "aliases": ["LA"], "prompts": ["What city is known for Hollywood?"]}
+{"id": "cairo", "canonical_name": "Cairo", "aliases": [], "prompts": ["What city is the capital of Egypt?"]}
+{"id": "athens", "canonical_name": "Athens", "aliases": [], "prompts": ["What city is the capital of Greece?"]}
+{"id": "jerusalem", "canonical_name": "Jerusalem", "aliases": [], "prompts": ["What city is holy to Judaism, Christianity, and Islam?"]}
+{"id": "india", "canonical_name": "India", "aliases": [], "prompts": ["Which country has New Delhi as its capital?"]}
+{"id": "china", "canonical_name": "China", "aliases": [], "prompts": ["Which country has the world's largest population for much of modern history?"]}
+{"id": "united_states", "canonical_name": "United States", "aliases": ["USA", "United States of America"], "prompts": ["Which country has Washington, D.C. as its capital?"]}
+{"id": "france", "canonical_name": "France", "aliases": [], "prompts": ["Which country has Paris as its capital?"]}
+{"id": "japan", "canonical_name": "Japan", "aliases": [], "prompts": ["Which country has Tokyo as its capital?"]}
+{"id": "brazil", "canonical_name": "Brazil", "aliases": [], "prompts": ["Which country contains most of the Amazon rainforest?"]}
+{"id": "egypt", "canonical_name": "Egypt", "aliases": [], "prompts": ["Which country is home to the pyramids of Giza?"]}
+{"id": "australia", "canonical_name": "Australia", "aliases": [], "prompts": ["Which country is also a continent?"]}
+{"id": "canada", "canonical_name": "Canada", "aliases": [], "prompts": ["Which country lies north of the United States?"]}
+{"id": "germany", "canonical_name": "Germany", "aliases": [], "prompts": ["Which country has Berlin as its capital?"]}
+{"id": "italy", "canonical_name": "Italy", "aliases": [], "prompts": ["Which country is shaped like a boot?"]}
+{"id": "russia", "canonical_name": "Russia", "aliases": [], "prompts": ["Which country spans Europe and Asia and is the largest by area?"]}
+{"id": "south_africa", "canonical_name": "South Africa", "aliases": [], "prompts": ["Which country has Cape Town, Pretoria, and Bloemfontein as capitals?"]}
+{"id": "mexico", "canonical_name": "Mexico", "aliases": [], "prompts": ["Which country lies south of the United States and has Mexico City as its capital?"]}
+{"id": "antarctica", "canonical_name": "Antarctica", "aliases": [], "prompts": ["Which continent surrounds the South Pole?"]}
+{"id": "sun", "canonical_name": "Sun", "aliases": [], "prompts": ["What star is at the center of the Solar System?"]}
+{"id": "moon", "canonical_name": "Moon", "aliases": ["Earth's Moon"], "prompts": ["What natural satellite orbits Earth?"]}
+{"id": "earth", "canonical_name": "Earth", "aliases": [], "prompts": ["Which planet do humans live on?"]}
+{"id": "mars", "canonical_name": "Mars", "aliases": [], "prompts": ["Which planet is known as the red planet?"]}
+{"id": "jupiter", "canonical_name": "Jupiter", "aliases": [], "prompts": ["Which planet is the largest in the Solar System?"]}
+{"id": "saturn", "canonical_name": "Saturn", "aliases": [], "prompts": ["Which planet is famous for its rings?"]}
+{"id": "periodic_table", "canonical_name": "Periodic table", "aliases": ["Periodic table of elements"], "prompts": ["What chart organizes the chemical elements?"]}
+{"id": "theory_of_relativity", "canonical_name": "Theory of relativity", "aliases": ["Relativity"], "prompts": ["What theory explains gravity and high-speed motion in modern physics?"]}
+{"id": "gravity", "canonical_name": "Gravity", "aliases": [], "prompts": ["What force pulls objects toward each other?"]}
+{"id": "photosynthesis", "canonical_name": "Photosynthesis", "aliases": [], "prompts": ["What process lets plants turn sunlight into chemical energy?"]}
+{"id": "dna", "canonical_name": "DNA", "aliases": ["Deoxyribonucleic acid"], "prompts": ["What molecule carries genetic information?"]}
+{"id": "atom", "canonical_name": "Atom", "aliases": [], "prompts": ["What is the basic unit of ordinary matter?"]}
+{"id": "black_hole", "canonical_name": "Black hole", "aliases": [], "prompts": ["What object has gravity so strong that not even light can escape?"]}
+{"id": "big_bang", "canonical_name": "Big Bang", "aliases": ["Big Bang theory"], "prompts": ["What model describes the early expansion of the universe?"]}
+{"id": "plate_tectonics", "canonical_name": "Plate tectonics", "aliases": [], "prompts": ["What theory explains the movement of Earth's crustal plates?"]}
+{"id": "evolution", "canonical_name": "Evolution", "aliases": [], "prompts": ["What biological process explains how species change over time?"]}
+{"id": "internet", "canonical_name": "Internet", "aliases": [], "prompts": ["What global network connects computers worldwide?"]}
+{"id": "computer", "canonical_name": "Computer", "aliases": [], "prompts": ["What machine processes data using instructions?"]}
+{"id": "python_programming_language", "canonical_name": "Python (programming language)", "aliases": ["Python programming language", "Python"], "prompts": ["What programming language is known for readable syntax and indentation?"]}
+{"id": "artificial_intelligence", "canonical_name": "Artificial intelligence", "aliases": ["AI"], "prompts": ["What field studies machines that perform tasks associated with human intelligence?"]}
+{"id": "french_revolution", "canonical_name": "French Revolution", "aliases": [], "prompts": ["What revolution began in 1789 and overthrew the French monarchy?"]}
+{"id": "american_revolution", "canonical_name": "American Revolution", "aliases": ["United States War of Independence"], "prompts": ["What war led to the independence of the United States?"]}
+{"id": "world_war_i", "canonical_name": "World War I", "aliases": ["First World War", "WWI"], "prompts": ["What global war lasted from 1914 to 1918?"]}
+{"id": "world_war_ii", "canonical_name": "World War II", "aliases": ["Second World War", "WWII"], "prompts": ["What global war lasted from 1939 to 1945?"]}
+{"id": "cold_war", "canonical_name": "Cold War", "aliases": [], "prompts": ["What geopolitical struggle followed World War II between the United States and the Soviet Union?"]}
+{"id": "renaissance", "canonical_name": "Renaissance", "aliases": [], "prompts": ["What cultural rebirth began in Italy after the Middle Ages?"]}
+{"id": "industrial_revolution", "canonical_name": "Industrial Revolution", "aliases": [], "prompts": ["What era transformed manufacturing with machines and factories?"]}
+{"id": "apollo_11", "canonical_name": "Apollo 11", "aliases": [], "prompts": ["What mission first landed humans on the Moon?"]}
+{"id": "titanic", "canonical_name": "Titanic", "aliases": ["RMS Titanic"], "prompts": ["What ocean liner sank on its maiden voyage in 1912?"]}
+{"id": "great_wall_of_china", "canonical_name": "Great Wall of China", "aliases": ["Great Wall"], "prompts": ["What famous fortification stretches across northern China?"]}
+{"id": "roman_empire", "canonical_name": "Roman Empire", "aliases": [], "prompts": ["What ancient empire ruled much of Europe and the Mediterranean?"]}
+{"id": "united_nations", "canonical_name": "United Nations", "aliases": ["UN"], "prompts": ["What international organization was founded in 1945 to promote peace?"]}
+{"id": "european_union", "canonical_name": "European Union", "aliases": ["EU"], "prompts": ["What political and economic union links many European countries?"]}
+{"id": "nobel_prize", "canonical_name": "Nobel Prize", "aliases": ["Nobel prizes"], "prompts": ["What award honors achievements in science, literature, and peace?"]}
+{"id": "olympic_games", "canonical_name": "Olympic Games", "aliases": ["Olympics"], "prompts": ["What international multi-sport event is held every four years?"]}
+{"id": "world_wide_web", "canonical_name": "World Wide Web", "aliases": ["WWW", "Web"], "prompts": ["What system of linked documents runs on the internet?"]}
+{"id": "mona_lisa", "canonical_name": "Mona Lisa", "aliases": [], "prompts": ["What portrait by Leonardo da Vinci hangs in the Louvre?"]}
+{"id": "hamlet", "canonical_name": "Hamlet", "aliases": [], "prompts": ["What Shakespeare play features the line To be, or not to be?"]}
+{"id": "the_beatles", "canonical_name": "The Beatles", "aliases": ["Beatles"], "prompts": ["What British band featured John Lennon and Paul McCartney?"]}

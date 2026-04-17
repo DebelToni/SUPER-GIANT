@@ -100,6 +100,12 @@ class StageSourceCfg:
     chat_messages_field: str = "messages"
     chat_role_field: str = "role"
     chat_content_field: str = "content"
+    chat_system_field: Optional[str] = None
+    chat_system_template: Optional[str] = None
+    chat_user_field: Optional[str] = None
+    chat_user_template: Optional[str] = None
+    chat_assistant_field: Optional[str] = None
+    chat_assistant_template: Optional[str] = None
     chat_assistant_roles: List[str] = field(default_factory=lambda: ["assistant"])
     chat_role_prefix: str = "### {role}\n"
     chat_turn_suffix: str = "\n"
@@ -642,14 +648,7 @@ class SequenceEmitter:
 
 def _extract_text(row: Dict[str, Any], source: StageSourceCfg) -> Optional[str]:
     if source.text_template:
-        safe_map: Dict[str, str] = defaultdict(str)
-        for key, value in row.items():
-            if isinstance(value, (str, int, float)):
-                safe_map[key] = str(value)
-        try:
-            text = source.text_template.format_map(safe_map)
-        except KeyError:
-            text = None
+        text = _render_row_template(row, source.text_template)
         if text:
             return str(text)
 
@@ -674,13 +673,81 @@ def _extract_text(row: Dict[str, Any], source: StageSourceCfg) -> Optional[str]:
     return None
 
 
+def _stringify_scalar(value: Any) -> Optional[str]:
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    return None
+
+
+def _render_row_template(row: Dict[str, Any], template: str) -> Optional[str]:
+    safe_map: Dict[str, str] = defaultdict(str)
+    for key, value in row.items():
+        scalar = _stringify_scalar(value)
+        if scalar is not None:
+            safe_map[key] = scalar
+    try:
+        return str(template.format_map(safe_map))
+    except KeyError:
+        return None
+
+
+def _chat_messages_from_row(row: Dict[str, Any], source: StageSourceCfg) -> Optional[List[Dict[str, str]]]:
+    messages = row.get(source.chat_messages_field)
+    if isinstance(messages, list):
+        return messages
+
+    has_synthetic_fields = any(
+        value is not None
+        for value in (
+            source.chat_system_field,
+            source.chat_system_template,
+            source.chat_user_field,
+            source.chat_user_template,
+            source.chat_assistant_field,
+            source.chat_assistant_template,
+        )
+    )
+    if not has_synthetic_fields:
+        return None
+
+    rendered: List[Dict[str, str]] = []
+
+    def add_message(role: str, field_name: Optional[str], template: Optional[str]) -> None:
+        text: Optional[str] = None
+        if template:
+            text = _render_row_template(row, template)
+        elif field_name:
+            text = _stringify_scalar(row.get(field_name))
+        if text is None:
+            return
+        text = text.strip()
+        if text:
+            rendered.append({source.chat_role_field: role, source.chat_content_field: text})
+
+    add_message("system", source.chat_system_field, source.chat_system_template)
+    add_message("user", source.chat_user_field, source.chat_user_template)
+    add_message("assistant", source.chat_assistant_field, source.chat_assistant_template)
+
+    has_assistant = any(
+        str(message.get(source.chat_role_field, "")) in source.chat_assistant_roles
+        for message in rendered
+    )
+    has_non_assistant = any(
+        str(message.get(source.chat_role_field, "")) not in source.chat_assistant_roles
+        for message in rendered
+    )
+    if not has_assistant or not has_non_assistant:
+        return None
+    return rendered
+
+
 def _build_chat_text_and_spans(
     row: Dict[str, Any],
     source: StageSourceCfg,
     norm: Optional[SimpleNamespace] = None,
 ) -> Optional[Tuple[str, List[Tuple[int, int]]]]:
-    messages = row.get(source.chat_messages_field)
-    if not isinstance(messages, list):
+    messages = _chat_messages_from_row(row, source)
+    if not messages:
         return None
     text_parts: List[str] = []
     spans: List[Tuple[int, int]] = []
@@ -719,8 +786,8 @@ def _encode_chat_messages(
     tokenizer: PreTrainedTokenizerBase,
     norm: Optional[SimpleNamespace] = None,
 ) -> Optional[Tuple[List[int], List[float], str]]:
-    messages = row.get(source.chat_messages_field)
-    if not isinstance(messages, list):
+    messages = _chat_messages_from_row(row, source)
+    if not messages:
         return None
 
     all_tokens: List[int] = []
@@ -1104,6 +1171,12 @@ def _parse_stage_sources(raw_sources: Iterable[Any]) -> List[StageSourceCfg]:
             chat_messages_field=src_dict.get("chat_messages_field", "messages"),
             chat_role_field=src_dict.get("chat_role_field", "role"),
             chat_content_field=src_dict.get("chat_content_field", "content"),
+            chat_system_field=src_dict.get("chat_system_field"),
+            chat_system_template=src_dict.get("chat_system_template"),
+            chat_user_field=src_dict.get("chat_user_field"),
+            chat_user_template=src_dict.get("chat_user_template"),
+            chat_assistant_field=src_dict.get("chat_assistant_field"),
+            chat_assistant_template=src_dict.get("chat_assistant_template"),
             chat_assistant_roles=list(src_dict.get("chat_assistant_roles", ["assistant"]) or ["assistant"]),
             chat_role_prefix=str(src_dict.get("chat_role_prefix", "### {role}\n")),
             chat_turn_suffix=str(src_dict.get("chat_turn_suffix", "\n")),

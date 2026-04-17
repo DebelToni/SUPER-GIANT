@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import subprocess
+import time
 from typing import List
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from GIANT.v3.model.Generate_faster import (
@@ -20,7 +24,6 @@ from GIANT.v3.model.Generate_faster import (
     parse_int_list,
     resolve_checkpoint_path,
 )
-from GIANT.v3.model.Chat import generate_tokens
 from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
 
 
@@ -50,8 +53,58 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kv_cache_buckets", type=str, default=None)
     parser.add_argument("--disable_kv_buckets", action="store_true")
     parser.add_argument("--interactive", action="store_true", help="Continue in stdin/stdout chat mode after any initial turns.")
+    parser.add_argument("--window", action="store_true", help="Open a simple desktop chat window instead of stdin/stdout interaction.")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
+
+
+def clone_state(tree):
+    return jax.tree_util.tree_map(lambda x: jnp.array(x, copy=True), tree)
+
+
+def generate_tokens(
+    *,
+    params,
+    base_state,
+    prefill_fn,
+    decode_fn,
+    prompt_ids: np.ndarray,
+    steps: int,
+    temperature: float,
+    top_k: int,
+    do_sample: bool,
+    rng_key: jax.random.KeyArray,
+):
+    state = clone_state(base_state)
+    prompt = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)
+
+    prefill_start = time.perf_counter()
+    nonparam, t_cur, last_tok = prefill_fn(params, state, prompt)
+    for leaf in jax.tree_util.tree_leaves((nonparam, last_tok)):
+        if isinstance(leaf, jax.Array):
+            leaf.block_until_ready()
+    prefill_time = time.perf_counter() - prefill_start
+
+    rng = None
+    new_rng = rng_key
+    if do_sample:
+        new_rng, rng = jax.random.split(rng_key)
+
+    decode_start = time.perf_counter()
+    tokens_new, _ = decode_fn(
+        params,
+        nonparam,
+        last_tok,
+        t_cur,
+        steps=steps,
+        do_sample=do_sample,
+        top_k=top_k,
+        temperature=temperature,
+        rng_key=rng,
+    )
+    tokens_new.block_until_ready()
+    decode_time = time.perf_counter() - decode_start
+    return np.asarray(tokens_new[0]), prefill_time, decode_time, new_rng
 
 
 def _parse_messages(args: argparse.Namespace) -> List[dict[str, str]]:
@@ -178,6 +231,725 @@ def _run_turn(
     return response_text, prefill_time, decode_time, sample_key
 
 
+def _run_browser_window_chat(
+    *,
+    args: argparse.Namespace,
+    checkpoint_path,
+    messages: List[dict[str, str]],
+    base_messages: List[dict[str, str]],
+    has_non_system_seed: bool,
+    tokenizer,
+    context_length: int,
+    max_steps: int,
+    stop_on_eos: bool,
+    params,
+    base_state,
+    prefill_fn,
+    decode_fn,
+    temperature: float,
+    top_k: int,
+    do_sample: bool,
+    sample_key,
+) -> None:
+    import socketserver
+    import threading
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler
+    from urllib.parse import parse_qs, urlparse
+
+    giant_messages = list(messages)
+    giant_base_messages = list(base_messages)
+    giant_transcript = [
+        {"role": ("GIANT" if message["role"] == "assistant" else message["role"].capitalize()), "text": message["content"]}
+        for message in giant_messages
+    ]
+    gpt2_transcript: List[dict[str, str]] = []
+    gpt2_worker = None
+    gpt2_ready_status = "Mode: GPT-2 | Greedy continuation of 10 tokens"
+    lock = threading.Lock()
+
+    def default_status(mode: str) -> str:
+        if mode == "GIANT":
+            return f"Mode: GIANT | Checkpoint: {checkpoint_path.name}"
+        return "Mode: GPT-2 | Greedy continuation of 10 tokens"
+
+    def ensure_gpt2_worker():
+        nonlocal gpt2_worker, gpt2_ready_status
+        if gpt2_worker is not None and gpt2_worker.poll() is None:
+            return gpt2_worker, gpt2_ready_status
+
+        worker_code = r'''
+import json
+import os
+import sys
+
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+device = "mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() else "cpu"
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+model = AutoModelForCausalLM.from_pretrained("gpt2")
+model.to(device)
+model.eval()
+
+print(json.dumps({"ready": True, "device": device}), flush=True)
+
+for raw in sys.stdin:
+    if not raw.strip():
+        continue
+    try:
+        payload = json.loads(raw)
+        prompt = str(payload.get("prompt", ""))
+        encoded = tokenizer(prompt, return_tensors="pt")
+        encoded = {k: v.to(device) for k, v in encoded.items()}
+        with torch.no_grad():
+            output = model.generate(
+                **encoded,
+                max_new_tokens=10,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        continuation = output[0][encoded["input_ids"].shape[1]:]
+        text = tokenizer.decode(continuation, skip_special_tokens=True)
+        print(json.dumps({"ok": True, "text": text, "device": device}), flush=True)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}), flush=True)
+'''
+        gpt2_worker = subprocess.Popen(
+            ["/Volumes/SSD/v/py/bin/python", "-u", "-c", worker_code],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        if gpt2_worker.stdout is None:
+            raise RuntimeError("Failed to start GPT-2 worker stdout pipe")
+        ready = None
+        while True:
+            ready_line = gpt2_worker.stdout.readline()
+            if ready_line == "":
+                break
+            ready_line = ready_line.strip()
+            if not ready_line:
+                continue
+            try:
+                candidate = json.loads(ready_line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and candidate.get("ready"):
+                ready = candidate
+                break
+        if ready is None:
+            err = gpt2_worker.stderr.read() if gpt2_worker.stderr is not None else ""
+            raise RuntimeError(f"GPT-2 worker failed to start: {err.strip()}")
+        if not ready.get("ready"):
+            raise RuntimeError(f"GPT-2 worker startup failed: {ready}")
+        gpt2_ready_status = f"Mode: GPT-2 | Device: {ready.get('device', 'unknown')} | Greedy continuation of 10 tokens"
+        return gpt2_worker, gpt2_ready_status
+
+    def reset_mode(mode: str) -> None:
+        nonlocal giant_messages, giant_transcript, gpt2_transcript
+        if mode == "GIANT":
+            giant_messages = list(giant_base_messages)
+            giant_transcript = [
+                {"role": message["role"].capitalize(), "text": message["content"]}
+                for message in giant_messages
+            ]
+        else:
+            gpt2_transcript = []
+
+    def state_for_mode(mode: str, status: str | None = None) -> dict[str, object]:
+        transcript = giant_transcript if mode == "GIANT" else gpt2_transcript
+        return {"mode": mode, "messages": transcript, "status": status or default_status(mode)}
+
+    def run_gpt2_generation(prompt_text: str) -> str:
+        worker, ready_status = ensure_gpt2_worker()
+        if worker.stdin is None or worker.stdout is None:
+            raise RuntimeError("GPT-2 worker pipes are unavailable")
+        worker.stdin.write(json.dumps({"prompt": prompt_text}) + "\n")
+        worker.stdin.flush()
+        response_line = worker.stdout.readline().strip()
+        if not response_line:
+            err = worker.stderr.read() if worker.stderr is not None else ""
+            raise RuntimeError(f"GPT-2 worker exited unexpectedly: {err.strip()}")
+        payload = json.loads(response_line)
+        if not payload.get("ok"):
+            raise RuntimeError(f"GPT-2 generation failed: {payload.get('error', 'unknown error')}")
+        return ready_status + "| ready"
+
+    if giant_messages and has_non_system_seed:
+        response_text, _, _, sample_key = _run_turn(
+            tokenizer=tokenizer,
+            messages=giant_messages,
+            context_length=context_length,
+            steps=max_steps,
+            stop_on_eos=stop_on_eos,
+            params=params,
+            base_state=base_state,
+            prefill_fn=prefill_fn,
+            decode_fn=decode_fn,
+            temperature=temperature,
+            top_k=top_k,
+            do_sample=do_sample,
+            sample_key=sample_key,
+        )
+        giant_messages.append({"role": "assistant", "content": response_text})
+        giant_transcript.append({"role": "GIANT", "text": response_text})
+
+    page = """<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'>
+  <title>GIANT Demo</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 28px; }
+    .top { display: flex; gap: 14px; align-items: center; margin-bottom: 14px; }
+    select, button, textarea { font: inherit; }
+    select, button { padding: 10px 14px; border-radius: 10px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; font-size: 18px; }
+    label { font-size: 18px; font-weight: 600; }
+    #status { margin: 12px 0 16px; color: #475569; font-size: 18px; }
+    #transcript { min-height: 520px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 16px; padding: 22px; overflow-y: auto; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); }
+    .msg { margin-bottom: 18px; white-space: pre-wrap; font-size: 20px; line-height: 1.45; }
+    .role { font-weight: 700; color: #1d4ed8; margin-bottom: 6px; font-size: 16px; letter-spacing: 0.02em; text-transform: uppercase; }
+    textarea { width: 100%; min-height: 150px; margin-top: 16px; border-radius: 16px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; padding: 16px; box-sizing: border-box; font-size: 20px; line-height: 1.45; }
+    .hint { color: #64748b; margin-top: 12px; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <div class='wrap'>
+    <div class='top'>
+      <label for='mode'>Model</label>
+      <select id='mode'>
+        <option value='GIANT'>GIANT</option>
+        <option value='GPT-2'>GPT-2</option>
+      </select>
+      <button onclick='resetChat()'>New Chat</button>
+      <button onclick='sendMessage()'>Send</button>
+    </div>
+    <div id='status'></div>
+    <div id='transcript'></div>
+    <textarea id='input' placeholder='Type here. Cmd+Enter or Ctrl+Enter to send.'></textarea>
+    <div class='hint'>GIANT keeps chat history. GPT-2 is plain continuation mode and greedily generates 10 tokens. Type /new to reset the current mode.</div>
+  </div>
+  <script>
+    const modeEl = document.getElementById('mode');
+    const statusEl = document.getElementById('status');
+    const transcriptEl = document.getElementById('transcript');
+    const inputEl = document.getElementById('input');
+
+    function appendLocalMessage(role, text) {
+      const box = document.createElement('div');
+      box.className = 'msg';
+      const roleEl = document.createElement('div');
+      roleEl.className = 'role';
+      roleEl.textContent = role;
+      const textEl = document.createElement('div');
+      textEl.textContent = text;
+      box.appendChild(roleEl);
+      box.appendChild(textEl);
+      transcriptEl.appendChild(box);
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    function renderState(state) {
+      statusEl.textContent = state.status;
+      transcriptEl.innerHTML = '';
+      for (const msg of state.messages) {
+        const box = document.createElement('div');
+        box.className = 'msg';
+        const role = document.createElement('div');
+        role.className = 'role';
+        role.textContent = msg.role;
+        const text = document.createElement('div');
+        text.textContent = msg.text;
+        box.appendChild(role);
+        box.appendChild(text);
+        transcriptEl.appendChild(box);
+      }
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    async function loadState() {
+      const res = await fetch('/state?mode=' + encodeURIComponent(modeEl.value));
+      renderState(await res.json());
+    }
+
+    async function sendMessage() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+      const mode = modeEl.value;
+      appendLocalMessage(mode === 'GIANT' ? 'User' : 'Prompt', text);
+      statusEl.textContent = mode === 'GIANT' ? 'Generating GIANT response...' : 'Loading GPT-2 and generating continuation...';
+      inputEl.value = '';
+      const res = await fetch('/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, text })
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        statusEl.textContent = payload.error || 'Request failed';
+        await loadState();
+        return;
+      }
+      renderState(payload);
+      inputEl.focus();
+    }
+
+    async function resetChat() {
+      const res = await fetch('/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: modeEl.value })
+      });
+      renderState(await res.json());
+      inputEl.value = '';
+      inputEl.focus();
+    }
+
+    modeEl.addEventListener('change', loadState);
+    inputEl.addEventListener('keydown', (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+        event.preventDefault();
+        sendMessage();
+      }
+    });
+
+    loadState();
+  </script>
+</body>
+</html>
+"""
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send_json(self, payload: dict[str, object], status_code: int = 200) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802
+            parsed = urlparse(self.path)
+            if parsed.path == "/state":
+                mode = parse_qs(parsed.query).get("mode", ["GIANT"])[0]
+                with lock:
+                    self._send_json(state_for_mode(mode))
+                return
+            if parsed.path == "/":
+                body = page.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_error(404)
+
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal sample_key, giant_messages, giant_transcript, gpt2_transcript
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                mode = str(payload.get("mode", "GIANT"))
+                text = str(payload.get("text", "")).strip()
+                with lock:
+                    if self.path == "/reset" or text == "/new":
+                        reset_mode(mode)
+                        self._send_json(state_for_mode(mode))
+                        return
+                    if self.path != "/send":
+                        self.send_error(404)
+                        return
+                    if mode == "GIANT":
+                        giant_messages.append({"role": "user", "content": text})
+                        giant_transcript.append({"role": "User", "text": text})
+                        response_text, _, _, sample_key = _run_turn(
+                            tokenizer=tokenizer,
+                            messages=giant_messages,
+                            context_length=context_length,
+                            steps=max_steps,
+                            stop_on_eos=stop_on_eos,
+                            params=params,
+                            base_state=base_state,
+                            prefill_fn=prefill_fn,
+                            decode_fn=decode_fn,
+                            temperature=temperature,
+                            top_k=top_k,
+                            do_sample=do_sample,
+                            sample_key=sample_key,
+                        )
+                        giant_messages.append({"role": "assistant", "content": response_text})
+                        giant_transcript.append({"role": "GIANT", "text": response_text})
+                        self._send_json(state_for_mode(mode))
+                        return
+
+                    worker, ready_status = ensure_gpt2_worker()
+                    if worker.stdin is None or worker.stdout is None:
+                        raise RuntimeError("GPT-2 worker pipes are unavailable")
+                    gpt2_transcript.append({"role": "Prompt", "text": text})
+                    worker.stdin.write(json.dumps({"prompt": text}) + "\n")
+                    worker.stdin.flush()
+                    response_payload = None
+                    while True:
+                        response_line = worker.stdout.readline()
+                        if response_line == "":
+                            break
+                        response_line = response_line.strip()
+                        if not response_line:
+                            continue
+                        try:
+                            candidate = json.loads(response_line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(candidate, dict) and "ok" in candidate:
+                            response_payload = candidate
+                            break
+                    if response_payload is None:
+                        err = worker.stderr.read() if worker.stderr is not None else ""
+                        raise RuntimeError(f"GPT-2 worker exited unexpectedly: {err.strip()}")
+                    if not response_payload.get("ok"):
+                        raise RuntimeError(f"GPT-2 generation failed: {response_payload.get('error', 'unknown error')}")
+                    gpt2_transcript.append({"role": "GPT-2", "text": str(response_payload.get('text', '')).strip() or '<no new text>'})
+                    self._send_json(state_for_mode(mode, status=ready_status))
+            except Exception as exc:  # pragma: no cover - UI error path
+                self._send_json({"error": str(exc)}, status_code=500)
+
+        def log_message(self, format: str, *args) -> None:  # noqa: A003
+            return
+
+    class DemoServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+
+    with DemoServer(("127.0.0.1", 0), Handler) as server:
+        port = server.server_address[1]
+        url = f"http://127.0.0.1:{port}/"
+        print(f"Opening demo window at {url}")
+        webbrowser.open(url)
+        try:
+            server.serve_forever()
+        finally:
+            if gpt2_worker is not None and gpt2_worker.poll() is None:
+                gpt2_worker.terminate()
+                try:
+                    gpt2_worker.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    gpt2_worker.kill()
+
+
+def _run_window_chat(
+    *,
+    args: argparse.Namespace,
+    checkpoint_path,
+    messages: List[dict[str, str]],
+    base_messages: List[dict[str, str]],
+    has_non_system_seed: bool,
+    tokenizer,
+    context_length: int,
+    max_steps: int,
+    stop_on_eos: bool,
+    params,
+    base_state,
+    prefill_fn,
+    decode_fn,
+    temperature: float,
+    top_k: int,
+    do_sample: bool,
+    sample_key,
+) -> None:
+    try:
+        import tkinter as tk
+        from tkinter import scrolledtext, ttk
+    except ImportError as exc:  # pragma: no cover - platform dependent
+        _run_browser_window_chat(
+            args=args,
+            checkpoint_path=checkpoint_path,
+            messages=messages,
+            base_messages=base_messages,
+            has_non_system_seed=has_non_system_seed,
+            tokenizer=tokenizer,
+            context_length=context_length,
+            max_steps=max_steps,
+            stop_on_eos=stop_on_eos,
+            params=params,
+            base_state=base_state,
+            prefill_fn=prefill_fn,
+            decode_fn=decode_fn,
+            temperature=temperature,
+            top_k=top_k,
+            do_sample=do_sample,
+            sample_key=sample_key,
+        )
+        return
+
+    giant_messages = list(messages)
+    giant_base_messages = list(base_messages)
+    gpt2_worker = None
+
+    root = tk.Tk()
+    root.title("GIANT Chat Demo")
+    root.geometry("980x720")
+
+    header = tk.Frame(root)
+    header.pack(fill=tk.X, padx=12, pady=(12, 8))
+
+    tk.Label(header, text="Model", anchor="w").pack(side=tk.LEFT)
+    mode_var = tk.StringVar(value="GIANT")
+    mode_box = ttk.Combobox(header, textvariable=mode_var, values=["GIANT", "GPT-2"], state="readonly", width=16)
+    mode_box.pack(side=tk.LEFT, padx=(8, 0))
+
+    transcript = scrolledtext.ScrolledText(root, wrap=tk.WORD, font=("Menlo", 13))
+    transcript.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+    transcript.configure(state=tk.DISABLED)
+
+    status_var = tk.StringVar(value=f"Mode: GIANT | Checkpoint: {checkpoint_path.name}")
+    status = tk.Label(root, textvariable=status_var, anchor="w")
+    status.pack(fill=tk.X, padx=12)
+
+    controls = tk.Frame(root)
+    controls.pack(fill=tk.X, padx=12, pady=8)
+
+    input_box = tk.Text(controls, height=4, wrap=tk.WORD, font=("Menlo", 13))
+    input_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    def append_message(role: str, text: str) -> None:
+        transcript.configure(state=tk.NORMAL)
+        transcript.insert(tk.END, f"{role}: {text}\n\n")
+        transcript.configure(state=tk.DISABLED)
+        transcript.see(tk.END)
+
+    def clear_transcript() -> None:
+        transcript.configure(state=tk.NORMAL)
+        transcript.delete("1.0", tk.END)
+        transcript.configure(state=tk.DISABLED)
+
+    def current_mode() -> str:
+        return mode_var.get()
+
+    def set_default_status() -> None:
+        if current_mode() == "GIANT":
+            status_var.set(f"Mode: GIANT | Checkpoint: {checkpoint_path.name}")
+        else:
+            status_var.set("Mode: GPT-2 | Greedy continuation of 10 tokens")
+
+    def set_busy(is_busy: bool, detail: str = "") -> None:
+        if is_busy:
+            root.config(cursor="watch")
+            input_box.config(state=tk.DISABLED)
+            mode_box.config(state="disabled")
+            send_btn.config(state=tk.DISABLED)
+            new_btn.config(state=tk.DISABLED)
+            clear_btn.config(state=tk.DISABLED)
+            status_var.set(detail or "Generating...")
+        else:
+            root.config(cursor="")
+            input_box.config(state=tk.NORMAL)
+            mode_box.config(state="readonly")
+            send_btn.config(state=tk.NORMAL)
+            new_btn.config(state=tk.NORMAL)
+            clear_btn.config(state=tk.NORMAL)
+            status_var.set(detail or "")
+            if not detail:
+                set_default_status()
+            input_box.focus_set()
+        root.update_idletasks()
+
+    def ensure_gpt2_worker():
+        nonlocal gpt2_worker
+        if gpt2_worker is not None and gpt2_worker.poll() is None:
+            return gpt2_worker
+
+        worker_code = r'''
+import json
+import os
+import sys
+
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+device = "mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() else "cpu"
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+model = AutoModelForCausalLM.from_pretrained("gpt2")
+model.to(device)
+model.eval()
+
+print(json.dumps({"ready": True, "device": device}), flush=True)
+
+for raw in sys.stdin:
+    if not raw.strip():
+        continue
+    try:
+        payload = json.loads(raw)
+        prompt = str(payload.get("prompt", ""))
+        encoded = tokenizer(prompt, return_tensors="pt")
+        encoded = {k: v.to(device) for k, v in encoded.items()}
+        with torch.no_grad():
+            output = model.generate(
+                **encoded,
+                max_new_tokens=10,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        continuation = output[0][encoded["input_ids"].shape[1]:]
+        text = tokenizer.decode(continuation, skip_special_tokens=True)
+        print(json.dumps({"ok": True, "text": text, "device": device}), flush=True)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}), flush=True)
+'''
+        gpt2_worker = subprocess.Popen(
+            ["/Volumes/SSD/v/py/bin/python", "-u", "-c", worker_code],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        if gpt2_worker.stdout is None:
+            raise RuntimeError("Failed to start GPT-2 worker stdout pipe")
+        ready_line = gpt2_worker.stdout.readline().strip()
+        if not ready_line:
+            err = gpt2_worker.stderr.read() if gpt2_worker.stderr is not None else ""
+            raise RuntimeError(f"GPT-2 worker failed to start: {err.strip()}")
+        ready = json.loads(ready_line)
+        if not ready.get("ready"):
+            raise RuntimeError(f"GPT-2 worker startup failed: {ready}")
+        status_var.set(f"Mode: GPT-2 | Device: {ready.get('device', 'unknown')} | Greedy continuation of 10 tokens")
+        return gpt2_worker
+
+    def run_giant_generation() -> None:
+        nonlocal sample_key, giant_messages
+        response_text, prefill_time, decode_time, sample_key = _run_turn(
+            tokenizer=tokenizer,
+            messages=giant_messages,
+            context_length=context_length,
+            steps=max_steps,
+            stop_on_eos=stop_on_eos,
+            params=params,
+            base_state=base_state,
+            prefill_fn=prefill_fn,
+            decode_fn=decode_fn,
+            temperature=temperature,
+            top_k=top_k,
+            do_sample=do_sample,
+            sample_key=sample_key,
+        )
+        giant_messages.append({"role": "assistant", "content": response_text})
+        append_message("GIANT", response_text)
+        if args.verbose:
+            toks_per_s = (max_steps / decode_time) if decode_time > 0 else float("inf")
+            append_message(
+                "perf",
+                f"prefill={prefill_time:.4f}s decode={decode_time:.4f}s tokens/s={toks_per_s:.2f}",
+            )
+
+    def run_gpt2_generation(prompt_text: str) -> None:
+        worker = ensure_gpt2_worker()
+        if worker.stdin is None or worker.stdout is None:
+            raise RuntimeError("GPT-2 worker pipes are unavailable")
+        worker.stdin.write(json.dumps({"prompt": prompt_text}) + "\n")
+        worker.stdin.flush()
+        response_line = worker.stdout.readline().strip()
+        if not response_line:
+            err = worker.stderr.read() if worker.stderr is not None else ""
+            raise RuntimeError(f"GPT-2 worker exited unexpectedly: {err.strip()}")
+        payload = json.loads(response_line)
+        if not payload.get("ok"):
+            raise RuntimeError(f"GPT-2 generation failed: {payload.get('error', 'unknown error')}")
+        continuation_text = str(payload.get("text", "")).strip()
+        append_message("GPT-2", continuation_text or "<no new text>")
+
+    def reset_chat() -> None:
+        nonlocal giant_messages
+        giant_messages = list(giant_base_messages)
+        clear_transcript()
+        if current_mode() == "GIANT":
+            for message in giant_messages:
+                append_message(message["role"].capitalize(), message["content"])
+        set_default_status()
+
+    def switch_mode(event=None) -> None:
+        reset_chat()
+
+    def close_window() -> None:
+        nonlocal gpt2_worker
+        if gpt2_worker is not None and gpt2_worker.poll() is None:
+            gpt2_worker.terminate()
+            try:
+                gpt2_worker.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                gpt2_worker.kill()
+        root.destroy()
+
+    def send_message(event=None):
+        nonlocal giant_messages
+        user_text = input_box.get("1.0", tk.END).strip()
+        if not user_text:
+            return "break"
+        if user_text == "/new":
+            reset_chat()
+            input_box.delete("1.0", tk.END)
+            return "break"
+        if user_text == "/clear":
+            clear_transcript()
+            input_box.delete("1.0", tk.END)
+            return "break"
+
+        input_box.delete("1.0", tk.END)
+        mode = current_mode()
+        append_message("User" if mode == "GIANT" else "Prompt", user_text)
+        if mode == "GIANT":
+            giant_messages.append({"role": "user", "content": user_text})
+            busy_text = "Generating GIANT response..."
+        else:
+            busy_text = "Loading GPT-2 and generating continuation..."
+        set_busy(True, busy_text)
+        try:
+            if mode == "GIANT":
+                run_giant_generation()
+            else:
+                run_gpt2_generation(user_text)
+        finally:
+            set_busy(False)
+        return "break"
+
+    send_btn = tk.Button(controls, text="Send", width=10, command=send_message)
+    send_btn.pack(side=tk.LEFT, padx=(8, 0))
+    new_btn = tk.Button(controls, text="New Chat", width=10, command=reset_chat)
+    new_btn.pack(side=tk.LEFT, padx=(8, 0))
+    clear_btn = tk.Button(controls, text="Clear", width=10, command=clear_transcript)
+    clear_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+    mode_box.bind("<<ComboboxSelected>>", switch_mode)
+    input_box.bind("<Command-Return>", send_message)
+    input_box.bind("<Control-Return>", send_message)
+    root.protocol("WM_DELETE_WINDOW", close_window)
+
+    for message in giant_messages:
+        append_message(message["role"].capitalize(), message["content"])
+
+    if giant_messages and has_non_system_seed:
+        set_busy(True, "Generating initial response...")
+        try:
+            run_giant_generation()
+        finally:
+            set_busy(False)
+
+    input_box.focus_set()
+    root.mainloop()
+
+
 def main() -> None:
     args = parse_args()
     cfg = load_configs(args.config, args.global_config)
@@ -198,9 +970,10 @@ def main() -> None:
     messages = _parse_messages(args)
     base_messages = _base_messages_for_new_context(args)
     has_non_system_seed = any(message.get("role") != "system" for message in messages)
-    interactive = bool(args.interactive or not has_non_system_seed)
+    interactive = bool(args.window or args.interactive or not has_non_system_seed)
     checkpoint_path = resolve_checkpoint_path(cfg, args.checkpoint, args.checkpoint_dir)
-    print(f"Using checkpoint: {checkpoint_path}")
+    if not args.window:
+        print(f"Using checkpoint: {checkpoint_path}")
 
     tokenizer = load_tokenizer(cfg)
 
@@ -240,6 +1013,28 @@ def main() -> None:
             print(f"prefill_time_s: {prefill_time:.6f}")
             print(f"decode_time_s:  {decode_time:.6f}")
             print(f"tokens_per_second_decode: {toks_per_s:.6f}\n")
+
+    if args.window:
+        _run_window_chat(
+            args=args,
+            checkpoint_path=checkpoint_path,
+            messages=messages,
+            base_messages=base_messages,
+            has_non_system_seed=has_non_system_seed,
+            tokenizer=tokenizer,
+            context_length=context_length,
+            max_steps=max_steps,
+            stop_on_eos=stop_on_eos,
+            params=params,
+            base_state=base_state,
+            prefill_fn=prefill_fn,
+            decode_fn=decode_fn,
+            temperature=temperature,
+            top_k=top_k,
+            do_sample=do_sample,
+            sample_key=sample_key,
+        )
+        return
 
     if messages and has_non_system_seed:
         response_text, prefill_time, decode_time, sample_key = _run_turn(

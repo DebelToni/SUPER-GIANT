@@ -1,3 +1,4 @@
+GIANT-Mythos/
 *.zip
 *.pkl
 .DS_Store
@@ -9,7 +10,6 @@ logs/
 node_modules/
 .env
 checkpoints/
-neo-english-cust/
 trained_models/
 .DS_Store
 *checkpoints/
@@ -22,3 +22,4 @@ agents.md
 *.egg-info/
 A-Logs.md
 TiDAR/Docs/Benchmark_logs/
+package-lock.json

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  cat <<'EOF'
+Usage: arxiv-src <arxiv-url-or-id>
+
+Examples:
+  arxiv-src "https://arxiv.org/abs/2601.07372"
+  arxiv-src "https://arxiv.org/pdf/2601.07372.pdf"
+  arxiv-src "2601.07372"
+EOF
+  exit 1
+fi
+
+INPUT="$1"
+CACHE_ROOT="${ARXIV_CACHE_ROOT:-$HOME/.cache/super-giant/arxiv}"
+mkdir -p "$CACHE_ROOT"
+
+PARSED="$(python3 - "$INPUT" <<'PY'
+import re
+import sys
+from urllib.parse import urlparse
+
+s = sys.argv[1].strip()
+
+def normalize_pdf_suffix(value: str) -> str:
+    if value.endswith('.pdf'):
+        return value[:-4]
+    return value
+
+def parse_id(value: str) -> str | None:
+    patterns = [
+        r"(\d{4}\.\d{4,5}(?:v\d+)?)",
+        r"([a-z\-]+(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?)",
+    ]
+    for p in patterns:
+        m = re.search(p, value)
+        if m:
+            return m.group(1)
+    return None
+
+parsed = urlparse(s)
+host = parsed.netloc.lower()
+path = parsed.path.strip('/')
+
+candidate = None
+if host.endswith('arxiv.org'):
+    parts = [part for part in path.split('/') if part]
+    if len(parts) >= 2 and parts[0] in {'abs', 'pdf', 'html', 'src', 'format'}:
+        candidate = normalize_pdf_suffix(parts[1])
+    elif parts:
+        candidate = normalize_pdf_suffix(parts[-1])
+else:
+    candidate = s
+
+arxiv_id = parse_id(candidate or '') or parse_id(s)
+if arxiv_id:
+    versionless = re.sub(r'v\d+$', '', arxiv_id)
+    print(arxiv_id)
+    print(versionless)
+    sys.exit(0)
+
+sys.exit(1)
+PY
+)"
+
+ARXIV_ID="$(printf '%s\n' "$PARSED" | sed -n '1p')"
+ARXIV_ID_VERSIONLESS="$(printf '%s\n' "$PARSED" | sed -n '2p')"
+
+if [[ -z "$ARXIV_ID" ]]; then
+  echo "Could not parse arXiv ID from input: $INPUT" >&2
+  exit 2
+fi
+
+ABS_URL="https://arxiv.org/abs/${ARXIV_ID}"
+PDF_URL="https://arxiv.org/pdf/${ARXIV_ID}.pdf"
+HTML_URL="https://arxiv.org/html/${ARXIV_ID_VERSIONLESS}"
+SRC_URL="https://arxiv.org/src/${ARXIV_ID}"
+TARBALL="${CACHE_ROOT}/${ARXIV_ID}.tar.gz"
+EXTRACT_DIR="${CACHE_ROOT}/${ARXIV_ID}"
+
+if [[ ! -f "$TARBALL" ]]; then
+  curl --fail --location --silent --show-error "$SRC_URL" --output "$TARBALL"
+fi
+
+if [[ ! -d "$EXTRACT_DIR" ]] || [[ -z "$(ls -A "$EXTRACT_DIR" 2>/dev/null || true)" ]]; then
+  rm -rf "$EXTRACT_DIR"
+  mkdir -p "$EXTRACT_DIR"
+  tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
+fi
+
+ENTRYPOINT="$(python3 - "$EXTRACT_DIR" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+tex_files = [p for p in root.rglob('*.tex') if p.is_file()]
+
+if not tex_files:
+    print("")
+    sys.exit(0)
+
+preferred = ["main.tex", "paper.tex", "ms.tex", "article.tex"]
+preferred_map = {name: idx for idx, name in enumerate(preferred)}
+
+def has_doc_markers(p: Path) -> bool:
+    try:
+      txt = p.read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+      return False
+    return "\\documentclass" in txt and "\\begin{document}" in txt
+
+doc_candidates = [p for p in tex_files if has_doc_markers(p)]
+candidates = doc_candidates if doc_candidates else tex_files
+
+def sort_key(p: Path):
+    rel = p.relative_to(root)
+    return (
+        preferred_map.get(p.name, 999),
+        len(rel.parts),
+        -p.stat().st_size,
+        str(rel),
+    )
+
+best = sorted(candidates, key=sort_key)[0]
+print(str(best))
+PY
+)"
+
+echo "ARXIV_ID=$ARXIV_ID"
+echo "ARXIV_ID_VERSIONLESS=$ARXIV_ID_VERSIONLESS"
+echo "ABS_URL=$ABS_URL"
+echo "PDF_URL=$PDF_URL"
+echo "HTML_URL=$HTML_URL"
+echo "SRC_URL=$SRC_URL"
+echo "TARBALL=$TARBALL"
+echo "EXTRACT_DIR=$EXTRACT_DIR"
+echo "ENTRYPOINT=$ENTRYPOINT"

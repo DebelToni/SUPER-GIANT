@@ -7,6 +7,8 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
 
+from GIANT.v3.model.model_mode import model_mode_is_causal, normalize_model_mode
+
 # If multi-GPU cuDNN issues reappear, refer to commit
 # 9e75c6de7bac69414c68eb7c23342123ca2db50c.
 
@@ -61,11 +63,19 @@ class NativeJaxSelfAttention(nn.Module):
     num_kv: int = 1
     enable_xsa: bool = False
     rotary_dim: Optional[int] = None
+    mode: str = "decoder"
     causal: bool = True
 
     def setup(self):
         self._compute_dtype = _to_dtype(self.dtype)
         self._param_dtype = _to_dtype(self.param_dtype)
+        self._mode = normalize_model_mode(self.mode)
+        self._resolved_causal = model_mode_is_causal(self._mode)
+        if bool(self.causal) != self._resolved_causal:
+            raise ValueError(
+                f"Inconsistent attention config: mode={self._mode!r} implies causal={self._resolved_causal}, "
+                f"but causal={self.causal!r} was provided."
+            )
         assert (
             self.qkv_features % self.num_heads == 0
         ), "qkv_features must be divisible by num_heads"
@@ -114,8 +124,8 @@ class NativeJaxSelfAttention(nn.Module):
         b, l, _ = x.shape
         impl = "cudnn" if IS_GPU else "xla"
 
-        if use_kv_cache and not self.causal:
-            raise ValueError("KV cache is only supported for causal attention")
+        if self._mode == "encoder" and use_kv_cache:
+            raise ValueError("KV cache is only supported for decoder attention")
 
         head_dim = self.head_dim
         q_size   = self.num_heads * head_dim
@@ -156,7 +166,30 @@ class NativeJaxSelfAttention(nn.Module):
         k = apply_partial_rope(k, sin, cos, self._rotary_dim)
 
 
-        if use_kv_cache:
+        if self._mode == "encoder":
+            k_full = k
+            v_full = v
+            y = jax.nn.dot_product_attention(
+                q,
+                k_full,
+                v_full,
+                bias=attention_bias,
+                is_causal=False,
+                implementation=impl,
+            )
+            if self.enable_xsa:
+                v_proj = v
+                if self.num_heads != self.num_kv:
+                    repeat = self.num_heads // self.num_kv
+                    v_proj = jnp.repeat(v_proj, repeat, axis=2)
+                v_proj = v_proj / jnp.sqrt(
+                    jnp.sum(jnp.square(v_proj), axis=-1, keepdims=True)
+                    + jnp.asarray(1e-6, dtype=v_proj.dtype)
+                )
+                y = y - jnp.sum(y * v_proj, axis=-1, keepdims=True) * v_proj
+            y = y.reshape(b, l, self.qkv_features)
+
+        elif use_kv_cache:
             assert cur_index is not None, "Need cur_index when use_kv_cache=True"
             cache_shape = (b, self.num_kv, self.context_length, head_dim)
             cached_k = self.variable(
@@ -231,10 +264,6 @@ class NativeJaxSelfAttention(nn.Module):
             y = y.reshape(b, l, self.qkv_features)
 
         else:
-            if False:
-                q = q / jnp.sqrt(head_dim)
-
-            # Use GQA/MQA by passing K/V with num_kv heads directly.
             k_full = k
             v_full = v
             y = jax.nn.dot_product_attention(
@@ -242,7 +271,7 @@ class NativeJaxSelfAttention(nn.Module):
                 k_full,
                 v_full,
                 bias=attention_bias,
-                is_causal=self.causal,
+                is_causal=True,
                 implementation=impl,
             )
             if self.enable_xsa:
@@ -276,6 +305,7 @@ class TinyTransformerBlock(nn.Module):
     rotary_dim: Optional[int] = None
     use_remat: bool = False
     enable_xsa: bool = False
+    mode: str = "decoder"
     causal: bool = True
 
     @nn.compact
@@ -305,6 +335,7 @@ class TinyTransformerBlock(nn.Module):
                 param_dtype=param_dtype,
                 rotary_dim=module.rotary_dim,
                 enable_xsa=module.enable_xsa,
+                mode=module.mode,
                 causal=module.causal,
             )(
                 h_norm,

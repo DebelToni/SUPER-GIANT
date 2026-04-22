@@ -1,0 +1,25 @@
+labels:
+  - reject
+  - keep
+
+output:
+  benchmark_dir: data_curation/quality_filter_bg/benchmarks/tiny_local
+
+sources:
+  - name: wiki_positive
+    dataset: wikimedia/wikipedia
+    config_name: 20231101.bg
+    split: train[:160]
+    streaming: false
+    label: keep
+    prefix_fields: [title]
+    text_fields: [text]
+    limit: 120
+  - name: clickbait_negative
+    dataset: community-datasets/clickbait_news_bg
+    split: train[:240]
+    streaming: false
+    label: reject
+    prefix_fields: [content_title]
+    text_fields: [content]
+    limit: 120

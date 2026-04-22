@@ -1,0 +1,69 @@
+global_seed: 0
+
+model:
+  embedding_size: 640
+  num_heads: 10
+  num_kv_heads: 10
+  num_layers: 15
+  feed_forward_size: 2560
+  rope_dim: 64
+  context_length: 256
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  enable_xsa: true
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tokenizer:
+  name: unused
+  cache_dir: /proj/giant-data/hf_cache/tokenizer_cache
+  use_custom: true
+  custom_path: /proj/giant-data/GIANT/GIANT-Chat/tokenizers/giant_chat_bg_en_bpe32k
+  pad_token_override: null
+
+optimizer:
+  base_learning_rate: 6.0e-05
+  min_learning_rate: 6.0e-06
+  warmup_tokens: 5000000
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions:
+    - bias
+    - scale
+    - embedding
+
+training:
+  batch_size: 64
+  gradient_accumulation: 1
+  seed: 0
+  log_every: 20
+  checkpoint_every: 2500
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 2
+  scan_chunk: 4
+  prefetch_size: 4
+  nan_check: false
+  autotune_scan_chunk: false
+  autotune_prefetch: false
+
+stages:
+  - name: chat_sft_bg_en_smoltalk
+    dataset: chat_sft_bg_en_smoltalk
+    seq_len: 256
+    epochs: 2
+    fraction: 1.0
+    shuffle: true
+
+qa_finetune: {}
+
+paths:
+  data_root: "/proj/giant-data"
+  processed_data_root: "/proj/giant-data/GIANT/GIANT-Chat/data/chat_bg_en_smoltalk_bpe32k"
+  dataloader_state_root: "/proj/giant-data/GIANT/GIANT-Chat/training/3_sft_100m_bg_en_ctx256_32k_smoltalk/training_states/dataloader_state"
+  logs_root: "/proj/giant-data/GIANT/GIANT-Chat/training/3_sft_100m_bg_en_ctx256_32k_smoltalk/logs"
+  checkpoints_root: "/proj/giant-data/GIANT/GIANT-Chat/training/3_sft_100m_bg_en_ctx256_32k_smoltalk"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+inference:
+  stop_on_eos: true

@@ -1,0 +1,48 @@
+tokenizer:
+  name: "unused"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+  use_custom: true
+  custom_path: "/proj/giant-data/GIANT/GIANT-Chat/tokenizers/giant_chat_bg_en_bpe32k"
+
+paths:
+  data_root: "/proj/giant-data"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+outputs:
+  processed_root: "/proj/giant-data/GIANT/GIANT-Chat/data/pretraining_bg_en_900m_bpe32k"
+  rows_per_shard: 65536
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 4212
+  write_batch_size: 256
+  dry_run_preview_rows: 200
+
+stages:
+  pretrain_bg_en_900m:
+    description: "Weighted BG+EN pretraining mix packed to 256 tokens for the fresh bilingual 100M-class chat model"
+    output_dir: "pretrain_bg_en_900m"
+    sequence_length: 256
+    target_tokens: 900000000
+    min_tokens: 32
+    pack_sequences: true
+    add_eos: true
+    deduplicate: false
+    source_mix_mode: weighted_random
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: json
+        json_root: "/proj/giant-data/GIANT/data_curation/quality_filter_bg/full_lumees_fasttext_split"
+        file_glob: "keep_all.jsonl"
+        text_field: "text"
+        sampling_weight: 0.65
+
+      - type: huggingface
+        dataset_name: "karpathy/climbmix-400b-shuffle"
+        split: "train"
+        streaming: true
+        text_field: "text"
+        sampling_weight: 0.35

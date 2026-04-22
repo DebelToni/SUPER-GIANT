@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.model_mode import model_mode_is_causal, resolve_model_mode
 from GIANT.v3.model.attention_bias import build_answer_hidden_bias
 from GIANT.v3.model.arrow_data_loader import ShardedArrowDataset, StageDataLoader
 from GIANT.v3.model.checkpoint_manager import latest as latest_ckpt
@@ -164,6 +165,7 @@ def main():
         dataset_root = (base_root / dataset_root).resolve()
 
     max_seq_len = max(int(stage["seq_len"]) for stage in stage_cfgs)
+    model_mode = resolve_model_mode(cfg.model)
     model = GiantGPT(
         vocab_size=len(tokenizer),
         context_length=max_seq_len,
@@ -178,7 +180,8 @@ def main():
         compute_dtype=cfg.model.compute_dtype,
         use_remat=bool(cfg.model.use_remat),
         enable_xsa=bool(cfg.model.enable_xsa),
-        causal=bool(cfg.model.get("causal", True)),
+        mode=model_mode,
+        causal=model_mode_is_causal(model_mode),
         mask_answer_token_for_encoder=bool(cfg.model.get("mask_answer_token_for_encoder", False)),
     )
 

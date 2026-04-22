@@ -1,0 +1,15 @@
+labels:
+  - keep
+
+output:
+  benchmark_dir: data_curation/quality_filter_bg/benchmarks/bpos_probe
+
+sources:
+  - name: bpos_direct
+    source_type: oai_pmh
+    endpoint: https://pub.bpos.bg/oai/request
+    metadata_prefix: oai_dc
+    label: keep
+    prefix_fields: [title_bg]
+    text_fields: [abstract_bg]
+    limit: 20

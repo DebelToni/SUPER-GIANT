@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.model_mode import model_mode_is_causal, resolve_model_mode
 from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
 from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
 try:
@@ -274,6 +275,7 @@ def load_tokenizer(cfg: GenerateFasterConfig):
 
 def build_model(cfg: GenerateFasterConfig, vocab_size: int, context_length: int) -> GiantGPT:
     model_cfg = cfg.model
+    mode = resolve_model_mode(model_cfg)
     return GiantGPT(
         vocab_size=vocab_size,
         context_length=context_length,
@@ -288,7 +290,8 @@ def build_model(cfg: GenerateFasterConfig, vocab_size: int, context_length: int)
         compute_dtype=model_cfg.compute_dtype,
         use_remat=bool(model_cfg.use_remat),
         enable_xsa=bool(model_cfg.enable_xsa),
-        causal=bool(getattr(model_cfg, "causal", True)),
+        mode=mode,
+        causal=model_mode_is_causal(mode),
     )
 
 

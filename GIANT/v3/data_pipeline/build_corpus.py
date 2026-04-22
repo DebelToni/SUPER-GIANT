@@ -97,6 +97,7 @@ class StageSourceCfg:
     json_root: Optional[str] = None
     file_glob: str = "**/*.json*"
     max_documents: Optional[int] = None
+    sampling_weight: float = 1.0
     chat_messages_field: str = "messages"
     chat_role_field: str = "role"
     chat_content_field: str = "content"
@@ -137,6 +138,7 @@ class StageCfg:
     rows_per_shard: Optional[int] = None
     max_documents: Optional[int] = None
     seed_offset: Optional[int] = None
+    source_mix_mode: str = "sequential"
     sources: List[StageSourceCfg] = field(default_factory=list)
 
 
@@ -916,17 +918,55 @@ def _iter_json_dir(source: StageSourceCfg) -> Iterator[Dict[str, Any]]:
                 return
 
 
-def iter_stage_rows_raw(stage: StageCfg) -> Iterator[Tuple[StageSourceCfg, Dict[str, Any]]]:
-    for source in stage.sources:
-        source_type = (source.type or "huggingface").lower()
-        if source_type in {"hf", "huggingface"}:
-            for row in _iter_hf_source(source):
+def _iter_rows_for_source(source: StageSourceCfg) -> Iterator[Dict[str, Any]]:
+    source_type = (source.type or "huggingface").lower()
+    if source_type in {"hf", "huggingface"}:
+        yield from _iter_hf_source(source)
+        return
+    if source_type in {"json", "jsonl", "json_dir"}:
+        yield from _iter_json_dir(source)
+        return
+    raise ValueError(f"Unknown source.type '{source.type}'")
+
+
+def iter_stage_rows_raw(
+    stage: StageCfg,
+    rng: Optional[np.random.Generator] = None,
+) -> Iterator[Tuple[StageSourceCfg, Dict[str, Any]]]:
+    mix_mode = str(getattr(stage, "source_mix_mode", "sequential") or "sequential").strip().lower()
+    if mix_mode in {"", "sequential"} or len(stage.sources) <= 1:
+        for source in stage.sources:
+            for row in _iter_rows_for_source(source):
                 yield source, row
-        elif source_type in {"json", "jsonl", "json_dir"}:
-            for row in _iter_json_dir(source):
-                yield source, row
-        else:
-            raise ValueError(f"Unknown source.type '{source.type}' for stage {stage.name}")
+        return
+
+    if mix_mode != "weighted_random":
+        raise ValueError(
+            f"Unsupported stage.source_mix_mode={stage.source_mix_mode!r}; expected 'sequential' or 'weighted_random'"
+        )
+    if rng is None:
+        rng = np.random.default_rng(0)
+
+    active_sources: List[Tuple[StageSourceCfg, Iterator[Dict[str, Any]]]] = [
+        (source, _iter_rows_for_source(source)) for source in stage.sources
+    ]
+
+    while active_sources:
+        raw_weights = np.asarray(
+            [max(0.0, float(getattr(source, "sampling_weight", 1.0) or 0.0)) for source, _ in active_sources],
+            dtype=np.float64,
+        )
+        if not np.any(raw_weights > 0):
+            raw_weights = np.ones(len(active_sources), dtype=np.float64)
+        probs = raw_weights / raw_weights.sum()
+        source_idx = int(rng.choice(len(active_sources), p=probs))
+        source, iterator = active_sources[source_idx]
+        try:
+            row = next(iterator)
+        except StopIteration:
+            del active_sources[source_idx]
+            continue
+        yield source, row
 
 
 def iter_stage_rows(
@@ -958,7 +998,8 @@ def iter_stage_rows(
         batch_spans.clear()
 
     doc_limit = stage.max_documents
-    for source, row in iter_stage_rows_raw(stage):
+    source_rng = np.random.default_rng(int(rng.integers(0, np.iinfo(np.uint32).max)))
+    for source, row in iter_stage_rows_raw(stage, rng=source_rng):
         if emitter.done:
             break
         if doc_limit and stats.documents >= doc_limit:
@@ -1168,6 +1209,7 @@ def _parse_stage_sources(raw_sources: Iterable[Any]) -> List[StageSourceCfg]:
             json_root=src_dict.get("json_root"),
             file_glob=src_dict.get("file_glob", "**/*.json*"),
             max_documents=src_dict.get("max_documents"),
+            sampling_weight=float(src_dict.get("sampling_weight", 1.0)),
             chat_messages_field=src_dict.get("chat_messages_field", "messages"),
             chat_role_field=src_dict.get("chat_role_field", "role"),
             chat_content_field=src_dict.get("chat_content_field", "content"),
@@ -1201,6 +1243,7 @@ def _parse_stages(corpus_cfg: OmegaConf, outputs: OutputsCfg) -> List[StageCfg]:
         stage_cfg.sequence_length = int(stage_cfg.sequence_length)
         stage_cfg.min_tokens = int(stage_cfg.min_tokens or 0)
         stage_cfg.rows_per_shard = int(stage_cfg.rows_per_shard or outputs.rows_per_shard)
+        stage_cfg.source_mix_mode = str(stage_cfg.source_mix_mode or "sequential").strip().lower() or "sequential"
         if stage_cfg.target_tokens is not None:
             stage_cfg.target_tokens = int(stage_cfg.target_tokens)
         if stage_cfg.target_sequences is not None:

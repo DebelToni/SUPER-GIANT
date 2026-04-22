@@ -1,0 +1,18 @@
+labels:
+  - reject
+  - keep
+
+input:
+  benchmark_dir: data_curation/quality_filter_bg/benchmarks/tiny_local
+
+output:
+  run_dir: data_curation/quality_filter_bg/runs/fasttext_tiny_local
+
+model:
+  type: fasttext
+
+training:
+  batch_size: 64
+  num_epochs: 6
+  learning_rate: 0.001
+  weight_decay: 0.0001

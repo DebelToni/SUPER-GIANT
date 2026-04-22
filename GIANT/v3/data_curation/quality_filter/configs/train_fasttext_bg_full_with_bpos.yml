@@ -1,0 +1,18 @@
+labels:
+  - reject
+  - keep
+
+input:
+  benchmark_dir: data_curation/quality_filter_bg/benchmarks/bg_full_with_bpos_v1
+
+output:
+  run_dir: data_curation/quality_filter_bg/runs/fasttext_bg_full_with_bpos_v1
+
+model:
+  type: fasttext
+
+training:
+  batch_size: 128
+  num_epochs: 6
+  learning_rate: 0.001
+  weight_decay: 0.0001

@@ -8,6 +8,7 @@ import jax.numpy as jnp
 from omegaconf import OmegaConf
 
 from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.model_mode import model_mode_is_causal, resolve_model_mode
 
 
 def load_model_cfg() -> OmegaConf:
@@ -21,6 +22,7 @@ def load_model_cfg() -> OmegaConf:
 
 
 def build_model(cfg: OmegaConf, vocab_size: int) -> GiantGPT:
+    mode = resolve_model_mode(cfg)
     return GiantGPT(
         vocab_size=vocab_size,
         context_length=cfg.context_length,
@@ -35,7 +37,8 @@ def build_model(cfg: OmegaConf, vocab_size: int) -> GiantGPT:
         dropout_rate=0.0,
         use_remat=bool(cfg.use_remat),
         enable_xsa=bool(cfg.enable_xsa),
-        causal=bool(getattr(cfg, "causal", True)),
+        mode=mode,
+        causal=model_mode_is_causal(mode),
     )
 
 

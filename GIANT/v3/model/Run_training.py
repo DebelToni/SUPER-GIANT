@@ -22,6 +22,7 @@ from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.model_mode import model_mode_is_causal, resolve_model_mode
 from GIANT.v3.model.Training_step import loss_and_grad
 from GIANT.v3.model.arrow_data_loader import (
     ShardedArrowDataset,
@@ -786,7 +787,8 @@ def main() -> None:
     rotary_dim = int(cfg.model.rope_dim)
     use_remat = bool(cfg.model.use_remat)
     enable_xsa = bool(cfg.model.enable_xsa)
-    causal = bool(cfg.model.get("causal", True))
+    model_mode = resolve_model_mode(cfg.model)
+    causal = model_mode_is_causal(model_mode)
     mask_answer_token_for_encoder = bool(cfg.model.get("mask_answer_token_for_encoder", False))
     param_dtype = _to_dtype(cfg.model.param_dtype)
     compute_dtype = _to_dtype(cfg.model.compute_dtype)
@@ -804,6 +806,7 @@ def main() -> None:
         compute_dtype=compute_dtype,
         use_remat=use_remat,
         enable_xsa=enable_xsa,
+        mode=model_mode,
         causal=causal,
         mask_answer_token_for_encoder=mask_answer_token_for_encoder,
     )

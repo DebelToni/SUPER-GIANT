@@ -1,0 +1,67 @@
+labels:
+  - reject
+  - keep
+
+output:
+  benchmark_dir: data_curation/quality_filter_bg/benchmarks/bg_recommended_v1
+
+benchmark:
+  text:
+    min_chars: 500
+    max_chars: 2000
+    target_chars: 1100
+
+sources:
+  - name: wikimedia_bg
+    dataset: wikimedia/wikipedia
+    config_name: 20231101.bg
+    split: train
+    streaming: true
+    label: keep
+    prefix_fields: [title]
+    text_fields: [text]
+    limit: 4000
+  - name: lumees_finewiki_bg
+    dataset: lumees/bulgarian-corpus-33b
+    config_name: pretrain
+    split: train
+    streaming: true
+    label: keep
+    text_fields: [text]
+    field_equals:
+      language: bg
+    field_in:
+      source: [finewiki]
+    limit: 4000
+  - name: lumees_bpos_science
+    dataset: lumees/bulgarian-corpus-33b
+    config_name: pretrain
+    split: train
+    streaming: true
+    label: keep
+    text_fields: [text]
+    field_equals:
+      language: bg
+    field_in:
+      source: [bpos_science]
+    limit: 2500
+  - name: lumees_fineweb_bg
+    dataset: lumees/bulgarian-corpus-33b
+    config_name: pretrain
+    split: train
+    streaming: true
+    label: reject
+    text_fields: [text]
+    field_equals:
+      language: bg
+    field_in:
+      source: [fineweb-2]
+    limit: 7000
+  - name: clickbait_news_bg
+    dataset: community-datasets/clickbait_news_bg
+    split: train
+    streaming: false
+    label: reject
+    prefix_fields: [content_title]
+    text_fields: [content]
+    limit: 1500

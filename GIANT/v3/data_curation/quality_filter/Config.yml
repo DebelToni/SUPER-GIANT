@@ -1,0 +1,41 @@
+paths:
+  data_root: /proj/giant-data/GIANT
+  quality_filter_root: data_curation/quality_filter_bg
+  hf_cache_root: /proj/giant-data/hf_cache
+
+benchmark:
+  seed: 0
+  splits:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+  text:
+    min_chars: 500
+    max_chars: 2000
+    target_chars: 1200
+    min_cyrillic_ratio: 0.55
+
+features:
+  max_tokens: 256
+  vocab_size: 50000
+
+training:
+  seed: 0
+  batch_size: 64
+  num_epochs: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+
+models:
+  fasttext:
+    embed_dim: 96
+    dropout_rate: 0.0
+  tiny_encoder:
+    embed_dim: 96
+    num_heads: 4
+    feed_forward_size: 192
+    num_layers: 1
+    dropout_rate: 0.0
+    enable_xsa: false
+    param_dtype: float32
+    compute_dtype: bfloat16

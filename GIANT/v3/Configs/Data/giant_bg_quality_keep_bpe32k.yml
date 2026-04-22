@@ -1,0 +1,38 @@
+tokenizer:
+  name: "unused"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+  use_custom: true
+  custom_path: "/proj/giant-data/GIANT/quality_filter_bg/tokenizers/giant_bg_en_bpe32k_quality"
+
+paths:
+  data_root: "/proj/giant-data"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+outputs:
+  processed_root: "/proj/giant-data/GIANT/quality_filter_bg/data/filtered_bg_keep_bpe32k"
+  rows_per_shard: 8192
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 4212
+  write_batch_size: 64
+  dry_run_preview_rows: 64
+
+stages:
+  bg_quality_keep_bpe32k:
+    description: "FastText-filtered Bulgarian keep corpus tokenized with the bilingual BG/EN 32k tokenizer"
+    output_dir: "bg_quality_keep_bpe32k"
+    sequence_length: 256
+    min_tokens: 32
+    pack_sequences: true
+    add_eos: true
+    deduplicate: false
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: json
+        json_root: "/proj/giant-data/GIANT/data_curation/quality_filter_bg/full_lumees_fasttext_split"
+        file_glob: "keep_all.jsonl"
+        text_field: "text"

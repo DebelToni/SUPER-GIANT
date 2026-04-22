@@ -1,0 +1,44 @@
+hf_cache_root: "/proj/giant-data/hf_cache"
+output_dir: "/proj/giant-data/GIANT/GIANT-Chat/tokenizers/giant_chat_bg_en_bpe32k"
+vocab_size: 32768
+min_frequency: 2
+preview_examples: 4
+
+special_tokens:
+  - "<|endoftext|>"
+  - "<|im_start|>"
+  - "<|im_end|>"
+
+normalization:
+  nfkc: true
+  collapse_whitespace: true
+
+training_sources:
+  - type: json
+    json_root: "/proj/giant-data/GIANT/data_curation/quality_filter_bg/full_lumees_fasttext_split"
+    file_glob: "high_quality.jsonl"
+    text_field: "text"
+    max_documents: 1000000
+
+  - type: huggingface
+    dataset_name: "wikimedia/wikipedia"
+    dataset_config: "20231101.en"
+    split: "train"
+    streaming: true
+    text_field: "text"
+    max_documents: 180000
+
+validation_sources:
+  - type: json
+    json_root: "/proj/giant-data/GIANT/data_curation/quality_filter_bg/full_lumees_fasttext_split"
+    file_glob: "high_quality.jsonl"
+    text_field: "text"
+    max_documents: 5000
+
+  - type: huggingface
+    dataset_name: "wikimedia/wikipedia"
+    dataset_config: "20231101.en"
+    split: "train"
+    streaming: true
+    text_field: "text"
+    max_documents: 5000

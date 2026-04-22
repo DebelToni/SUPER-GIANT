@@ -1,4 +1,5 @@
 model:
+  mode: decoder
   embedding_size: 640
   num_heads: 10
   num_kv_heads: 5

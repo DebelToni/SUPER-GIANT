@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 
 from GIANT.v3.Long.longdsl import render_messages
 from GIANT.v3.model.GiantGPT import GiantGPT
+from GIANT.v3.model.model_mode import model_mode_is_causal, resolve_model_mode
 from GIANT.v3.model.Run_training import _to_dtype, load_configs, load_tokenizer
 from GIANT.v3.model.checkpoint_manager import latest as latest_ckpt, load_npz
 
@@ -30,6 +31,7 @@ def _assistant_token_positions(tokenizer, messages: list[dict[str, str]]) -> tup
 
 
 def _load_model(cfg: OmegaConf, vocab_size: int) -> GiantGPT:
+    model_mode = resolve_model_mode(cfg.model)
     return GiantGPT(
         vocab_size=vocab_size,
         context_length=int(cfg.model.context_length),
@@ -44,6 +46,8 @@ def _load_model(cfg: OmegaConf, vocab_size: int) -> GiantGPT:
         compute_dtype=_to_dtype(cfg.model.compute_dtype),
         use_remat=bool(cfg.model.get("use_remat", False)),
         enable_xsa=bool(cfg.model.get("enable_xsa", False)),
+        mode=model_mode,
+        causal=model_mode_is_causal(model_mode),
     )
 
 

@@ -1,17 +1,524 @@
 <!doctype html>
-<html lang="bg">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Redirecting…</title>
+<html lang="en">
 
-    <meta http-equiv="refresh" content="0; url=https://github.com/DebelToni/SUPER-GIANT" />
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>SUPER-GIANT</title>
+	<style>
+		:root {
+			color-scheme: light;
+			--bg: #ffffff;
+			--fg: #0f0f0f;
+			--muted: #5f5f5f;
+			--card: #ffffff;
+			--section-gap: 2.35rem;
+			--tag-blue-bg: rgba(96, 165, 250, 0.18);
+			--tag-blue-fg: #3b82f6;
+			--tag-green-bg: rgba(30, 164, 75, 0.12);
+			--tag-green-fg: #166a36;
+			--tag-yellow-bg: rgba(253, 224, 71, 0.28);
+			--tag-yellow-fg: #ca8a04;
+			--tag-purple-bg: rgba(147, 51, 234, 0.12);
+			--tag-purple-fg: #7e22ce;
+			--green: #1ea44b;
+			--green-hover: #16823b;
+			--red: #d84444;
+			--red-hover: #b63333;
+			--shadow: 0 20px 60px rgba(0, 0, 0, 0.08);
+		}
 
-    <link rel="canonical" href="https://github.com/DebelToni/SUPER-GIANT" />
+		* {
+			box-sizing: border-box;
+		}
 
-    <script>
-      window.location.replace("https://github.com/DebelToni/SUPER-GIANT");
-    </script>
-  </head>
-  <body></body>
+		html {
+			scroll-behavior: smooth;
+		}
+
+		body {
+			margin: 0;
+			min-height: 100vh;
+			background: var(--bg);
+			color: var(--fg);
+			font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+		}
+
+		.github-cta {
+			position: fixed;
+			top: 1.5rem;
+			right: 1.5rem;
+			z-index: 10;
+			display: inline-flex;
+			align-items: center;
+			gap: 0.9rem;
+		}
+
+		.github-label {
+			color: var(--fg);
+			font-size: 1rem;
+			font-weight: 700;
+			letter-spacing: 0.04em;
+			white-space: nowrap;
+		}
+
+		.github-link {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			width: 6rem;
+			height: 6rem;
+			color: var(--fg);
+			background: rgba(255, 255, 255, 0.96);
+			border: 1px solid rgba(0, 0, 0, 0.08);
+			border-radius: 999px;
+			box-shadow: var(--shadow);
+			transition: transform 0.2s ease, box-shadow 0.2s ease;
+		}
+
+		.github-link:hover {
+			transform: translateY(-2px);
+			box-shadow: 0 24px 70px rgba(0, 0, 0, 0.12);
+		}
+
+		.github-link svg {
+			width: 3rem;
+			height: 3rem;
+			fill: currentColor;
+		}
+
+		.page {
+			min-height: 100vh;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 6rem 1.5rem 5rem;
+		}
+
+		.stack {
+			width: 100%;
+			max-width: 1080px;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			text-align: center;
+			gap: var(--section-gap);
+		}
+
+		.logo-link {
+			display: inline-flex;
+			justify-content: center;
+			width: 100%;
+		}
+
+		.logo {
+			display: block;
+			width: clamp(180px, 34vw, 430px);
+			height: auto;
+		}
+
+		.description {
+			margin: 0;
+			max-width: 720px;
+			font-size: clamp(1.1rem, 1rem + 0.65vw, 1.55rem);
+			line-height: 1.6;
+			color: var(--muted);
+		}
+
+		.demo-button {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			min-width: 12rem;
+			padding: 0.95rem 1.6rem;
+			border-radius: 999px;
+			color: #ffffff;
+			font-size: 1rem;
+			font-weight: 700;
+			letter-spacing: 0.1em;
+			text-decoration: none;
+			white-space: nowrap;
+			box-shadow: var(--shadow);
+			transition: transform 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+		}
+
+		.demo-button.available {
+			background: var(--green);
+		}
+
+		.demo-button.available:hover {
+			background: var(--green-hover);
+			transform: translateY(-2px);
+			box-shadow: 0 24px 70px rgba(30, 164, 75, 0.24);
+		}
+
+		.demo-button.unavailable {
+			background: var(--red);
+			cursor: not-allowed;
+		}
+
+		.demo-button.unavailable:hover {
+			background: var(--red-hover);
+		}
+
+		.project-details {
+			max-width: 760px;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			gap: var(--section-gap);
+		}
+
+		.project-copy {
+			margin: 0;
+			font-size: clamp(0.98rem, 0.9rem + 0.35vw, 1.12rem);
+			line-height: 1.75;
+			color: var(--muted);
+			text-wrap: pretty;
+		}
+
+		.jax-logo {
+			display: block;
+			width: clamp(72px, 10vw, 104px);
+			height: auto;
+		}
+
+		.feature-list {
+			margin: 0;
+			padding: 0;
+			width: min(100%, 760px);
+			list-style: none;
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 1rem;
+		}
+
+		.feature-list li {
+			min-height: 100%;
+			padding: 1.2rem 1.2rem 1.15rem;
+			border: 1px solid rgba(0, 0, 0, 0.08);
+			border-radius: 22px;
+			background: linear-gradient(180deg, var(--card) 0%, #f7fbf8 100%);
+			box-shadow: 0 12px 32px rgba(0, 0, 0, 0.04);
+			display: grid;
+			gap: 0.8rem;
+			text-align: left;
+		}
+
+		.feature-tag {
+			display: inline-flex;
+			align-items: center;
+			width: fit-content;
+			padding: 0.32rem 0.68rem;
+			border-radius: 999px;
+			background: rgba(15, 15, 15, 0.08);
+			color: #23408e;
+			font-size: 0.72rem;
+			font-weight: 800;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+		}
+
+		.feature-list li:nth-child(1) .feature-tag {
+			background: var(--tag-blue-bg);
+			color: var(--tag-blue-fg);
+		}
+
+		.feature-list li:nth-child(2) .feature-tag {
+			background: var(--tag-green-bg);
+			color: var(--tag-green-fg);
+		}
+
+		.feature-list li:nth-child(3) .feature-tag {
+			background: var(--tag-yellow-bg);
+			color: var(--tag-yellow-fg);
+		}
+
+		.feature-list li:nth-child(4) .feature-tag {
+			background: var(--tag-purple-bg);
+			color: var(--tag-purple-fg);
+		}
+
+		.feature-copy {
+			display: grid;
+			gap: 0.45rem;
+		}
+
+		.feature-list strong {
+			display: block;
+			color: var(--fg);
+			font-size: 1.03rem;
+			line-height: 1.35;
+			text-wrap: balance;
+		}
+
+		.feature-text {
+			color: var(--muted);
+			font-size: 0.97rem;
+			line-height: 1.65;
+			text-wrap: pretty;
+		}
+
+		.video-link {
+			width: min(100%, 620px);
+			color: inherit;
+			text-decoration: none;
+		}
+
+		.video-preview {
+			position: relative;
+			overflow: hidden;
+			border-radius: 24px;
+			background: #f4f4f4;
+			border: 1px solid rgba(0, 0, 0, 0.08);
+			box-shadow: var(--shadow);
+			transition: transform 0.2s ease, box-shadow 0.2s ease;
+		}
+
+		.video-link:hover .video-preview {
+			transform: translateY(-2px);
+			box-shadow: 0 24px 70px rgba(0, 0, 0, 0.12);
+		}
+
+		.video-thumbnail {
+			display: block;
+			width: 100%;
+			aspect-ratio: 16 / 9;
+			object-fit: cover;
+		}
+
+		.video-play {
+			position: absolute;
+			inset: 50% auto auto 50%;
+			transform: translate(-50%, -50%);
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			width: 4.5rem;
+			height: 4.5rem;
+			border-radius: 999px;
+			background: rgba(15, 15, 15, 0.82);
+			box-shadow: 0 18px 40px rgba(0, 0, 0, 0.22);
+		}
+
+		.video-play svg {
+			width: 1.5rem;
+			height: 1.5rem;
+			fill: #ffffff;
+			margin-left: 0.18rem;
+		}
+
+		.video-caption {
+			margin: 0;
+			padding: 1rem 1.25rem 1.1rem;
+			font-size: 0.95rem;
+			font-weight: 600;
+			color: var(--fg);
+			text-wrap: pretty;
+		}
+
+		.video-caption span {
+			color: var(--muted);
+			font-weight: 500;
+		}
+
+		.avatar {
+			display: block;
+			width: min(42vw, 260px);
+			height: auto;
+			margin-top: 0;
+		}
+
+		@media (max-width: 760px) {
+			.feature-list {
+				grid-template-columns: 1fr;
+			}
+		}
+
+		@media (max-width: 640px) {
+			.github-cta {
+				top: 1rem;
+				right: 1rem;
+				gap: 0.55rem;
+			}
+
+			.github-label {
+				font-size: 0.78rem;
+				letter-spacing: 0.03em;
+			}
+
+			.github-link {
+				width: 5rem;
+				height: 5rem;
+			}
+
+			.github-link svg {
+				width: 2.5rem;
+				height: 2.5rem;
+			}
+
+			.page {
+				padding-top: 5rem;
+			}
+
+			.stack {
+				gap: calc(var(--section-gap) * 0.82);
+			}
+
+			.feature-list li {
+				padding: 1rem;
+				border-radius: 20px;
+			}
+
+			.avatar {
+				width: min(58vw, 220px);
+			}
+		}
+	</style>
+</head>
+
+<body>
+	<div class="github-cta" aria-label="GitHub link">
+		<span class="github-label">Code here -&gt;</span>
+		<a class="github-link" href="https://github.com/DebelToni/SUPER-GIANT" target="_blank" rel="noreferrer"
+			aria-label="Open SUPER-GIANT on GitHub">
+			<svg viewBox="0 0 16 16" aria-hidden="true">
+				<path
+					d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.54 7.54 0 0 1 8 3.8c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z">
+				</path>
+			</svg>
+		</a>
+	</div>
+
+	<main class="page">
+		<section class="stack" aria-label="SUPER-GIANT landing page">
+			<a class="logo-link" href="https://github.com/DebelToni/SUPER-GIANT" target="_blank" rel="noreferrer"
+				aria-label="Open SUPER-GIANT on GitHub">
+				<img class="logo" src="docs/images/SUPER-GIANT-text-logo.png" alt="SUPER-GIANT" />
+			</a>
+
+			<p class="description">
+				SUPER-GIANT is a complete framework for data preparation, training, and inference of custom large
+				language models.
+			</p>
+
+			<a id="demoButton" class="demo-button unavailable" href="#" aria-disabled="true">
+				DEMO unavailable at the moment
+			</a>
+
+			<section class="project-details" aria-label="Project details">
+				<p class="project-copy">
+					SUPER-GIANT is my end-to-end framework for custom large language models, covering data preparation,
+					resumable training, fast inference, and Anchor-TiDAR speculative decoding. I built it in JAX to stay
+					adjustable, scalable, and easy to extend as the architecture evolves.
+				</p>
+
+				<img class="jax-logo" src="docs/images/jax.png" alt="JAX logo" />
+
+				<ul class="feature-list" aria-label="Project features">
+					<li>
+						<span class="feature-tag">Data</span>
+						<div class="feature-copy">
+							<strong>Data preparation pipeline</strong>
+							<span class="feature-text">HuggingFace dataset and tokenizer integration, plus custom
+								tokenizer training and data curation models tuned to your domain.</span>
+						</div>
+					</li>
+					<li>
+						<span class="feature-tag">Train</span>
+						<div class="feature-copy">
+							<strong>Training loop</strong>
+							<span class="feature-text">Fully resumable runs with S3 sync, CI/CD automation, and
+								multi-GPU training in v3 without the usual Docker and VPN friction.</span>
+						</div>
+					</li>
+					<li>
+						<span class="feature-tag">Serve</span>
+						<div class="feature-copy">
+							<strong>Inference pipeline</strong>
+							<span class="feature-text">Fast decoding, optimized KV-cache layouts, and chat-oriented
+								interactions for practical local or hosted use.</span>
+						</div>
+					</li>
+					<li>
+						<span class="feature-tag">Speed</span>
+						<div class="feature-copy">
+							<strong>Anchor-TiDAR speculative decoding</strong>
+							<span class="feature-text">Roughly 5x to 10x faster GPU inference, so existing hardware can
+								handle a lot more useful work.</span>
+						</div>
+					</li>
+				</ul>
+
+				<a class="video-link" href="https://youtu.be/ZaBJ2VwDvPI" target="_blank" rel="noreferrer">
+					<div class="video-preview">
+						<img class="video-thumbnail" src="https://img.youtube.com/vi/ZaBJ2VwDvPI/maxresdefault.jpg"
+							alt="SUPER-GIANT YouTube video thumbnail" />
+						<span class="video-play" aria-hidden="true">
+							<svg viewBox="0 0 24 24">
+								<path d="M8 5v14l11-7z"></path>
+							</svg>
+						</span>
+						<p class="video-caption">
+							Watch my YouTube introduction
+							<span> and overview of the original GIANT implementation</span>
+						</p>
+					</div>
+				</a>
+			</section>
+
+			<img class="avatar" src="docs/images/SUPER-GIANT-avatar-logo.png" alt="SUPER-GIANT avatar logo" />
+		</section>
+	</main>
+
+	<script>
+		const demoButton = document.getElementById("demoButton");
+		const isValidHttpsUrl = (value) => /^https:\/\/\S+$/i.test(value.trim());
+
+		const setUnavailable = () => {
+			demoButton.textContent = "DEMO unavailable at the moment";
+			demoButton.classList.remove("available");
+			demoButton.classList.add("unavailable");
+			demoButton.href = "#";
+			demoButton.setAttribute("aria-disabled", "true");
+			demoButton.removeAttribute("target");
+			demoButton.removeAttribute("rel");
+		};
+
+		const setAvailable = (url) => {
+			demoButton.textContent = "DEMO";
+			demoButton.classList.remove("unavailable");
+			demoButton.classList.add("available");
+			demoButton.href = url;
+			demoButton.setAttribute("aria-disabled", "false");
+			demoButton.target = "_blank";
+			demoButton.rel = "noreferrer";
+		};
+
+		demoButton.addEventListener("click", (event) => {
+			if (demoButton.getAttribute("aria-disabled") === "true") {
+				event.preventDefault();
+			}
+		});
+
+		fetch("docs/link.txt", {cache: "no-store"})
+			.then((response) => {
+				if (!response.ok) {
+					throw new Error("Missing demo link");
+				}
+				return response.text();
+			})
+			.then((link) => {
+				const trimmedLink = link.trim();
+				if (!isValidHttpsUrl(trimmedLink)) {
+					throw new Error("Invalid demo link");
+				}
+				setAvailable(trimmedLink);
+			})
+			.catch(() => {
+				setUnavailable();
+			});
+	</script>
+</body>
+
 </html>

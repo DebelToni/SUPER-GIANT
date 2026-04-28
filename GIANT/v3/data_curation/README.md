@@ -1,42 +1,32 @@
-# GIANT v3 Data Curation
+# v3 data curation
 
-`curated_wikipedia_search.py` streams English Wikipedia once and writes target-aware JSONL candidates that can be ingested directly by `GIANT/v3/data_pipeline/build_corpus.py`.
+This folder holds small scripts that create higher-signal training data around the raw corpora. It is not the main tokenizer/training pipeline; it prepares inputs that [../data_pipeline/](../data_pipeline/) later packs into Arrow shards.
 
-The output JSONL contains a `text` field, so a stage source can read it directly:
+## Current scripts
 
-```yml
-sources:
-  - type: json
-    json_root: "/proj/giant-data/GIANT/GIANT-Chat/data_curation/wikipedia_run"
-    file_glob: "candidates.jsonl"
-    text_field: "text"
-```
+- [curated_wikipedia_search.py](curated_wikipedia_search.py) - stream/search English Wikipedia for target-aware factual passages
+- [export_top_candidates.py](export_top_candidates.py) - export top ranked curated rows per target
+- [build_demo_target_pack.py](build_demo_target_pack.py) - build human-readable demo target packs
+- [translate_curated_booster.py](translate_curated_booster.py) - translate curated English booster rows into Bulgarian and write a bilingual JSONL
+- [translate_smoltalk_to_bg.py](translate_smoltalk_to_bg.py) - translate selected SmolTalk conversations into Bulgarian and write original/translated/bilingual JSONL files
+- [quality_filter/](quality_filter/) - Bulgarian quality-filter training and corpus filtering
 
-Useful commands:
+## Chat-stack data examples
 
-```bash
-PYTHONPATH=. "/Volumes/SSD/v/SG/bin/python" GIANT/v3/data_curation/curated_wikipedia_search.py \
-  --write-sample-targets GIANT/v3/data_curation/sample_targets_100.jsonl
-```
+- curated English booster data config: [../Configs/Data/giant_chat_curated_booster_strong56.yml](../Configs/Data/giant_chat_curated_booster_strong56.yml)
+- bilingual booster data config: [../Configs/Data/giant_chat_curated_booster_bg_en_bpe32k.yml](../Configs/Data/giant_chat_curated_booster_bg_en_bpe32k.yml)
+- translated SmolTalk SFT data config: [../Configs/Data/giant_chat_sft_bg_en_smoltalk_bpe32k.yml](../Configs/Data/giant_chat_sft_bg_en_smoltalk_bpe32k.yml)
 
-```bash
-PYTHONPATH=. "/Volumes/SSD/v/SG/bin/python" GIANT/v3/data_curation/curated_wikipedia_search.py \
-  --targets GIANT/v3/data_curation/sample_targets_100.jsonl \
-  --checkpoint-dir /proj/giant-data/GIANT/GIANT-Chat/data_curation/wikipedia_run/checkpoints \
-  --out /proj/giant-data/GIANT/GIANT-Chat/data_curation/wikipedia_run/candidates.jsonl \
-  --coverage-report /proj/giant-data/GIANT/GIANT-Chat/data_curation/wikipedia_run/coverage.json \
-  --top-k 50
-```
+## Data layout used by current chat experiments
 
-Optional second-stage rerank uses `Qwen/Qwen3-Embedding-0.6B` through `transformers`.
-For local testing here, it was run from the general utility env because the project JAX env does not ship with PyTorch:
+- curated booster source: `/proj/giant-data/GIANT/GIANT-Chat/data_curation/strong56_wikipedia_v2/`
+- bilingual booster source: `/proj/giant-data/GIANT/GIANT-Chat/data_curation/curated_booster_bg_en_v1/`
+- translated SmolTalk source: `/proj/giant-data/GIANT/GIANT-Chat/data_curation/smoltalk_bg_en_v1/`
+- packed datasets are not written here; they are written by [../data_pipeline/build_corpus.py](../data_pipeline/build_corpus.py)
 
-```bash
-PYTHONPATH=. "/Volumes/SSD/v/py/bin/python" GIANT/v3/data_curation/curated_wikipedia_search.py \
-  --targets GIANT/v3/data_curation/sample_targets_100.jsonl \
-  --checkpoint-dir /proj/giant-data/GIANT/GIANT-Chat/data_curation/wikipedia_run/checkpoints \
-  --out /proj/giant-data/GIANT/GIANT-Chat/data_curation/wikipedia_run/candidates.jsonl \
-  --coverage-report /proj/giant-data/GIANT/GIANT-Chat/data_curation/wikipedia_run/coverage.json \
-  --top-k 50 \
-  --use-embeddings true
-```
+## Notes
+
+- Translation scripts need `torch`, `transformers`, and `sentencepiece`. The main JAX env may not have those.
+- `translate_smoltalk_to_bg.py --resume` resumes from its `state.json`.
+- The current Marian translation path is good enough for lexical Bulgarian bootstrapping but not enough for real reasoning quality by itself.
+- Always inspect samples before scaling translated SFT.

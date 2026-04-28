@@ -17,5 +17,4 @@ The next big steps planned for `v3` are:
 - More mature distributed execution strategies
 - MLA-related experiments once the rest of the training stack is stable enough
 
-If you want the stable path, start with `GIANT/v2`.
-If you want the newest multi-GPU work, look at `GIANT/v3`.
+I recommend always using the latest version for any high performance quality training, so refer to `v3`.

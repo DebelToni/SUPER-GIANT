@@ -1,7 +1,6 @@
 # LongGIANT Hidden-World Pipeline
 
-This folder now holds the natural-language long-context screening pipeline for
-GIANT v3.
+This folder holds the natural-language long-context screening pipeline for GIANT v3.
 
 The core idea is:
 
@@ -13,30 +12,27 @@ The core idea is:
 ## Current minimal scope
 
 - one main document genre: `admin_record`
-- level 1:
-  - alias resolution + relation lookup
-- level 2:
-  - alias resolution + latest-value update + distractors
+- level 1: alias resolution + relation lookup
+- level 2: alias resolution + latest-value update + distractors
 - exact one-token answers
 - deterministic template renderer only
 
-The local-LLM paraphrase expansion stage is intentionally postponed until this
-deterministic base pipeline is stable.
+The local-LLM paraphrase expansion stage is intentionally postponed until this deterministic base pipeline is stable.
 
 ## Main scripts
 
-- `GIANT/v3/Long/longdsl.py`
-  - hidden world, tokenizer vocab, sample generation
-- `GIANT/v3/Long/Lexicon.yml`
-  - editable word banks and template banks for the LongGIANT renderer
-- `GIANT/v3/Long/prepare_longdsl.py`
-  - raw JSONL generation, tokenizer save, dataset manifest write, Arrow build
-- `GIANT/v3/Long/write_training_configs.py`
-  - 40M-class GIANT v3 training configs for the current context ladder
-- `GIANT/v3/Long/eval_longdsl.py`
-  - teacher-forced exact-match evaluation on held-out samples
-- `GIANT/v3/Long/eval_openai_long.py`
-  - few-shot held-out evaluation for OpenAI models using the same Long JSONL rows
+- [longdsl.py](longdsl.py) - hidden world, tokenizer vocab, sample generation
+- [Lexicon.yml](Lexicon.yml) - editable word banks and template banks for the renderer
+- [prepare_longdsl.py](prepare_longdsl.py) - raw JSONL generation, tokenizer save, dataset manifest write, Arrow build
+- [write_training_configs.py](write_training_configs.py) - writes 40M-class training configs for the current context ladder
+- [eval_longdsl.py](eval_longdsl.py) - teacher-forced exact-match evaluation on held-out samples
+- [eval_openai_long.py](eval_openai_long.py) - few-shot held-out evaluation for OpenAI models using the same Long JSONL rows
+
+## Config examples
+
+- short bootstrap examples: [../Configs/Training/Long/long_40m_l1_ctx128.yml](../Configs/Training/Long/long_40m_l1_ctx128.yml), [../Configs/Training/Long/long_40m_l1_ctx256.yml](../Configs/Training/Long/long_40m_l1_ctx256.yml), [../Configs/Training/Long/long_40m_l1_ctx512.yml](../Configs/Training/Long/long_40m_l1_ctx512.yml)
+- answer-hidden encoder comparison: [../Configs/Training/Long/long_40m_l1_ctx512_ans_20k_1ep_encoder_xsa_answer_hidden.yml](../Configs/Training/Long/long_40m_l1_ctx512_ans_20k_1ep_encoder_xsa_answer_hidden.yml)
+- long decoder stress run: [../Configs/Training/Long/long_100m_l1_ctx128k_chi40x_decoder_xsa_5090.yml](../Configs/Training/Long/long_100m_l1_ctx128k_chi40x_decoder_xsa_5090.yml)
 
 ## Data layout
 
@@ -52,6 +48,4 @@ Arrow shards are written to `/proj/giant-data/GIANT/dataset_artifacts/long_recor
 
 ## Notes on the previous raw DSL
 
-The older opcode-style pipeline is now treated as legacy experiment material.
-Its motivation and examples are preserved in the Typst docs under
-`GIANT/v3/docs/`.
+The older opcode-style pipeline is now treated as legacy experiment material. Its motivation and examples are preserved in the Typst docs under [../docs/](../docs/).

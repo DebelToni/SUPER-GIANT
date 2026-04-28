@@ -5,15 +5,15 @@
 
 ## Overview
 
-**SUPER-GIANT** is a complete framework for running **data preparation, training, and inference of custom Large Language Models**. It provides an end-to-end pipeline including:
+**SUPER-GIANT** is a complete framework for running **data preparation, training, and inference of custom Large Language Models**. It is the perfect starting point for new researchers that need a strong implementation to start from. It provides an end-to-end pipeline including:
 
-- **Data preparation pipeline** - Integrates directly with HuggingFace datasets and tokenizers.
+- **Data preparation pipeline** - Integrates directly with HuggingFace datasets and tokenizers. We also support custom or imported fastText models for data curation and filtering.
 
-- **Training loop** - Fully resumable and syncronized with S3 buckets, features multi-gPU training support (starting from [v3](GIANT/v3/)), which currently uses **Data Parallel (DP)** training, model sharding support planned for future releases
+- **Training loop** - Fully resumable and syncronized with S3 buckets, features multi-GPU training support (starting from [v3](GIANT/v3/)), which currently uses **Data Parallel (DP)** training, model sharding support planned for future releases
 
 - **Inference pipeline** - fast decoding, KV-cache support, chat-style interactions
 
-- **Speculative decoding** - highly optimized **Anchor-TiDAR** algorithm. Requires post-training modifications but achieves **5×–10× inference speedups** on GPUs/TPUs
+- **Speculative decoding** - highly optimized **Anchor-TiDAR** algorithm. Requires post-training modifications but achieves **5×–10× inference speedups** on GPUs
 
 ---
 
@@ -33,6 +33,7 @@ The original video showcased the [v0](GIANT/v0) implementation and some performa
 ## Architecture of GIANT v2
 - Classic Decoder-only transformer architecture
 - Modern modules used such as `RMSnorm`, `SwiGLU`, `RoPE`
+- We also have full support for Encoders and also experimental modules such as XSA (Exclusive Self Attention)
 - Training supports batching, training on custom private data or online Teacher distillation
 - Powered by 𝗝𝗔𝗫’𝘀 𝗝𝗜𝗧 𝗰𝗼𝗺𝗽𝗶𝗹𝗮𝘁𝗶𝗼𝗻, 𝗰𝘂𝗗𝗡𝗡’𝘀 𝗙𝗹𝗮𝘀𝗵 𝗔𝘁𝘁𝗲𝗻𝘁𝗶𝗼𝗻 𝗸𝗲𝗿𝗻𝗲𝗹𝘀, 𝗮𝗻𝗱 𝗮 𝗞𝗩 𝗰𝗮𝗰𝗵𝗲 for faster inference
 Current stable version of [GIANT is v2](GIANT/v2) which focuses on scaling the model and the data, bigger and better [data pipeline](GIANT/v2/data_pipeline/) and ChatBot behavior. Example responce from GIANTv2:
@@ -40,8 +41,8 @@ Current stable version of [GIANT is v2](GIANT/v2) which focuses on scaling the m
 User: What is the capital of France?
 Assitant: The capital of France is sometimes called Paris.<EOS>
 ```
-> (This is a 101 milion param checkpoint trained on 2 bilion tokens including a schedule and a circulumn of basetext, wikipedia, webtext and finally chat examples.)
-> 
+> (This is a 38 milion param checkpoint trained on 500 milion tokens including a schedule and a circulumn of basetext, wikipedia, webtext and finally chat examples.)
+
 ## [Think in Diffusion, talk in AutoRegression](https://arxiv.org/pdf/2511.08923)
 - NVIDIA's proposed model [TiDAR](TiDAR/) is already implemented (including my Anchor-TiDAR variant), and this is where I run ongoing experiments. It builds on top of the **GIANTv2** architecture
 - I am currently validating/replicating the TiDAR paper behavior and refining training/inference settings on top of GIANT's core architecture and data pipeline. Results from my free token slots experiements can be found at [TiDAR/Docs/](TiDAR/Docs/)
@@ -52,11 +53,10 @@ Assitant: The capital of France is sometimes called Paris.<EOS>
 > Future Architectural features that will be test on top of GIANT and then Anchor-TiDAR:
 > - Mixture of Experts (MoE)
 > - Multi-head Latent Attention (MLA)
-> - Sliding window attention
-> - Real time access of tools at inference time (in the TTC) - see [TRM as tool use](TRM/TRM-token-tool)
-The idea is to see how it affects the latency and performance of "free token slots".
+> - Sliding window attention and linear attetnion style mechanisms. The idea is to see how it affects the latency and performance of "free token slots".
+> - On/Off Encoder mechanism - my own creation that combines TRM style processing by doing TiDAR style masking for swithing between the 2 modes in the same transformer. I want to see how this proves long [context retrieval](GIANT/v3/Long/). (could also say reasoning but my training budget is far too small to get to actual qualitative reasoning results).
 
-## (GIANT v3)[GIANT/v3/]
+## [GIANT v3](GIANT/v3/)
 GIANT v3 is the current version I am working on, it features:
 - Multi-GPU support with gradient accomultaion and sharding.
 - DeepSeek style Mutlhead Latent Attention
@@ -68,7 +68,8 @@ GIANT v3 is the current version I am working on, it features:
 
 I've created a base Docker image with all the dependencies installed for easy use - `bonanc/giant-training:latest`
 
-(this is the recommended version with no constant sync S3, for constant Minio sync see [here](CICD/Docker/giant-training-S3/) )
+(this is the recommended version with no constant sync S3, for constant Minio sync see [here](CICD/Docker/giant-training-S3/))
+(i also have some [docs for coding agents](docs/AGENTS-documentation/) if you want to "vibe" out the training process)
 
 You can run it with:
 ```bash

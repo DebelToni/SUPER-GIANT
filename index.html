@@ -473,6 +473,7 @@
 
 	<script>
 		const demoButton = document.getElementById("demoButton");
+		const demoLinkUrl = "https://debeltoni.github.io/super-giant-demo-link/link.txt";
 		const isValidHttpsUrl = (value) => /^https:\/\/\S+$/i.test(value.trim());
 
 		const setUnavailable = () => {
@@ -501,7 +502,7 @@
 			}
 		});
 
-		fetch("docs/link.txt", {cache: "no-store"})
+		fetch(`${demoLinkUrl}?t=${Date.now()}`, {cache: "no-store"})
 			.then((response) => {
 				if (!response.ok) {
 					throw new Error("Missing demo link");

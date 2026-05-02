@@ -1,6 +1,6 @@
-<a href="https://debeltoni.github.io/SUPER-GIANT" style="text-decoration: none; color: inherit;">
-  <h1 align="center">SUPER GIANT</h1>
-</a>
+<h1 align="center">
+  <a href="https://debeltoni.github.io/SUPER-GIANT">SUPER GIANT</a>
+</h1>
 <!-- <h5 align="center"> SUPERsupreme Utra PROfesional ELITE ReVolutIonary GIGA intelligent ArtIfical neXus TITAN </h5> -->
 
 ## Overview

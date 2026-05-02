@@ -474,7 +474,29 @@
 	<script>
 		const demoButton = document.getElementById("demoButton");
 		const demoLinkUrl = "https://debeltoni.github.io/super-giant-demo-link/link.txt";
+		const demoHealthTimeoutMs = 3000;
 		const isValidHttpsUrl = (value) => /^https:\/\/\S+$/i.test(value.trim());
+		const checkDemoHealth = (url) => {
+			const controller = new AbortController();
+			const timeoutId = setTimeout(() => controller.abort(), demoHealthTimeoutMs);
+
+			return fetch(`${url.replace(/\/$/, "")}/health?t=${Date.now()}`, {
+				cache: "no-store",
+				signal: controller.signal,
+			})
+				.then((response) => {
+					if (!response.ok) {
+						throw new Error("Demo health check failed");
+					}
+					return response.json();
+				})
+				.then((health) => {
+					if (!health.ok) {
+						throw new Error("Demo unavailable");
+					}
+				})
+				.finally(() => clearTimeout(timeoutId));
+		};
 
 		const setUnavailable = () => {
 			demoButton.textContent = "DEMO unavailable at the moment";
@@ -514,7 +536,7 @@
 				if (!isValidHttpsUrl(trimmedLink)) {
 					throw new Error("Invalid demo link");
 				}
-				setAvailable(trimmedLink);
+				return checkDemoHealth(trimmedLink).then(() => setAvailable(trimmedLink));
 			})
 			.catch(() => {
 				setUnavailable();

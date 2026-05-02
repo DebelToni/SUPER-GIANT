@@ -1,0 +1,64 @@
+seed: 0
+
+paths:
+  data_root: "/proj/giant-data/Experiments/Ivancho_Brain"
+  tokenizer_path: "/proj/giant-data/GIANT/GIANT-Chat/tokenizers/giant_chat_bpe16k"
+  tokenized_path: "/proj/giant-data/Experiments/Ivancho_Brain/data/tinystories_10m_tokens.npy"
+  checkpoint_dir: "/proj/giant-data/Experiments/Ivancho_Brain/autoresearch/state64_haltbias05_fast_v1/checkpoints"
+  logs_dir: "/proj/giant-data/Experiments/Ivancho_Brain/autoresearch/state64_haltbias05_fast_v1/logs"
+
+data:
+  dataset_name: "roneneldan/TinyStories"
+  split: "train"
+  text_field: "text"
+  max_tokens: 10000000
+  seq_len: 48
+  validation_tokens: 131072
+
+model:
+  vocab_size: 16384
+  num_heads: 64
+  state_dim: 64
+  avg_out_degree: 4
+  max_out_degree: 8
+  input_head_count: 8
+  output_head_index: 0
+  inner_steps: 6
+  memory_slots: 8
+  memory_attn_heads: 4
+  memory_kv_heads: 1
+  dropout_rate: 0.0
+  residual_init: 0.02
+  residual_decay: 0.10
+  state_norm_cap: 8.0
+  threshold_hi: 0.80
+  threshold_lo: 0.65
+  threshold_alpha: 0.55
+  emit_beta: 16.0
+  step_penalty: 0.001
+  readiness_delta: 0.35
+  readiness_tau: 0.05
+  readiness_loss_weight: 1.0
+  collapse_token_ids: [201]
+  collapse_penalty_weight: 0.0
+  halt_bias_init: 0.5
+  min_emit_step: 2
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+optimizer:
+  learning_rate: 0.0001
+  min_learning_rate: 0.00001
+  warmup_steps: 200
+  weight_decay: 0.05
+  gradient_clip_norm: 1.0
+
+training:
+  batch_size: 8
+  train_steps: 400
+  log_every: 25
+  eval_every: 100
+  checkpoint_every: 200
+  sample_every: 100
+  readiness_warmup_start: 0
+  readiness_warmup_steps: 1

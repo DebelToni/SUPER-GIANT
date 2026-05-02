@@ -1,4 +1,3 @@
-GIANT-Mythos/
 *.zip
 *.pkl
 .DS_Store
@@ -23,3 +22,4 @@ agents.md
 A-Logs.md
 TiDAR/Docs/Benchmark_logs/
 package-lock.json
+autoresearch/

@@ -8,6 +8,9 @@ import json
 import logging
 import os
 import shutil
+import shlex
+import subprocess
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -79,6 +82,18 @@ class SchedulingCfg:
 
 
 @dataclass
+class S3UploadCfg:
+    enabled: Optional[bool] = False
+    destination_root: Optional[str] = None
+    destination: Optional[str] = None
+    env_file: Optional[str] = None
+    tool: Optional[str] = "s5cmd"
+    size_only: Optional[bool] = True
+    extra_args: Optional[List[str]] = field(default_factory=list)
+    upload_root_files: Optional[bool] = True
+
+
+@dataclass
 class StageSourceCfg:
     type: str = "huggingface"
     dataset_name: Optional[str] = None
@@ -139,6 +154,7 @@ class StageCfg:
     max_documents: Optional[int] = None
     seed_offset: Optional[int] = None
     source_mix_mode: str = "sequential"
+    s3_upload: Optional[S3UploadCfg] = None
     sources: List[StageSourceCfg] = field(default_factory=list)
 
 
@@ -150,6 +166,7 @@ class TopConfig:
     outputs: OutputsCfg
     scheduling: SchedulingCfg
     stages: List[StageCfg]
+    s3_upload: S3UploadCfg = field(default_factory=S3UploadCfg)
     dry_run: bool = False
 
 
@@ -171,6 +188,76 @@ class StageStats:
             "sequences": self.sequences,
             "tokens": self.tokens,
         }
+
+
+class S3UploadManager:
+    def __init__(self) -> None:
+        self._threads: List[threading.Thread] = []
+        self._errors: List[BaseException] = []
+
+    def upload_dir(self, source_dir: Path, destination_uri: str, cfg: S3UploadCfg) -> None:
+        command = _build_s3_sync_command(source_dir, destination_uri, cfg)
+        label = f"{source_dir} -> {destination_uri}"
+        thread = threading.Thread(target=self._run, args=(command, label), daemon=False)
+        thread.start()
+        self._threads.append(thread)
+
+    def join(self) -> None:
+        for thread in self._threads:
+            thread.join()
+        if self._errors:
+            raise RuntimeError(f"S3 upload failed: {self._errors[0]}") from self._errors[0]
+
+    def _run(self, command: List[str], label: str) -> None:
+        LOGGER.info("Starting S3 upload: %s", label)
+        try:
+            subprocess.run(command, check=True)
+            LOGGER.info("Finished S3 upload: %s", label)
+        except BaseException as exc:  # pragma: no cover - exercised by integration tests/manual runs
+            LOGGER.error("S3 upload failed for %s: %s", label, exc)
+            self._errors.append(exc)
+
+
+def _ensure_trailing_slash(value: str) -> str:
+    return value if value.endswith("/") else value + "/"
+
+
+def _build_s3_sync_command(source_dir: Path, destination_uri: str, cfg: S3UploadCfg) -> List[str]:
+    tool = cfg.tool or "s5cmd"
+    source = _ensure_trailing_slash(str(source_dir))
+    destination = _ensure_trailing_slash(str(destination_uri))
+    args = [tool, "sync"]
+    if bool(cfg.size_only):
+        args.append("--size-only")
+    args.extend(str(arg) for arg in (cfg.extra_args or []))
+    args.extend([source, destination])
+    if cfg.env_file:
+        env_file = str(Path(cfg.env_file).expanduser())
+        quoted = " ".join(shlex.quote(part) for part in args)
+        script = f"set -a; source {shlex.quote(env_file)}; set +a; {quoted}"
+        return ["bash", "-lc", script]
+    return args
+
+
+def _merge_s3_upload_cfg(parent: S3UploadCfg, child: Optional[S3UploadCfg]) -> S3UploadCfg:
+    if child is None:
+        return parent
+    merged = S3UploadCfg(**parent.__dict__)
+    for key, value in child.__dict__.items():
+        if value is not None:
+            setattr(merged, key, value)
+    return merged
+
+
+def _stage_s3_destination(top_cfg: TopConfig, stage: StageCfg, stage_dir_name: str) -> Optional[tuple[str, S3UploadCfg]]:
+    cfg = _merge_s3_upload_cfg(top_cfg.s3_upload, stage.s3_upload)
+    if not bool(cfg.enabled):
+        return None
+    if cfg.destination:
+        return cfg.destination, cfg
+    if not cfg.destination_root:
+        raise ValueError("s3_upload.enabled=true requires destination_root or stage.s3_upload.destination")
+    return f"{_ensure_trailing_slash(cfg.destination_root)}{stage_dir_name}/", cfg
 
 
 def _as_path(value: str | Path) -> Path:
@@ -1075,7 +1162,13 @@ def _arrow_schema(seq_len: int) -> pa.Schema:
     ])
 
 
-def stage_tokenize(top_cfg: TopConfig, stage: StageCfg, tokenizer: PreTrainedTokenizerBase, index: int) -> Dict[str, Any]:
+def stage_tokenize(
+    top_cfg: TopConfig,
+    stage: StageCfg,
+    tokenizer: PreTrainedTokenizerBase,
+    index: int,
+    upload_manager: Optional[S3UploadManager] = None,
+) -> Dict[str, Any]:
     rows_per_shard = int(stage.rows_per_shard or top_cfg.outputs.rows_per_shard)
     output_root = _as_path(top_cfg.outputs.processed_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1141,6 +1234,11 @@ def stage_tokenize(top_cfg: TopConfig, stage: StageCfg, tokenizer: PreTrainedTok
                 handle,
                 indent=2,
             )
+        if upload_manager is not None:
+            upload_target = _stage_s3_destination(top_cfg, stage, stage_dir_name)
+            if upload_target is not None:
+                destination, upload_cfg = upload_target
+                upload_manager.upload_dir(stage_output_dir, destination, upload_cfg)
 
     LOGGER.info(
         "Stage '%s' done | documents=%d sequences=%d tokens=%d duplicates=%d discarded=%d",
@@ -1176,6 +1274,23 @@ def stage_merge(top_cfg: TopConfig, stages: List[StageCfg]) -> Dict[str, Any]:
         json.dump(manifest, handle, indent=2)
     LOGGER.info("Wrote dataset manifest → %s", manifest_path)
     return manifest
+
+
+def upload_root_files(top_cfg: TopConfig, upload_manager: S3UploadManager) -> None:
+    cfg = top_cfg.s3_upload
+    if not cfg.enabled or not cfg.upload_root_files or not cfg.destination_root:
+        return
+    root = _as_path(top_cfg.outputs.processed_root)
+    temp_dir = root / ".s3_root_files"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    for filename in (top_cfg.outputs.manifest_filename, top_cfg.outputs.stats_filename):
+        src = root / filename
+        if src.exists():
+            shutil.copy2(src, temp_dir / filename)
+    if any(temp_dir.iterdir()):
+        upload_manager.upload_dir(temp_dir, cfg.destination_root, cfg)
 
 
 def _find_default(path_candidates: List[str]) -> Optional[str]:
@@ -1229,6 +1344,28 @@ def _parse_stage_sources(raw_sources: Iterable[Any]) -> List[StageSourceCfg]:
     return sources
 
 
+def _parse_s3_upload_cfg(raw: Any, *, override: bool = False) -> S3UploadCfg:
+    if raw is None:
+        return S3UploadCfg()
+    raw_dict = dict(raw)
+    if raw_dict.get("extra_args") is None:
+        raw_dict["extra_args"] = []
+    if override:
+        defaults = {
+            "enabled": None,
+            "destination_root": None,
+            "destination": None,
+            "env_file": None,
+            "tool": None,
+            "size_only": None,
+            "extra_args": None,
+            "upload_root_files": None,
+        }
+        defaults.update(raw_dict)
+        raw_dict = defaults
+    return S3UploadCfg(**raw_dict)
+
+
 def _parse_stages(corpus_cfg: OmegaConf, outputs: OutputsCfg) -> List[StageCfg]:
     if "stages" not in corpus_cfg or corpus_cfg.get("stages") is None:
         raise ValueError("No 'stages' section found in Config.yml")
@@ -1239,6 +1376,8 @@ def _parse_stages(corpus_cfg: OmegaConf, outputs: OutputsCfg) -> List[StageCfg]:
         raw_dict.setdefault("name", name)
         raw_dict.setdefault("output_dir", raw_dict.get("output_dir", name))
         raw_dict["sources"] = _parse_stage_sources(raw_dict.get("sources", []))
+        if raw_dict.get("s3_upload") is not None:
+            raw_dict["s3_upload"] = _parse_s3_upload_cfg(raw_dict.get("s3_upload"), override=True)
         stage_cfg = StageCfg(**raw_dict)
         stage_cfg.sequence_length = int(stage_cfg.sequence_length)
         stage_cfg.min_tokens = int(stage_cfg.min_tokens or 0)
@@ -1299,6 +1438,7 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
         global_seed = int(global_seed)
     outputs = OutputsCfg(**(corpus_cfg.get("outputs") or {}))
     scheduling = SchedulingCfg(**(corpus_cfg.get("scheduling") or {}))
+    s3_upload = _parse_s3_upload_cfg(corpus_cfg.get("s3_upload"))
     stages = _parse_stages(corpus_cfg, outputs)
 
     base_prefix = paths.data_root or ""
@@ -1330,6 +1470,7 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
         outputs=outputs,
         scheduling=scheduling,
         stages=stages,
+        s3_upload=s3_upload,
         dry_run=False,
     )
 
@@ -1368,6 +1509,7 @@ def run_pipeline(
     tokenizer = load_tokenizer(top_cfg.tokenizer)
     seed = top_cfg.global_seed if top_cfg.global_seed is not None else top_cfg.scheduling.seed
     np.random.seed(int(seed))
+    upload_manager = S3UploadManager()
 
     stage_lookup = {stage_cfg.name: stage_cfg for stage_cfg in top_cfg.stages}
     if stage != "all":
@@ -1381,7 +1523,7 @@ def run_pipeline(
 
     stats_bundle: Dict[str, Any] = {}
     for idx, stage_cfg in enumerate(stages_to_run):
-        stats_bundle[stage_cfg.name] = stage_tokenize(top_cfg, stage_cfg, tokenizer, idx)
+        stats_bundle[stage_cfg.name] = stage_tokenize(top_cfg, stage_cfg, tokenizer, idx, upload_manager)
 
     if not top_cfg.dry_run and stages_to_run:
         manifest = stage_merge(top_cfg, stages_to_run)
@@ -1392,6 +1534,9 @@ def run_pipeline(
     with stats_path.open("w", encoding="utf-8") as handle:
         json.dump(stats_bundle, handle, indent=2)
     LOGGER.info("Wrote stats → %s", stats_path)
+    if not top_cfg.dry_run:
+        upload_root_files(top_cfg, upload_manager)
+        upload_manager.join()
     return stats_bundle
 
 

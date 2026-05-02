@@ -9,6 +9,14 @@ scheduling:
   write_batch_size: 256
   dry_run_preview_rows: 200
 
+s3_upload:
+  enabled: false
+  destination_root: "s3://giant-data/GIANT/example_dataset_artifacts/"
+  env_file: null
+  tool: "s5cmd"
+  size_only: true
+  upload_root_files: true
+
 stages:
   sentences_short:
     description: "High-quality English sentences warmup"

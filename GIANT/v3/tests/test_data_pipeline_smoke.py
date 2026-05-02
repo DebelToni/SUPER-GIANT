@@ -9,11 +9,15 @@ import numpy as np
 import pyarrow as pa
 
 from GIANT.v3.data_pipeline.build_corpus import (
+    S3UploadCfg,
     StageCfg,
     StageSourceCfg,
     StageStats,
     SequenceEmitter,
     _arrow_schema,
+    _build_s3_sync_command,
+    _merge_s3_upload_cfg,
+    _parse_s3_upload_cfg,
     _iter_jsonl_records,
     _maybe_hash,
     _stream_json_records,
@@ -107,6 +111,26 @@ def test_weighted_source_mix_interleaves_sources(tmp_dir: Path) -> None:
     assert prefixes == {"bg", "en"}
 
 
+def test_s3_sync_command_uses_env_file_and_size_only(tmp_dir: Path) -> None:
+    cfg = S3UploadCfg(enabled=True, destination_root="s3://giant-data/tmp/", env_file="/tmp/fake.env")
+    command = _build_s3_sync_command(tmp_dir / "stage", "s3://giant-data/tmp/stage/", cfg)
+    assert command[:2] == ["bash", "-lc"]
+    script = command[2]
+    assert "source /tmp/fake.env" in script
+    assert "s5cmd sync --size-only" in script
+    assert "s3://giant-data/tmp/stage/" in script
+
+
+def test_stage_s3_upload_override_preserves_global_defaults() -> None:
+    parent = S3UploadCfg(enabled=True, destination_root="s3://giant-data/base/", env_file="/tmp/env", tool="s5cmd")
+    child = _parse_s3_upload_cfg({"destination": "s3://giant-data/custom/stage/"}, override=True)
+    merged = _merge_s3_upload_cfg(parent, child)
+    assert merged.enabled is True
+    assert merged.env_file == "/tmp/env"
+    assert merged.tool == "s5cmd"
+    assert merged.destination == "s3://giant-data/custom/stage/"
+
+
 def main() -> None:
     tmp_dir = Path(tempfile.mkdtemp())
     test_hash_deterministic()
@@ -114,6 +138,8 @@ def main() -> None:
     test_arrow_schema_fixed_size()
     test_sequence_emitter_random_windows()
     test_weighted_source_mix_interleaves_sources(tmp_dir)
+    test_s3_sync_command_uses_env_file_and_size_only(tmp_dir)
+    test_stage_s3_upload_override_preserves_global_defaults()
     print("data_pipeline smoke tests passed")
 
 

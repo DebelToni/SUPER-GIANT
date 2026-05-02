@@ -1,0 +1,40 @@
+prompt_bank:
+  output_dir: "/proj/giant-data/GIANT/GIANT-Chat/data_curation/prompt_banks/smoltalk_example"
+  output_filename: "prompts.jsonl"
+  sources:
+    - name: "smoltalk_selected"
+      type: "huggingface"
+      dataset_name: "HuggingFaceTB/smoltalk"
+      dataset_config: "all"
+      split: "train"
+      streaming: true
+      messages_field: "messages"
+      role_field: "role"
+      content_field: "content"
+      max_prompts: 50000
+      min_assistant_messages_before_prompt: 0
+      max_assistant_messages_before_prompt: 4
+      min_user_chars: 8
+      max_user_chars: 1200
+      include_system: true
+      include_history: true
+      max_context_messages: 8
+
+teacher_kd:
+  prompt_path: "/proj/giant-data/GIANT/GIANT-Chat/data_curation/prompt_banks/smoltalk_example/prompts.jsonl"
+  output_dir: "/proj/giant-data/GIANT/GIANT-Chat/data_curation/teacher_kd/qwen_smoltalk_example"
+  output_filename: "distilled_chat.jsonl"
+  model_name: "Qwen/Qwen2.5-0.5B-Instruct"
+  trust_remote_code: true
+  device: "auto"
+  dtype: "bfloat16"
+  batch_size: 8
+  max_prompts: 50000
+  max_new_tokens: 256
+  do_sample: false
+  student_tokenizer:
+    use_custom: true
+    custom_path: "/proj/giant-data/GIANT/GIANT-Chat/tokenizers/giant_chat_bg_en_bpe32k"
+    cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+  metadata:
+    note: "Output-KD SFT. Future logprob KD needs shared tokenizer or token alignment."

@@ -103,13 +103,19 @@ S5CMD_CONCURRENCY="${S5CMD_CONCURRENCY:-20}"
 S5CMD_GLOBAL=(s5cmd --numworkers "$S5CMD_NUMWORKERS")
 S5CMD_CP=(s5cmd --numworkers "$S5CMD_NUMWORKERS" cp --concurrency "$S5CMD_CONCURRENCY")
 SYNC_DIRS_FILE="s3://${BUCKET}/sync_dirs.txt"
+SYNC_DIRS_FILE_PRESENT=0
 
-# Optional override: if sync_dirs.txt exists in the bucket, use its contents
+# Optional override: if sync_dirs.txt exists in the bucket, use its contents.
+# Important: an existing but empty sync_dirs.txt explicitly means "sync nothing".
+# Missing sync_dirs.txt preserves the old full-bucket sync fallback.
 if "${S5CMD_GLOBAL[@]}" ls "${SYNC_DIRS_FILE}" >/dev/null 2>&1; then
+  SYNC_DIRS_FILE_PRESENT=1
   _file_dirs="$("${S5CMD_GLOBAL[@]}" cat "${SYNC_DIRS_FILE}" | tr '\n' ',' | sed 's/,,*/,/g; s/^,//; s/,$//')"
-  if [[ -n "${_file_dirs}" ]]; then
-    SYNC_DIRS="${_file_dirs}"
+  SYNC_DIRS="${_file_dirs}"
+  if [[ -n "${SYNC_DIRS}" ]]; then
     echo "[sync] using sync_dirs.txt from ${SYNC_DIRS_FILE}: ${SYNC_DIRS}"
+  else
+    echo "[sync] sync_dirs.txt exists but is empty; skipping data sync"
   fi
 fi
 
@@ -120,7 +126,11 @@ SYNC_DIRS="${SYNC_DIRS%\'}"
 
 # Marker depends on SYNC_DIRS so changing the list triggers a new sync automatically.
 if [[ -z "$SYNC_DIRS" ]]; then
-  _sync_id="all"
+  if [[ "$SYNC_DIRS_FILE_PRESENT" == "1" ]]; then
+    _sync_id="empty"
+  else
+    _sync_id="all"
+  fi
 else
   _sync_id="$(printf '%s' "$SYNC_DIRS" | sha256sum | awk '{print $1}')"
 fi
@@ -132,8 +142,13 @@ fi
 
 if [[ ! -f "$SYNC_MARKER" ]]; then
   if [[ -z "$SYNC_DIRS" ]]; then
-    # No SYNC_DIRS => clone/sync everything (original behavior)
-    "${S5CMD_GLOBAL[@]}" sync --size-only "s3://${BUCKET}/*" "${DATA_DIR}/"
+    if [[ "$SYNC_DIRS_FILE_PRESENT" == "1" ]]; then
+      # Existing empty sync_dirs.txt => explicit no-op sync.
+      true
+    else
+      # No SYNC_DIRS and no sync_dirs.txt => clone/sync everything (original behavior)
+      "${S5CMD_GLOBAL[@]}" sync --size-only "s3://${BUCKET}/*" "${DATA_DIR}/"
+    fi
   else
     # SYNC_DIRS example:
     #   SYNC_DIRS="Dir/Dir/,Dir/Other_Dir/,Dir/Dir/File,Dir/Other_Dir/Other_File"

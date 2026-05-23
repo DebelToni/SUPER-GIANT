@@ -36,12 +36,11 @@ RUN pip install --upgrade pip && \
         "jax[cuda12]" \
         flax transformers datasets optax omegaconf kagglehub huggingface-hub
 
-# Node.js + latest npm (pin major; no corepack)
-ARG NODE_MAJOR=22
+# Node.js + bundled npm (avoid npm self-upgrade regressions in Docker builds)
+ARG NODE_MAJOR=24
 RUN set -eux; \
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
-    npm install -g npm@latest && \
     node -v && npm -v && \
     rm -rf /var/lib/apt/lists/*
 

@@ -4,6 +4,7 @@ transformers
 datasets
 optax
 omegaconf
+PyYAML
 kagglehub
 huggingface-hub
 tqdm

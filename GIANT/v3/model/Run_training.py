@@ -40,6 +40,7 @@ from GIANT.v3.model.checkpoint_manager import (
     set_npz_metadata,
 )
 from GIANT.v3.model.optimizer_utils import create_weight_decay_mask
+from GIANT.v3.run_manifest import build_manifest, write_manifest
 try:
     from GIANT.v3.device_utils import select_default_device
 except ImportError:  # pragma: no cover - temporary fallback for dirty worktrees
@@ -113,8 +114,8 @@ USE_PMAP = LOCAL_DEVICE_COUNT > 1 and MULTI_GPU_BACKEND == "pmap"
 TRAINING_MESH = Mesh(np.array(LOCAL_DEVICES), ("data",)) if USE_SHARD_MAP else None
 REPLICATED_SHARDING = NamedSharding(TRAINING_MESH, P()) if USE_SHARD_MAP else None
 IS_GPU = DEFAULT_DEVICE.platform == "gpu"
-GLOBAL_DATA_ROOT = Path("/proj/giant-data")
-S3_BUCKET_ROOT = "s3://giant-data"
+DEFAULT_ARTIFACT_LOCAL_ROOT = Path("/proj/giant-data")
+DEFAULT_ARTIFACT_S3_ROOT = "s3://giant-data"
 
 
 def _to_dtype(value: jnp.dtype | str) -> jnp.dtype:
@@ -628,15 +629,43 @@ def _format_train_progress_log(
     )
 
 
-def _s3_uri_for_local_path(local_path: Path) -> str:
-    candidate = local_path.absolute()
+def _artifact_cfg(cfg: OmegaConf) -> OmegaConf:
+    return cfg.get("artifacts", OmegaConf.create({}))
+
+
+def _artifact_upload_enabled(cfg: OmegaConf, kind: str) -> bool:
+    upload = _artifact_cfg(cfg).get("upload", {})
+    return bool(upload.get("enabled", False) and upload.get(kind, False))
+
+
+def _s3_uri_for_local_path(local_path: Path, cfg: OmegaConf) -> str:
+    artifacts = _artifact_cfg(cfg)
+    local_root = Path(str(artifacts.get("local_root", str(DEFAULT_ARTIFACT_LOCAL_ROOT)))).expanduser().resolve()
+    s3_root = str(artifacts.get("s3_root", DEFAULT_ARTIFACT_S3_ROOT)).rstrip("/")
+    candidate = local_path.expanduser().resolve()
     try:
-        relative = candidate.relative_to(GLOBAL_DATA_ROOT)
+        relative = candidate.relative_to(local_root)
     except ValueError as exc:
         raise ValueError(
-            f"Upload path {candidate} is not under {GLOBAL_DATA_ROOT}; cannot derive S3 destination."
+            f"Upload path {candidate} is not under {local_root}; cannot derive S3 destination."
         ) from exc
-    return f"{S3_BUCKET_ROOT}/{relative.as_posix()}"
+    return f"{s3_root}/{relative.as_posix()}"
+
+
+def _build_upload_command(local_path: Path, s3_uri: str, cfg: OmegaConf) -> str:
+    artifacts = _artifact_cfg(cfg)
+    tool = str(artifacts.get("tool", "s5cmd"))
+    size_only = bool(artifacts.get("size_only", True))
+    env_file = artifacts.get("env_file", "~/.env-R2")
+    sync_args = [tool, "sync"]
+    if size_only:
+        sync_args.append("--size-only")
+    source = f"{local_path}/" if local_path.is_dir() else str(local_path)
+    sync_args.extend([source, s3_uri])
+    quoted = " ".join(shlex.quote(part) for part in sync_args)
+    if env_file:
+        return f"set -a; source {shlex.quote(str(Path(str(env_file)).expanduser()))}; set +a; {quoted}"
+    return quoted
 
 
 def _launch_async_upload(
@@ -645,22 +674,20 @@ def _launch_async_upload(
     local_path: Path,
     log_dir: Path,
     upload_processes: List[tuple[str, subprocess.Popen[str], Path]],
+    cfg: OmegaConf,
 ) -> None:
     local_path = local_path.absolute()
     if not local_path.exists():
         print(f"[upload] skipping {label}: path does not exist: {local_path}")
         return
 
-    s3_uri = _s3_uri_for_local_path(local_path)
+    s3_uri = _s3_uri_for_local_path(local_path, cfg)
     if local_path.is_dir() and not s3_uri.endswith("/"):
         s3_uri = f"{s3_uri}/"
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time())
     log_path = log_dir / f"{label}_{stamp}.log"
-    cmd = (
-        "source ~/.env-R2 && "
-        f"s5cmd sync --size-only {shlex.quote(str(local_path))} \"{s3_uri}\""
-    )
+    cmd = _build_upload_command(local_path, s3_uri, cfg)
     log_handle = open(log_path, "a", encoding="utf-8")
     proc = subprocess.Popen(
         ["bash", "-lc", cmd],
@@ -711,7 +738,7 @@ def parse_args() -> argparse.Namespace:
     cli.add_argument(
         "--upload-on-checkpoint",
         action="store_true",
-        help="Asynchronously sync the checkpoint root to s3://giant-data after each full checkpoint.",
+        help="Asynchronously sync the checkpoint root after each full checkpoint. Uses artifacts.s3_root from Global_Config.yml.",
     )
     return cli.parse_args()
 
@@ -838,6 +865,7 @@ def main() -> None:
     params_dir_str = str(params_dir)
     training_states_dir_str = str(training_states_dir)
     checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
+    upload_on_checkpoint = bool(args.upload_on_checkpoint or _artifact_upload_enabled(cfg, "checkpoints"))
     upload_processes: List[tuple[str, subprocess.Popen[str], Path]] = []
 
     params_dir.mkdir(parents=True, exist_ok=True)
@@ -1645,12 +1673,13 @@ def main() -> None:
                     train_loss=last_loss,
                 )
                 print(f"💾 checkpoint → {ckpt_file}")
-                if args.upload_on_checkpoint:
+                if upload_on_checkpoint:
                     _launch_async_upload(
                         label=f"checkpoint_{global_step}",
                         local_path=checkpoint_root,
                         log_dir=upload_log_dir,
                         upload_processes=upload_processes,
+                        cfg=cfg,
                     )
 
             if _stop_requested:
@@ -1697,12 +1726,13 @@ def main() -> None:
     if last_loss is not None:
         print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {final_ckpt}")
     save_opt_state(_checkpoint_tree(opt_state), global_step, training_states_dir_str)
-    if args.upload_on_checkpoint:
+    if upload_on_checkpoint:
         _launch_async_upload(
             label=f"checkpoint_final_{global_step}",
             local_path=checkpoint_root,
             log_dir=upload_log_dir,
             upload_processes=upload_processes,
+            cfg=cfg,
         )
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),
@@ -1712,6 +1742,25 @@ def main() -> None:
             "stage_states": stage_states,
         },
     )
+    s3_outputs = []
+    if upload_on_checkpoint:
+        try:
+            s3_outputs.append(_s3_uri_for_local_path(checkpoint_root, cfg))
+        except ValueError:
+            pass
+    run_manifest_path = checkpoint_root / "run_manifest.json"
+    write_manifest(
+        run_manifest_path,
+        build_manifest(
+            kind="training",
+            config_path=args.config,
+            global_config_path=args.global_config,
+            outputs=[checkpoint_root, final_ckpt],
+            s3_outputs=s3_outputs,
+            extra={"global_step": int(global_step), "last_loss": float(last_loss) if last_loss is not None else None},
+        ),
+    )
+    print(f"[manifest] wrote {run_manifest_path}")
     print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
     print("→ Use this checkpoint as --init_checkpoint for the QA finetune stage.")
     elapsed_seconds = time.perf_counter() - command_start

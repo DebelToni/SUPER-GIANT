@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import numpy as np
 import pyarrow as pa
 
+from omegaconf import OmegaConf
+
 from GIANT.v3.data_pipeline.build_corpus import (
     S3UploadCfg,
     StageCfg,
@@ -15,6 +17,7 @@ from GIANT.v3.data_pipeline.build_corpus import (
     StageStats,
     SequenceEmitter,
     _arrow_schema,
+    _artifact_s3_upload_cfg,
     _build_s3_sync_command,
     _merge_s3_upload_cfg,
     _parse_s3_upload_cfg,
@@ -131,6 +134,24 @@ def test_stage_s3_upload_override_preserves_global_defaults() -> None:
     assert merged.destination == "s3://giant-data/custom/stage/"
 
 
+def test_artifact_s3_cfg_maps_local_path_to_s3() -> None:
+    cfg = OmegaConf.create(
+        {
+            "artifacts": {
+                "local_root": "/tmp/giant-data",
+                "s3_root": "s3://giant-data",
+                "env_file": None,
+                "tool": "s5cmd",
+                "size_only": True,
+                "upload": {"enabled": True, "datasets": True},
+            }
+        }
+    )
+    upload = _artifact_s3_upload_cfg(cfg, kind="datasets", local_path="/tmp/giant-data/GIANT/dataset_artifacts/demo")
+    assert upload.enabled is True
+    assert upload.destination_root == "s3://giant-data/GIANT/dataset_artifacts/demo"
+
+
 def main() -> None:
     tmp_dir = Path(tempfile.mkdtemp())
     test_hash_deterministic()
@@ -140,6 +161,7 @@ def main() -> None:
     test_weighted_source_mix_interleaves_sources(tmp_dir)
     test_s3_sync_command_uses_env_file_and_size_only(tmp_dir)
     test_stage_s3_upload_override_preserves_global_defaults()
+    test_artifact_s3_cfg_maps_local_path_to_s3()
     print("data_pipeline smoke tests passed")
 
 

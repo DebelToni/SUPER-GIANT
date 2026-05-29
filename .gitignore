@@ -19,6 +19,8 @@ agents.md
 .opencode
 *.safetensors
 *.egg-info/
+build/
+dist/
 A-Logs.md
 TiDAR/Docs/Benchmark_logs/
 package-lock.json

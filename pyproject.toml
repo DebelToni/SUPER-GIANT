@@ -5,25 +5,81 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "super-giant"
 version = "0.3.0"
+description = "JAX/Flax framework for custom LLM data preparation, training, inference, and GPU/S3 operations."
+readme = "README.md"
 requires-python = ">=3.10"
-# use requirements.txt
-# dependencies = [
-#   "jax[cuda12]",
-#   "flax",
-#   "optax",
-#   "orbax",
-#   "transformers",
-#   "datasets",
-#   "huggingface-hub",
-#   "kagglehub",
-#   "omegaconf",
-#   "tqdm",
-#   "numpy",
-#   "pyarrow",
-#   "openai",
-# ]
+authors = [{ name = "Anton Hristov" }]
+keywords = ["jax", "flax", "llm", "training", "speculative-decoding"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "omegaconf",
+  "PyYAML",
+]
+
+[project.optional-dependencies]
+# CPU/dev installs intentionally avoid CUDA-specific JAX wheels.
+cpu = [
+  "jax",
+  "flax",
+  "optax",
+  "orbax-checkpoint",
+  "numpy",
+  "tqdm",
+]
+cuda = [
+  "jax[cuda12]",
+  "flax",
+  "optax",
+  "orbax-checkpoint",
+  "numpy",
+  "tqdm",
+]
+data = [
+  "datasets",
+  "transformers",
+  "huggingface-hub",
+  "kagglehub",
+  "pyarrow",
+]
+tidar = [
+  "datasets",
+  "transformers",
+  "huggingface-hub",
+  "pyarrow",
+]
+deploy = []
+dev = [
+  "build",
+  "pytest",
+  "ruff",
+]
+
+[project.scripts]
+sg = "super_giant.cli:main"
+super-giant = "super_giant.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/DebelToni/SUPER-GIANT"
+Documentation = "https://debeltoni.github.io/SUPER-GIANT"
+Repository = "https://github.com/DebelToni/SUPER-GIANT"
 
 [tool.setuptools.packages.find]
 where = ["."]
 namespaces = true
-include = ["GIANT.v2*", "TRM*", "TiDAR*", "GIANT.v3*"]
+include = ["super_giant*", "GIANT.v2*", "GIANT.v3*", "TiDAR*"]
+exclude = ["*.tests", "*.tests.*"]
+
+[tool.setuptools.package-data]
+"GIANT.v3" = ["Configs/**/*.yml", "Configs/**/*.yaml", "Configs/**/*.md", "Configs/**/*.txt", "Long/*.yml", "Long/*.yaml"]
+"TiDAR" = ["**/*.yml", "**/*.yaml", "**/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["GIANT/v3/tests", "TiDAR/tests"]
+python_files = ["test_*.py"]
+addopts = "-q"

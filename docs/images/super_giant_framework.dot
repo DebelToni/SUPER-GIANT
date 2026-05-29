@@ -1,0 +1,50 @@
+digraph G {
+  graph [rankdir=LR, bgcolor="white", pad="0.25", nodesep="0.55", ranksep="0.75"];
+  node [shape=plain, fontname="Helvetica"];
+  edge [color="#333333", arrowsize=0.8, fontname="Helvetica", fontsize=11];
+
+  configs [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f0fe">
+      <TR><TD><B>GIANT/v3/Configs</B><BR/>YAML source of truth</TD></TR>
+      <TR><TD BORDER="1" COLOR="#c7d7f5"><FONT POINT-SIZE="10">repo / local</FONT></TD></TR>
+    </TABLE>>];
+  tokenizer [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f5e9">
+      <TR><TD><B>Tokenizer</B><BR/>train_tokenizer.py</TD></TR>
+      <TR><TD BORDER="1" COLOR="#c8e6c9"><FONT POINT-SIZE="10">CPU: local or VM</FONT></TD></TR>
+    </TABLE>>];
+  data [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f5e9">
+      <TR><TD><B>Data pipeline</B><BR/>build_corpus.py<BR/>Arrow shards + masks</TD></TR>
+      <TR><TD BORDER="1" COLOR="#c8e6c9"><FONT POINT-SIZE="10">CPU: local or VM</FONT></TD></TR>
+    </TABLE>>];
+  train [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#fff8e1">
+      <TR><TD><B>Training</B><BR/>Run_training.py<BR/>JAX/Flax multi-GPU</TD></TR>
+      <TR><TD BORDER="1" COLOR="#ffe0a3"><FONT POINT-SIZE="10">GPU VM / RunPod</FONT></TD></TR>
+    </TABLE>>];
+  ckpt [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#fff3e0">
+      <TR><TD><B>Checkpoints</B><BR/>params + state<BR/>run_manifest.json</TD></TR>
+      <TR><TD BORDER="1" COLOR="#ffd6a6"><FONT POINT-SIZE="10">/proj/giant-data + S3</FONT></TD></TR>
+    </TABLE>>];
+  infer [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#f3e5f5">
+      <TR><TD><B>Inference</B><BR/>Generate_chat.py<BR/>Generate_faster.py</TD></TR>
+      <TR><TD BORDER="1" COLOR="#e1bee7"><FONT POINT-SIZE="10">GPU preferred / CPU works</FONT></TD></TR>
+    </TABLE>>];
+  tidar [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#fce4ec">
+      <TR><TD><B>TiDAR</B><BR/>Anchor speculative decoding</TD></TR>
+      <TR><TD BORDER="1" COLOR="#f8bbd0"><FONT POINT-SIZE="10">GPU inference path</FONT></TD></TR>
+    </TABLE>>];
+
+  configs -> tokenizer;
+  configs -> data;
+  configs -> train;
+  tokenizer -> data;
+  data -> train;
+  train -> ckpt;
+  ckpt -> infer;
+  ckpt -> tidar;
+}

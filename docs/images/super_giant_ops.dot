@@ -1,0 +1,45 @@
+digraph G {
+  graph [rankdir=LR, bgcolor="white", pad="0.25", nodesep="0.55", ranksep="0.75"];
+  node [shape=plain, fontname="Helvetica"];
+  edge [color="#333333", arrowsize=0.8, fontname="Helvetica", fontsize=11];
+
+  local [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f0fe">
+      <TR><TD><B>Local Mac</B><BR/>edit code + configs</TD></TR>
+      <TR><TD BORDER="1" COLOR="#c7d7f5"><FONT POINT-SIZE="10">local CPU</FONT></TD></TR>
+    </TABLE>>];
+  git [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f0fe">
+      <TR><TD><B>Git repo</B><BR/>/proj/SUPER-GIANT</TD></TR>
+      <TR><TD BORDER="1" COLOR="#c7d7f5"><FONT POINT-SIZE="10">local + VM checkout</FONT></TD></TR>
+    </TABLE>>];
+  s3 [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f5e9">
+      <TR><TD><B>S3/R2</B><BR/>s3://giant-data</TD></TR>
+      <TR><TD BORDER="1" COLOR="#c8e6c9"><FONT POINT-SIZE="10">durable remote storage</FONT></TD></TR>
+    </TABLE>>];
+  gpu [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#fff8e1">
+      <TR><TD><B>RunPod GPU</B><BR/>disposable executor</TD></TR>
+      <TR><TD BORDER="1" COLOR="#ffe0a3"><FONT POINT-SIZE="10">GPU VM</FONT></TD></TR>
+    </TABLE>>];
+  data [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f5e9">
+      <TR><TD><B>/proj/giant-data</B><BR/>durable artifacts</TD></TR>
+      <TR><TD BORDER="1" COLOR="#c8e6c9"><FONT POINT-SIZE="10">VM disk + S3 mirror</FONT></TD></TR>
+    </TABLE>>];
+  ts [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#f3e5f5">
+      <TR><TD><B>Tailscale SSH</B><BR/>root@gpu-box</TD></TR>
+      <TR><TD BORDER="1" COLOR="#e1bee7"><FONT POINT-SIZE="10">control plane</FONT></TD></TR>
+    </TABLE>>];
+
+  local -> git [label="commit / patch"];
+  local -> s3 [label="sync_dirs.txt\nentrypoint.sh"];
+  s3 -> gpu [label="startup sync"];
+  git -> gpu [label="clone/pull"];
+  gpu -> data [label="train/build"];
+  data -> s3 [label="s5cmd upload"];
+  local -> ts [label="monitor"];
+  ts -> gpu;
+}

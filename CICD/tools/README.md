@@ -1,157 +1,147 @@
-# s3.py
+# SUPER-GIANT ops tools
 
-S3 shell wrapper around `s5cmd` with a friendly interactive mode, tab completion,
-and a cold-path CLI for one-off commands.
+Small command-line helpers for the disposable GPU workflow, S3 artifact movement, and remote code sync.
 
+## Tools
 
-If you are interested for what I use this tool so much, [check out the main README of the repo!](https://github.com/DebelToni/SUPER-GIANT)
+| Tool | Purpose |
+| --- | --- |
+| `runpod-gpu.sh` | Create/list/stop/remove RunPod GPU pods from the repo, using the existing GIANT template. |
+| `gpu_job.py` | Prepare `sync_dirs.txt` + `entrypoint.sh` for the next pod startup job. |
+| `sync-gpu.py` | Reset a reachable GPU repo to the local commit and apply the current unstaged diff. |
+| `wait-new-gpu.sh` | Wait until a new Tailscale GPU host appears or `root@gpu-box` is reachable. |
+| `s3.py` | Interactive/cold-path wrapper over `s5cmd`. |
 
-Consider leaving a star ⭐️ if you find it useful :)
+## Typical GPU workflow
 
-https://github.com/user-attachments/assets/22945a6b-fa02-4353-bc29-4f63006e70a5
+Prepare startup files locally under `/proj/giant-data` and upload them to `s3://giant-data`:
 
+```bash
+python3 CICD/tools/gpu_job.py prepare \
+  --name bg-en-pretrain \
+  --config GIANT/v3/Configs/Training/1_pretraining_100m_bg_en_ctx256_32k_1p8b.yml \
+  --sync-dir GIANT/GIANT-Chat/ \
+  --upload
+```
 
+Start a pod:
 
-<br>
+```bash
+CICD/tools/runpod-gpu.sh create --gpu auto --name bg-en-pretrain --wait
+```
 
-## Requirements
+Sync local work-in-progress code to an already reachable GPU box:
 
-- `python3` <- no libs!
+```bash
+python3 CICD/tools/sync-gpu.py --dry-run --path CICD/tools
+python3 CICD/tools/sync-gpu.py --host root@gpu-box --path CICD/tools
+```
+
+Pods are disposable. Durable artifacts should live under `/proj/giant-data`, which maps to `s3://giant-data/`.
+
+## `runpod-gpu.sh`
+
+Requirements:
+
+- `runpodctl`
+- `curl`
+- `python3`
+- `RUNPOD_API_KEY` or `~/.runpod/config.toml`
+
+Commands:
+
+```bash
+CICD/tools/runpod-gpu.sh create --gpu auto --name my-job --wait
+CICD/tools/runpod-gpu.sh create --gpu "NVIDIA RTX A6000" --name my-job --wait
+CICD/tools/runpod-gpu.sh create --gpu "NVIDIA RTX A40" --spot --id-only
+CICD/tools/runpod-gpu.sh list
+CICD/tools/runpod-gpu.sh stop POD_ID
+CICD/tools/runpod-gpu.sh remove POD_ID
+```
+
+`--gpu auto` tries A6000, A5000, A4500, A4000, A40, then RTX 5090.
+
+## `gpu_job.py prepare`
+
+Writes two files consumed by the Docker entrypoint:
+
+- `/proj/giant-data/sync_dirs.txt`
+- `/proj/giant-data/entrypoint.sh`
+
+Dry-run locally without touching `/proj`:
+
+```bash
+python3 CICD/tools/gpu_job.py prepare \
+  --name smoke \
+  --config GIANT/v3/Configs/Training/dev_100m_hq.yml \
+  --data-root /tmp/giant-data \
+  --remote-data-root /proj/giant-data \
+  --dry-run
+```
+
+Useful options:
+
+- `--kind train|data|tokenizer` chooses the standard GIANT/v3 command built from `--config`.
+- `--command "..."` writes a custom startup command instead.
+- `--sync-dir PREFIX/` repeats S3/data prefixes to prefetch on startup.
+- `--data-root` controls where startup files are written locally.
+- `--remote-data-root` controls the path used inside the pod; default is the same as `--data-root`.
+- `--upload` copies startup files to `s3://giant-data/sync_dirs.txt` and `s3://giant-data/entrypoint.sh`.
+- `--env-file ~/.env-R2` sources credentials before upload.
+
+## `sync-gpu.py`
+
+Use this for quick tests on an already running Tailscale GPU. It treats the remote repo as ephemeral:
+
+1. `git fetch --all --prune`
+2. checkout local `HEAD`
+3. `git reset --hard && git clean -fd`
+4. apply the local unstaged patch, including untracked files
+
+It intentionally does not sync staged changes. Use repeatable `--path PATH` to test or send only a subset of the local diff.
+
+## `s3.py`
+
+S3 shell wrapper around `s5cmd` with a friendly interactive mode, tab completion, and a cold-path CLI for one-off commands.
+
+Requirements:
+
+- `python3`
 - `s5cmd` in your PATH
-- AWS credentials available via the standard AWS credential chain
-  (env vars, AWS_PROFILE, ~/.aws, etc.)
-- `S3_ENDPOINT_URL` when using non-AWS S3 (R2/MinIO/B2). Optional for AWS S3.
+- AWS credentials available through env vars, `AWS_PROFILE`, `~/.aws`, etc.
+- `S3_ENDPOINT_URL` for non-AWS S3/R2/MinIO/B2 when needed
 
-## Quick start
-
-Launch the interactive shell:
+Quick start:
 
 ```bash
 python3 CICD/tools/s3.py
-```
-
-Run a single command (cold path):
-
-```bash
 python3 CICD/tools/s3.py ls
-python3 CICD/tools/s3.py ls TiDAR/
-python3 CICD/tools/s3.py du TiDAR/
+python3 CICD/tools/s3.py du GIANT/
 ```
 
-## Alias tip
-
-Create a handy alias:
-
-```bash
-alias s3="python3 /absolute/path/to/CICD/tools/s3.py"
-```
-
-You can also bake in your default bucket:
+Alias tip:
 
 ```bash
 alias s3="python3 /absolute/path/to/CICD/tools/s3.py --bucket giant-data"
 ```
 
-## Default bucket
+Common commands inside the shell:
 
-By default, the bucket comes from `S3_BUCKET`. If it's not set, it falls back to
-`s3://giant-data`. 
+```text
+ls [path]              list S3/local paths
+ls -R [path]           tree view
+cd [path]              change prefix/cwd
+cp src dst             copy between local/S3
+sync src dst           size-only sync by default
+cat/head/tail path     inspect S3 objects
+local                  switch to local mode
+s3                     switch to S3 mode
+```
 
-Change it to your default bucket name!
-
-If you want a different default on first use, pass `--bucket`:
+Examples:
 
 ```bash
-python3 CICD/tools/s3.py --bucket my-bucket
-```
-
-This sets the bucket for that session. If you want it permanently, put it in an alias
-as shown above.
-
-## Shell modes
-
-The shell has two modes:
-
-- `s3` mode (default): paths are S3-relative to the current prefix
-- `local` mode: paths are local filesystem-relative to your local cwd
-
-Commands to switch:
-
-```bash
-s3     # switch back to S3 mode
-local  # switch to local filesystem mode
-```
-
-The prompt shows the current mode:
-
-```
-s3://giant-data/TiDAR>
-local:/Users/me/projects>
-```
-
-## Commands
-
-- `ls [path]` (supports `--depth N`, `-R`/`--tree`)
-- `du [path]`
-- `rm [-r] path`
-- `mkdir [-p] path`
-- `cat path`
-- `head [-n N] path`
-- `tail [-n N] path`
-- `cp src dst`
-- `mv src dst`
-- `sync [--true-sync] src dst`
-- `cd [path]`
-- `pwd`
-- `local`, `s3`
-- `clear`
-- `help`, `exit`, `quit`
-
-Notes:
-
-- `sync` defaults to `--size-only` unless you pass `--true-sync`.
-- Use a trailing `/` on S3 prefixes for folder-like behavior.
-- `mv` does not support S3 -> local (use `cp` then `rm`).
-
-## Examples
-
-Copy local folder up to S3:
-
-```bash
-s3://giant-data/> cp ./local_dir/ TiDAR/
-```
-
-Copy from S3 to local:
-
-```bash
-s3://giant-data/> cp TiDAR/ ./downloads/
-```
-
-Sync S3 to local (size-only):
-
-```bash
-s3://giant-data/> sync TiDAR/ ./sync_downloads/
-```
-
-Switch to local mode to use relative local paths:
-
-```bash
-s3://giant-data/> local
-local:/Users/me/project> cp ../data/ s3://giant-data/TiDAR/
-local:/Users/me/project> s3
-```
-
-Pipe the output into any cli:
-
-```bash
-~/Documents❯ s3 cat /path/to/logs.json | jq
-```
-```json
-{
-  "tinystories_300m_512": {
-    "path": "/datasets/tinystories/config",
-    "sequence_length": 512,
-    "target_tokens": 300000000
-  }
-}
+s3://giant-data/> cp ./local_dir/ GIANT/tmp/
+s3://giant-data/> sync GIANT/GIANT-Chat/ ./downloads/
+s3://giant-data/> cat GIANT/path/to/log.json | jq
 ```

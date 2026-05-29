@@ -14,5 +14,20 @@ paths:
   logs_root: "logs"
   hf_cache_root: "/proj/giant-data/hf_cache"
 
+artifacts:
+  # Local artifact root and matching S3 prefix. A local path under
+  # /proj/giant-data/GIANT/foo maps to s3://giant-data/GIANT/foo.
+  local_root: "/proj/giant-data"
+  s3_root: "s3://giant-data"
+  env_file: "~/.env-R2"
+  tool: "s5cmd"
+  size_only: true
+  upload:
+    enabled: false
+    tokenizers: false
+    datasets: false
+    checkpoints: false
+    logs: false
+
 # export XLA_PYTHON_CLIENT_PREALLOCATE=true
 # export XLA_PYTHON_CLIENT_MEM_FRACTION=1.0

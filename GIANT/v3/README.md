@@ -23,10 +23,12 @@ Most paths in serious runs should point under `/proj/giant-data/GIANT/...` or `/
 The three-command version is:
 
 ```bash
-PYTHONPATH=. /opt/venv/bin/python GIANT/v3/data_pipeline/train_tokenizer.py --config GIANT/v3/Configs/Tokenizer/giant_chat_bg_en_bpe32k.yml
-PYTHONPATH=. /opt/venv/bin/python GIANT/v3/data_pipeline/build_corpus.py --config GIANT/v3/Configs/Data/giant_chat_pretraining_bg_en_900m_bpe32k.yml
-PYTHONPATH=. /opt/venv/bin/python GIANT/v3/model/Run_training.py --config GIANT/v3/Configs/Training/1_pretraining_100m_bg_en_ctx256_32k_1p8b.yml
+sg tokenizer train --config GIANT/v3/Configs/Tokenizer/giant_chat_bg_en_bpe32k.yml
+sg data build --config GIANT/v3/Configs/Data/giant_chat_pretraining_bg_en_900m_bpe32k.yml
+sg train --config GIANT/v3/Configs/Training/1_pretraining_100m_bg_en_ctx256_32k_1p8b.yml
 ```
+
+Direct `PYTHONPATH=. /opt/venv/bin/python ...` script calls still work; `sg` is only the public CLI facade.
 
 On the Mac, use `/Volumes/SSD/v/SG/bin/python` instead of `/opt/venv/bin/python`.
 
@@ -65,7 +67,7 @@ Long-context examples:
 - For chat SFT, use assistant-only loss masks from the chat data config.
 - For BG+EN chat stack runs, `context_length: 256`, full MHA, and `enable_xsa: true` are the known tested path.
 
-## Data roots
+## Data roots and S3 artifacts
 
 Normal local/remote layout:
 
@@ -74,6 +76,8 @@ Normal local/remote layout:
 - HF cache: `/proj/giant-data/hf_cache`
 - chat artifacts: `/proj/giant-data/GIANT/GIANT-Chat/`
 - shared S3 prefix: `s3://giant-data/GIANT/GIANT-Chat/`
+
+`Global_Config.yml` has an `artifacts` block that maps local artifacts to S3. When enabled there, tokenizer training, dataset building, and checkpoint saving can upload through the same `local_root` → `s3_root` contract. Existing per-script `s3_upload` config still overrides the global dataset/tokenizer defaults.
 
 When using the Docker/RunPod setup, keep `/proj/giant-data/sync_dirs.txt` small and explicit. For chat-stack work the safest entry is usually just `GIANT/GIANT-Chat/`.
 

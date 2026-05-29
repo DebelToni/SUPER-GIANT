@@ -1,0 +1,59 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="white", pad="0.25", nodesep="0.45", ranksep="0.55"];
+  node [shape=plain, fontname="Helvetica"];
+  edge [color="#333333", arrowsize=0.8, fontname="Helvetica", fontsize=11];
+
+  cfg [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f0fe">
+      <TR><TD><B>Global_Config.yml</B><BR/>artifacts.local_root<BR/>artifacts.s3_root</TD></TR>
+      <TR><TD BORDER="1" COLOR="#c7d7f5"><FONT POINT-SIZE="10">repo config</FONT></TD></TR>
+    </TABLE>>];
+  root [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f5e9">
+      <TR><TD><B>/proj/giant-data</B></TD></TR>
+      <TR><TD BORDER="1" COLOR="#c8e6c9"><FONT POINT-SIZE="10">local/VM artifact root</FONT></TD></TR>
+    </TABLE>>];
+  s3root [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#e8f5e9">
+      <TR><TD><B>s3://giant-data</B></TD></TR>
+      <TR><TD BORDER="1" COLOR="#c8e6c9"><FONT POINT-SIZE="10">remote durable storage</FONT></TD></TR>
+    </TABLE>>];
+  tok [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#ffffff">
+      <TR><TD><B>tokenizers/</B></TD></TR>
+      <TR><TD BORDER="1" COLOR="#dddddd"><FONT POINT-SIZE="10">CPU output</FONT></TD></TR>
+    </TABLE>>];
+  ds [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#ffffff">
+      <TR><TD><B>dataset_artifacts/</B></TD></TR>
+      <TR><TD BORDER="1" COLOR="#dddddd"><FONT POINT-SIZE="10">CPU output</FONT></TD></TR>
+    </TABLE>>];
+  ckpt [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#ffffff">
+      <TR><TD><B>checkpoints/training/</B></TD></TR>
+      <TR><TD BORDER="1" COLOR="#dddddd"><FONT POINT-SIZE="10">GPU output</FONT></TD></TR>
+    </TABLE>>];
+  logs [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#ffffff">
+      <TR><TD><B>logs/</B></TD></TR>
+      <TR><TD BORDER="1" COLOR="#dddddd"><FONT POINT-SIZE="10">CPU/GPU output</FONT></TD></TR>
+    </TABLE>>];
+  manifest [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#222222" BGCOLOR="#fff8e1">
+      <TR><TD><B>run_manifest.json</B><BR/>command + git + config hash</TD></TR>
+      <TR><TD BORDER="1" COLOR="#ffe0a3"><FONT POINT-SIZE="10">reproducibility metadata</FONT></TD></TR>
+    </TABLE>>];
+
+  cfg -> root;
+  cfg -> s3root;
+  root -> tok;
+  root -> ds;
+  root -> ckpt;
+  root -> logs;
+  tok -> manifest;
+  ds -> manifest;
+  ckpt -> manifest;
+  tok -> s3root [label="optional upload"];
+  ds -> s3root [label="optional upload"];
+  ckpt -> s3root [label="optional upload"];
+}

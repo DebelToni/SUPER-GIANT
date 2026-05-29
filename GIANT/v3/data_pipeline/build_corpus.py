@@ -28,6 +28,7 @@ try:
     from .cleaning import normalise_text
 except ImportError:  # pragma: no cover - fallback for script usage
     from cleaning import normalise_text
+from GIANT.v3.run_manifest import build_manifest, write_manifest
 
 try:
     from huggingface_hub import snapshot_download
@@ -72,6 +73,7 @@ class OutputsCfg:
     rows_per_shard: int = 65536
     manifest_filename: str = "datasets_manifest.json"
     stats_filename: str = "dataset_stats.json"
+    run_manifest_filename: str = "run_manifest.json"
 
 
 @dataclass
@@ -220,6 +222,39 @@ class S3UploadManager:
 
 def _ensure_trailing_slash(value: str) -> str:
     return value if value.endswith("/") else value + "/"
+
+
+def _artifact_upload_enabled(global_cfg: OmegaConf, kind: str) -> bool:
+    upload = global_cfg.get("artifacts", {}).get("upload", {}) if global_cfg is not None else {}
+    return bool(upload.get("enabled", False) and upload.get(kind, False))
+
+
+def _artifact_s3_uri_for_path(global_cfg: OmegaConf, local_path: str | Path) -> Optional[str]:
+    artifacts = global_cfg.get("artifacts", {}) if global_cfg is not None else {}
+    local_root = artifacts.get("local_root")
+    s3_root = artifacts.get("s3_root")
+    if not local_root or not s3_root:
+        return None
+    candidate = Path(local_path).resolve()
+    root = Path(str(local_root)).expanduser().resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return None
+    return f"{str(s3_root).rstrip('/')}/{relative.as_posix()}"
+
+
+def _artifact_s3_upload_cfg(global_cfg: OmegaConf, *, kind: str, local_path: str | Path) -> S3UploadCfg:
+    destination_root = _artifact_s3_uri_for_path(global_cfg, local_path)
+    artifacts = global_cfg.get("artifacts", {}) if global_cfg is not None else {}
+    return S3UploadCfg(
+        enabled=_artifact_upload_enabled(global_cfg, kind) and destination_root is not None,
+        destination_root=destination_root,
+        env_file=artifacts.get("env_file"),
+        tool=artifacts.get("tool", "s5cmd"),
+        size_only=artifacts.get("size_only", True),
+        upload_root_files=True,
+    )
 
 
 def _build_s3_sync_command(source_dir: Path, destination_uri: str, cfg: S3UploadCfg) -> List[str]:
@@ -1438,7 +1473,8 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
         global_seed = int(global_seed)
     outputs = OutputsCfg(**(corpus_cfg.get("outputs") or {}))
     scheduling = SchedulingCfg(**(corpus_cfg.get("scheduling") or {}))
-    s3_upload = _parse_s3_upload_cfg(corpus_cfg.get("s3_upload"))
+    raw_s3_upload = corpus_cfg.get("s3_upload")
+    s3_upload = _parse_s3_upload_cfg(raw_s3_upload)
     stages = _parse_stages(corpus_cfg, outputs)
 
     base_prefix = paths.data_root or ""
@@ -1450,6 +1486,8 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
     if paths.logs_root:
         paths.logs_root = _resolve_path(base_prefix, paths.logs_root)
     outputs.processed_root = _resolve_path(base_prefix, outputs.processed_root) or outputs.processed_root
+    if raw_s3_upload is None:
+        s3_upload = _artifact_s3_upload_cfg(global_cfg, kind="datasets", local_path=outputs.processed_root)
     for stage in stages:
         for source in stage.sources:
             if source.json_root:
@@ -1463,7 +1501,7 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
         os.environ["TRANSFORMERS_CACHE"] = str(Path(hf_cache) / "transformers")
         LOGGER.info("Set HF_HOME=%s", hf_cache)
 
-    return TopConfig(
+    top = TopConfig(
         tokenizer=tok,
         paths=paths,
         global_seed=global_seed,
@@ -1473,6 +1511,9 @@ def load_combined_config(user_cfg_path: Optional[str], global_cfg_path: Optional
         s3_upload=s3_upload,
         dry_run=False,
     )
+    top.config_path = corpus_cfg_path
+    top.global_config_path = global_cfg_path
+    return top
 
 
 def parse_args() -> argparse.Namespace:
@@ -1534,6 +1575,22 @@ def run_pipeline(
     with stats_path.open("w", encoding="utf-8") as handle:
         json.dump(stats_bundle, handle, indent=2)
     LOGGER.info("Wrote stats → %s", stats_path)
+    run_manifest_path = _as_path(top_cfg.outputs.processed_root) / top_cfg.outputs.run_manifest_filename
+    s3_outputs: List[str] = []
+    if bool(top_cfg.s3_upload.enabled) and top_cfg.s3_upload.destination_root:
+        s3_outputs.append(str(top_cfg.s3_upload.destination_root))
+    write_manifest(
+        run_manifest_path,
+        build_manifest(
+            kind="data_pipeline",
+            config_path=getattr(top_cfg, "config_path", config_path),
+            global_config_path=getattr(top_cfg, "global_config_path", global_config_path),
+            outputs=[top_cfg.outputs.processed_root, stats_path],
+            s3_outputs=s3_outputs,
+            extra={"stage": stage, "dry_run": top_cfg.dry_run},
+        ),
+    )
+    LOGGER.info("Wrote run manifest → %s", run_manifest_path)
     if not top_cfg.dry_run:
         upload_root_files(top_cfg, upload_manager)
         upload_manager.join()

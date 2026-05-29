@@ -8,17 +8,14 @@ description: Create/start/stop/delete a RunPod GPU Pod using ONLY GPU type `XXX`
 Use the helper script instead of raw `runpodctl`/`curl` commands:
 
 ```bash
-your-coding-agent-skills/skill/deploy-gpu/scripts/runpod-gpu.sh create --gpu auto --name my-job --wait
+CICD/tools/runpod-gpu.sh create --gpu auto --name my-job --wait
 ```
 
 The script always uses the `GIANT-container` template id `bg2jwnb3zk`, keeps
 everything on Secure Cloud, handles the noisy CLI/REST fallback internally, and
 prints a concise summary instead of raw RunPod payloads.
 
-The starter pack also bundles `your-coding-agent-skills/bin/wait-new-gpu.sh`.
-If the final repo setup keeps a different path for the wait helper, update the
-skill files and scripts to match that final path.
-
+The repo also bundles `CICD/tools/wait-new-gpu.sh`.
 **Read `gpu-remote-exec` after the pod is ready.**
 
 ## Core rules
@@ -34,33 +31,33 @@ skill files and scripts to match that final path.
 Create with fallback order:
 
 ```bash
-your-coding-agent-skills/skill/deploy-gpu/scripts/runpod-gpu.sh create --gpu auto --name my-job --wait
+CICD/tools/runpod-gpu.sh create --gpu auto --name my-job --wait
 ```
 
 Create exact GPU:
 
 ```bash
-your-coding-agent-skills/skill/deploy-gpu/scripts/runpod-gpu.sh create --gpu "NVIDIA RTX A6000" --name my-job --wait
+CICD/tools/runpod-gpu.sh create --gpu "NVIDIA RTX A6000" --name my-job --wait
 ```
 
 Create spot:
 
 ```bash
-your-coding-agent-skills/skill/deploy-gpu/scripts/runpod-gpu.sh create --gpu "NVIDIA RTX A40" --name my-job --spot --wait
+CICD/tools/runpod-gpu.sh create --gpu "NVIDIA RTX A40" --name my-job --spot --wait
 ```
 
 List / stop / remove:
 
 ```bash
-your-coding-agent-skills/skill/deploy-gpu/scripts/runpod-gpu.sh list
-your-coding-agent-skills/skill/deploy-gpu/scripts/runpod-gpu.sh stop "$RUNPOD_POD_ID"
-your-coding-agent-skills/skill/deploy-gpu/scripts/runpod-gpu.sh remove "$RUNPOD_POD_ID"
+CICD/tools/runpod-gpu.sh list
+CICD/tools/runpod-gpu.sh stop "$RUNPOD_POD_ID"
+CICD/tools/runpod-gpu.sh remove "$RUNPOD_POD_ID"
 ```
 
 If you only need the id:
 
 ```bash
-your-coding-agent-skills/skill/deploy-gpu/scripts/runpod-gpu.sh create --gpu auto --name my-job --id-only
+CICD/tools/runpod-gpu.sh create --gpu auto --name my-job --id-only
 ```
 
 ## Auto GPU order
@@ -117,5 +114,5 @@ Pods are ephemeral; upload artifacts before removal.
 
 ## Notes
 * The helper script reads `RUNPOD_API_KEY` from the environment or `~/.runpod/config.toml`.
-* `--wait` currently expects a repo-level wait helper. The starter pack bundles a copy at `your-coding-agent-skills/bin/wait-new-gpu.sh`.
+* `--wait` uses the repo-level helper at `CICD/tools/wait-new-gpu.sh`.
 * Use spot only if the user explicitly asked for it.

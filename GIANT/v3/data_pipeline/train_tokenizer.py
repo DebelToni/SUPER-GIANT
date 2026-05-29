@@ -18,13 +18,17 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from GIANT.v3.data_pipeline.build_corpus import (
     StageSourceCfg,
+    S3UploadManager,
+    _artifact_s3_upload_cfg,
     _build_chat_text_and_spans,
     _extract_text,
     _iter_hf_source,
     _iter_json_dir,
+    _parse_s3_upload_cfg,
     _parse_stage_sources,
 )
 from GIANT.v3.data_pipeline.cleaning import normalise_text
+from GIANT.v3.run_manifest import build_manifest, write_manifest
 
 
 DEFAULT_SPECIAL_TOKENS = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
@@ -204,18 +208,70 @@ def validate_tokenizer(cfg: OmegaConf, tokenizer_dir: Path) -> Dict[str, Any]:
     return metrics
 
 
+def _load_config(config_path: str, global_config_path: Optional[str]) -> tuple[OmegaConf, OmegaConf]:
+    cfg = OmegaConf.load(config_path)
+    if global_config_path is None:
+        default_global = Path(__file__).resolve().parents[1] / "Global_Config.yml"
+        global_config_path = str(default_global)
+    global_cfg = OmegaConf.load(global_config_path) if Path(global_config_path).exists() else OmegaConf.create({})
+    if cfg.get("hf_cache_root") is None and global_cfg.get("paths", {}).get("hf_cache_root") is not None:
+        cfg.hf_cache_root = global_cfg.paths.hf_cache_root
+    return cfg, global_cfg
+
+
+def _upload_tokenizer_if_configured(cfg: OmegaConf, global_cfg: OmegaConf, tokenizer_dir: Path) -> None:
+    raw_s3_upload = cfg.get("s3_upload")
+    if raw_s3_upload is None:
+        upload_cfg = _artifact_s3_upload_cfg(global_cfg, kind="tokenizers", local_path=tokenizer_dir)
+    else:
+        upload_cfg = _parse_s3_upload_cfg(raw_s3_upload)
+    if not bool(upload_cfg.enabled):
+        return
+    destination = upload_cfg.destination or upload_cfg.destination_root
+    if not destination:
+        raise ValueError("tokenizer s3_upload.enabled=true requires destination_root or destination")
+    manager = S3UploadManager()
+    manager.upload_dir(tokenizer_dir, destination, upload_cfg)
+    manager.join()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train and validate a custom HF BPE tokenizer.")
     parser.add_argument("--config", required=True, help="Path to tokenizer config YAML")
+    parser.add_argument("--global_config", default=None, help="Path to GIANT/v3 Global_Config.yml")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    cfg = OmegaConf.load(args.config)
+    cfg, global_cfg = _load_config(args.config, args.global_config)
     _set_hf_cache(cfg.get("hf_cache_root"))
     tokenizer_dir = train_tokenizer(cfg)
     metrics = validate_tokenizer(cfg, tokenizer_dir)
+    _upload_tokenizer_if_configured(cfg, global_cfg, tokenizer_dir)
+    s3_outputs = []
+    raw_s3_upload = cfg.get("s3_upload")
+    if raw_s3_upload is not None:
+        upload_cfg = _parse_s3_upload_cfg(raw_s3_upload)
+        dest = upload_cfg.destination or upload_cfg.destination_root
+        if bool(upload_cfg.enabled) and dest:
+            s3_outputs.append(str(dest))
+    else:
+        upload_cfg = _artifact_s3_upload_cfg(global_cfg, kind="tokenizers", local_path=tokenizer_dir)
+        if bool(upload_cfg.enabled) and upload_cfg.destination_root:
+            s3_outputs.append(str(upload_cfg.destination_root))
+    manifest_path = tokenizer_dir / "run_manifest.json"
+    write_manifest(
+        manifest_path,
+        build_manifest(
+            kind="tokenizer",
+            config_path=args.config,
+            global_config_path=args.global_config,
+            outputs=[tokenizer_dir, tokenizer_dir / "tokenizer_metrics.json"],
+            s3_outputs=s3_outputs,
+            extra={"vocab_size": metrics.get("vocab_size")},
+        ),
+    )
     print(json.dumps(metrics, indent=2))
 
 

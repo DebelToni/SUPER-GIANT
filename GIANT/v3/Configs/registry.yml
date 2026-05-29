@@ -1,0 +1,70 @@
+configs:
+  - name: bg_en_100m_tokenizer
+    path: GIANT/v3/Configs/Tokenizer/giant_chat_bg_en_bpe32k.yml
+    kind: tokenizer
+    status: recommended
+    purpose: BG+EN 32k BPE tokenizer for the current chat stack.
+    needs_gpu: false
+
+  - name: bg_en_100m_pretrain_data
+    path: GIANT/v3/Configs/Data/giant_chat_pretraining_bg_en_900m_bpe32k.yml
+    kind: data
+    status: recommended
+    purpose: BG+EN pretraining Arrow corpus for the 100M chat stack.
+    needs_gpu: false
+
+  - name: bg_en_100m_booster_data
+    path: GIANT/v3/Configs/Data/giant_chat_curated_booster_bg_en_bpe32k.yml
+    kind: data
+    status: recommended
+    purpose: Bilingual curated booster corpus.
+    needs_gpu: false
+
+  - name: bg_en_100m_sft_data
+    path: GIANT/v3/Configs/Data/giant_chat_sft_bg_en_smoltalk_bpe32k.yml
+    kind: data
+    status: recommended
+    purpose: BG+EN SmolTalk SFT corpus with assistant-only masks.
+    needs_gpu: false
+
+  - name: bg_en_100m_pretrain
+    path: GIANT/v3/Configs/Training/1_pretraining_100m_bg_en_ctx256_32k_1p8b.yml
+    kind: training
+    status: recommended
+    purpose: Main BG+EN 100M pretraining stage.
+    needs_gpu: true
+
+  - name: bg_en_100m_booster
+    path: GIANT/v3/Configs/Training/2_curated_booster_100m_bg_en_ctx256_32k.yml
+    kind: training
+    status: recommended
+    purpose: Continue from pretrain checkpoint on curated booster data.
+    needs_gpu: true
+
+  - name: bg_en_100m_sft
+    path: GIANT/v3/Configs/Training/3_sft_100m_bg_en_ctx256_32k_smoltalk.yml
+    kind: training
+    status: recommended
+    purpose: Chat SFT stage for the BG+EN stack.
+    needs_gpu: true
+
+  - name: en_100m_pretrain
+    path: GIANT/v3/Configs/Training/1_pretraining_100m_ctx256_4b.yml
+    kind: training
+    status: stable
+    purpose: English 100M pretraining reference run.
+    needs_gpu: true
+
+  - name: long_l1_ctx128_smoke
+    path: GIANT/v3/Configs/Training/Long/long_40m_l1_ctx128.yml
+    kind: training
+    status: smoke
+    purpose: LongGIANT level-1 short-context smoke/baseline run.
+    needs_gpu: true
+
+  - name: quality_bg_keep_data
+    path: GIANT/v3/Configs/Data/giant_bg_quality_keep_bpe32k.yml
+    kind: data
+    status: utility
+    purpose: Packed Bulgarian corpus after fastText quality filtering.
+    needs_gpu: false

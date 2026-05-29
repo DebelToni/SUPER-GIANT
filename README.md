@@ -83,5 +83,16 @@ bonanc/giant-training:latest
 
 docker exec -it giant-training bash
 ```
+Local editable install:
+
+```bash
+pip install -e .
+sg configs --status recommended
+```
+
+Install optional stacks as needed: `pip install -e '.[cpu,data,dev]'` for local CPU/dev work, or use the Docker image for CUDA.
+
+For diagrams of the full framework, see [docs/FRAMEWORK.md](docs/FRAMEWORK.md).
 For a full rundown of `TS_*`/`SYNC_*` flags, tailnet configuration, and S3 sync behavior, see [CICD/Docker/README.md](CICD/Docker/README.md).
+For the public GPU/S3 workflow see [docs/OPERATIONS.md](docs/OPERATIONS.md) and [docs/ARTIFACTS.md](docs/ARTIFACTS.md).
 For easy use of S3 buckets use my amazing [s5cmd wrapper](CICD/tools/)

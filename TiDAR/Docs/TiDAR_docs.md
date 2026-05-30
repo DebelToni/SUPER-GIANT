@@ -470,20 +470,20 @@ If you need to change the decoding strategy, start in
 ### 10.1 Issue
 Training encountered NaN loss on UltraChat chat data (stage `ultrachat_rehearsal_1m`). 
 Root cause: Chat sequences with ONLY user messages (no assistant responses) resulted 
-in all-zero loss masks, which caused NaN propagation through attention.
+in all-zero loss masks, which created invalid all-masked attention rows.
 
 **Mechanism**:
 - UltraChat data masks only assistant responses (`chat_assistant_roles: ["assistant"]`)
 - Sequences with no assistant tokens → `loss_mask = [0.0, 0.0, ...]` (all zeros)
-- All-zero mask → all keys masked in attention → softmax(-inf, -inf, ...) → NaN
-- NaN in attention → NaN gradients → NaN parameters
+- All-zero mask → all keys masked in attention
+- Finite bias implementations may avoid NaN, but the row is semantically invalid and can destabilize training
 
 **Evidence**: Row 455 in `ultrachat_rehearsal_1m-000000.arrow` had zero mask sum (0.12% of data).
 
 ### 10.2 Fix: 3-Layer Defense
 
 **Layer 1: Data Pipeline Prevention** ✅
-- File: `GIANT/v2/data_pipeline/build_corpus.py:570-584`
+- File: `GIANT/v3/data_pipeline/build_corpus.py`
 - Added validation in `_emit_sequence()` to reject sequences with all-zero mask
 - Discarded sequences tracked in `self.stats.discarded`
 - **Impact**: Future dataset generation rejects corrupted rows at source
@@ -495,7 +495,7 @@ in all-zero loss masks, which caused NaN propagation through attention.
 - **Impact**: Existing corrupted data won't cause NaN during training (graceful degradation)
 
 **Layer 3: Runtime NaN Detection** ✅
-- Files: `TiDAR/model/Run_training.py:640-652`, `GIANT/v2/model/Run_training.py:507-516`
+- Files: `TiDAR/model/Run_training.py`, `GIANT/v3/model/Run_training.py`
 - Added NaN/Inf detection after gradient computation
 - Skips gradient accumulation if NaN detected (training continues with warning)
 - **Impact**: Last resort safety net prevents NaN propagation to parameters
@@ -508,10 +508,10 @@ in all-zero loss masks, which caused NaN propagation through attention.
 - Backup of original corrupted shard: `sweep_1_lr1e4_a1_l0/ultrachat_rehearsal_1m/ultrachat_rehearsal_1m-000000.arrow.corrupted_backup`
 
 ### 10.4 Testing
-- Test script: `TiDAR/test_nan_theory.py`
-- Verified Layer 2 converts zero-masks to all-ones fallback
+- Test script: `TiDAR/tests/test_nan_theory.py`
+- Verified Layer 2 converts zero-masks to trainable fallback rows
 - Confirmed new shards have no zero-mask rows
-- All attention computations remain NaN-free
+- Invalid all-masked rows no longer reach attention unchanged
 
 **Production Ready**: All 3 layers implemented, tested, and data regenerated. Training can resume safely.
 

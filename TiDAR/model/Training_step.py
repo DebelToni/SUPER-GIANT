@@ -35,8 +35,9 @@ def _compute_accept_rate(
     ar_logits_pos = ar_logits_last[pos_idx]
     diff_logits_pos = diff_logits_last[pos_idx]
 
-    ar_top_vals, ar_top_idx = jax.lax.top_k(ar_logits_pos, accept_top_k)
-    diff_top_vals, _ = jax.lax.top_k(diff_logits_pos, accept_top_k)
+    safe_top_k = max(1, min(int(accept_top_k), ar_logits_pos.shape[-1]))
+    ar_top_vals, ar_top_idx = jax.lax.top_k(ar_logits_pos, safe_top_k)
+    diff_top_vals, _ = jax.lax.top_k(diff_logits_pos, safe_top_k)
 
     ar_log_norm = jax.nn.logsumexp(ar_top_vals, axis=-1, keepdims=True)
     diff_log_norm = jax.nn.logsumexp(diff_top_vals, axis=-1, keepdims=True)
@@ -219,7 +220,8 @@ def _compute_topk_set_distill_loss(
     joint_denom = jnp.maximum(joint_mask.sum(), 1.0)
 
     ar_logits_sg = jax.lax.stop_gradient(ar_logits)
-    _, ar_top_idx = jax.lax.top_k(ar_logits_sg, gamma_topk)
+    safe_top_k = max(1, min(int(gamma_topk), ar_logits_sg.shape[-1]))
+    _, ar_top_idx = jax.lax.top_k(ar_logits_sg, safe_top_k)
 
     diff_top_logits = jnp.take_along_axis(diff_logits_aligned, ar_top_idx, axis=-1)
     log_mass = jax.nn.logsumexp(diff_top_logits, axis=-1) - jax.nn.logsumexp(diff_logits_aligned, axis=-1)
@@ -243,12 +245,12 @@ def loss_and_metrics(
     delta: float,      # Hard agreement: CE(onehot(argmax P_AR), logits_diff)
     eta: float,        # Soft distillation: KL(softmax(AR/T) || softmax(Diff/T))
     eta_T: float,      # Distillation temperature
-    gamma: float,      # Top-K set distillation loss coefficient
-    gamma_topk: int,   # Top-K size for set distillation
+    gamma: float = 0.0,      # Top-K set distillation loss coefficient
+    gamma_topk: int = 0,     # Top-K size for set distillation
     # Acceptance metric
-    compute_accept,
-    accept_top_k: int,
-    accept_max_positions: int,
+    compute_accept=False,
+    accept_top_k: int = 64,
+    accept_max_positions: int = 256,
     delta_masked: float = 0.0,  # Hard agreement capped to first mismatch (inclusive)
 ) -> Tuple:
     """
@@ -421,11 +423,11 @@ def loss_and_grad(
     delta: float,
     eta: float,
     eta_T: float,
-    gamma: float,
-    gamma_topk: int,
-    compute_accept,
-    accept_top_k: int,
-    accept_max_positions: int,
+    gamma: float = 0.0,
+    gamma_topk: int = 0,
+    compute_accept=False,
+    accept_top_k: int = 64,
+    accept_max_positions: int = 256,
     delta_masked: float = 0.0,
 ):
     def loss_fn(p):

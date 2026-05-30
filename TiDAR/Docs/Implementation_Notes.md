@@ -6,6 +6,14 @@ shapes, masking, cache semantics) rather than re‑explaining TiDAR theory.
 
 ## Key files
 
+TiDAR training/data plumbing uses active `GIANT/v3` utilities:
+- `GIANT/v3/data_pipeline/build_corpus.py`
+- `GIANT/v3/model/arrow_data_loader.py`
+- `GIANT/v3/model/checkpoint_manager.py`
+- `GIANT/v3/model/optimizer_utils.py`
+
+TiDAR passes raw token masks from the loader and performs AR/diffusion alignment in `build_train_batch()`.
+
 - `TiDAR/model/tidar_core.py`
   - Mask/position templates.
   - Sampling utilities (top‑k, temperature, rejection sampling).

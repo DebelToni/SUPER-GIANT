@@ -1,0 +1,40 @@
+# Top-up shards used to complete the interrupted 1.5B FineWeb-Edu/Cosmo2 ctx512 build.
+# After generation these shards are merged into fineweb_edu_1p5b_ctx512.
+
+outputs:
+  processed_root: "dataset_artifacts/fineweb_edu_1p5b_cosmo2_ctx512"
+  rows_per_shard: 65536
+  manifest_filename: "datasets_manifest.json"
+  stats_filename: "dataset_stats.json"
+
+scheduling:
+  seed: 20260531
+  write_batch_size: 256
+  dry_run_preview_rows: 512
+
+stages:
+  fineweb_edu_topup_64m_ctx512:
+    description: "FineWeb-Edu top-up shards for the interrupted 1.5B ctx512 build"
+    output_dir: "fineweb_edu_topup_64m_ctx512"
+    sequence_length: 512
+    target_tokens: 64000000
+    min_tokens: 64
+    pack_sequences: true
+    add_eos: true
+    emit_final_partial: false
+    long_document_strategy: random_window
+    random_windows_per_document: 1
+    deduplicate: false
+    seed_offset: 0
+    normalization:
+      nfkc: true
+      collapse_whitespace: true
+    sources:
+      - type: huggingface
+        dataset_name: "HuggingFaceFW/fineweb-edu"
+        split: "train"
+        streaming: true
+        shuffle_streaming: true
+        shuffle_buffer_size: 50000
+        shuffle_seed: 20260531
+        text_field: "text"

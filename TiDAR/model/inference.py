@@ -46,7 +46,7 @@ from TiDAR.model.tidar_core import (
     sample_tokens,
     anchor_rejection_sample_meta,
 )
-from GIANT.v2.model.checkpoint_manager import load_npz, latest as latest_ckpt
+from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
 
 _VALID_DECODE_PREDRAFT_SAMPLING_MODES = {"staged", "single_pass"}
 

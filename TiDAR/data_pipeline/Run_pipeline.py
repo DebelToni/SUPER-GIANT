@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from omegaconf import OmegaConf
-from GIANT.v2.data_pipeline.build_corpus import run_pipeline
+from GIANT.v3.data_pipeline.build_corpus import run_pipeline
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    config_path = args.config or str(Path(__file__).resolve().parent / "Config.yml")
+    config_path = args.config or str(Path(__file__).resolve().parent / "Smoke_config.yml")
     global_config_path = args.global_config
     if global_config_path is None:
         global_config_path = str(Path(__file__).resolve().parents[1] / "Global_Config.yml")

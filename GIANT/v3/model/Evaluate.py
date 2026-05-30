@@ -122,8 +122,9 @@ def eval_step(params, batch, *, model):
     )
     logits = model.apply({"params": params}, batch["input"], deterministic=True, attention_bias=attention_bias)
     loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch["target"])
-    loss = jnp.sum(loss * batch["mask"]) / jnp.sum(batch["mask"])
-    return loss
+    loss_numer = jnp.sum(loss * batch["mask"])
+    loss_denom = jnp.maximum(jnp.sum(batch["mask"]), 1.0)
+    return loss_numer / loss_denom
 
 
 def evaluate_on_stage(

@@ -16,13 +16,12 @@ from GIANT.v3.model.GiantGPT import GiantGPT
 from GIANT.v3.model.model_mode import model_mode_is_causal, resolve_model_mode
 from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
 from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
-try:
-    from GIANT.v3.device_utils import select_default_device
-except ImportError:  # pragma: no cover - temporary fallback for dirty worktrees
-    from GIANT.v3.tests.device_utils import select_default_device
+from GIANT.v3.device_utils import select_default_device
 
 @dataclass
 class ModelConfig:
+    mode: str = "decoder"
+    causal: Optional[bool] = None
     embedding_size: int = 640
     num_heads: int = 10
     num_kv_heads: Optional[int] = None
@@ -34,6 +33,7 @@ class ModelConfig:
     activation: str = "silu"
     use_remat: bool = False
     enable_xsa: bool = False
+    mask_answer_token_for_encoder: bool = False
     param_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
 

@@ -10,8 +10,8 @@ import jax.numpy as jnp
 from flax import core as flax_core
 from omegaconf import OmegaConf
 
-from GIANT.v2.model.checkpoint_manager import latest as latest_ckpt
-from GIANT.v2.model.checkpoint_manager import load_npz, save_npz
+from GIANT.v3.model.checkpoint_manager import latest as latest_ckpt
+from GIANT.v3.model.checkpoint_manager import load_npz, save_npz
 
 
 def _resolve_config_path(value: str | None, default: Path) -> Path:

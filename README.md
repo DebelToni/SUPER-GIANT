@@ -30,13 +30,13 @@ To understand how LLMs work watch my first video:
 [![Watch on YouTube — ZaBJ2VwDvPI](https://img.youtube.com/vi/ZaBJ2VwDvPI/maxresdefault.jpg)](https://youtu.be/ZaBJ2VwDvPI)
 The original video showcased the [v0](GIANT/v0) implementation and some performance speeds from the [v1](GIANT/v1) implementation which you can find under [GIANT](GIANT/).
 
-## Architecture of GIANT v2
+## Architecture of GIANT
 - Classic Decoder-only transformer architecture
 - Modern modules used such as `RMSnorm`, `SwiGLU`, `RoPE`
 - We also have full support for Encoders and also experimental modules such as XSA (Exclusive Self Attention)
 - Training supports batching, training on custom private data or online Teacher distillation
 - Powered by 𝗝𝗔𝗫’𝘀 𝗝𝗜𝗧 𝗰𝗼𝗺𝗽𝗶𝗹𝗮𝘁𝗶𝗼𝗻, 𝗰𝘂𝗗𝗡𝗡’𝘀 𝗙𝗹𝗮𝘀𝗵 𝗔𝘁𝘁𝗲𝗻𝘁𝗶𝗼𝗻 𝗸𝗲𝗿𝗻𝗲𝗹𝘀, 𝗮𝗻𝗱 𝗮 𝗞𝗩 𝗰𝗮𝗰𝗵𝗲 for faster inference
-Current stable version of [GIANT is v2](GIANT/v2) which focuses on scaling the model and the data, bigger and better [data pipeline](GIANT/v2/data_pipeline/) and ChatBot behavior. Example responce from GIANTv2:
+The active implementation is [GIANT v3](GIANT/v3/); v0-v2 are archived reference versions. Example response from an older GIANTv2 checkpoint:
 ```
 User: What is the capital of France?
 Assitant: The capital of France is sometimes called Paris.<EOS>
@@ -44,7 +44,7 @@ Assitant: The capital of France is sometimes called Paris.<EOS>
 > (This is a 38 milion param checkpoint trained on 500 milion tokens including a schedule and a circulumn of basetext, wikipedia, webtext and finally chat examples.)
 
 ## [Think in Diffusion, talk in AutoRegression](https://arxiv.org/pdf/2511.08923)
-- NVIDIA's proposed model [TiDAR](TiDAR/) is already implemented (including my Anchor-TiDAR variant), and this is where I run ongoing experiments. It builds on top of the **GIANTv2** architecture
+- NVIDIA's proposed model [TiDAR](TiDAR/) is already implemented (including my Anchor-TiDAR variant), and this is where I run ongoing experiments. It builds on top of the active **GIANT v3** training/data utilities
 - I am currently validating/replicating the TiDAR paper behavior and refining training/inference settings on top of GIANT's core architecture and data pipeline. Results from my free token slots experiements can be found at [TiDAR/Docs/](TiDAR/Docs/)
 - I've implemented a small architectural change to the original TiDAR design that improves drafting efficiency per step (always contirbuting atleast 1 token, no overhead). [>Details<](TiDAR/model/Optimize_TiDAR_worst_case_decoding.md)
 - I am also experimenting with different loss function configurations for TiDAR. [>Details<](TiDAR/Docs/TinyStories_TiDAR_losses_Comparison.pdf)
@@ -57,7 +57,7 @@ Assitant: The capital of France is sometimes called Paris.<EOS>
 > - On/Off Encoder mechanism - my own creation that combines TRM style processing by doing TiDAR style masking for swithing between the 2 modes in the same transformer. I want to see how this proves long [context retrieval](GIANT/v3/Long/). (could also say reasoning but my training budget is far too small to get to actual qualitative reasoning results).
 
 ## [GIANT v3](GIANT/v3/)
-GIANT v3 is the current version I am working on, it features:
+GIANT v3 is the active implementation, featuring:
 - Multi-GPU support with gradient accomultaion and sharding.
 - DeepSeek style Mutlhead Latent Attention
 - Stronger data curation

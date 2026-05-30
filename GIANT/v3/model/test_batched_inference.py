@@ -110,7 +110,8 @@ def main() -> None:
         cur_index=0,
     )
     params = variables["params"]
-    cache_state = {k: v for k, v in variables.items() if k != "params"}
+    initial_cache_state = {k: v for k, v in variables.items() if k != "params"}
+    cache_state = initial_cache_state
 
     prefill_fn = make_prefill_fn(model)
     prefill_fn.lower(params, cache_state, prompt_tokens, start_offsets).compile()
@@ -138,7 +139,7 @@ def main() -> None:
     per_last_pos = []
     for i in range(batch):
         single_prompt = prompt_tokens[i]
-        single_cache = jax.tree_util.tree_map(lambda x: x[i : i + 1], cache_state)
+        single_cache = jax.tree_util.tree_map(lambda x: x[i : i + 1], initial_cache_state)
         single_offset = start_offsets[i : i + 1]
         single_cache, single_pos, single_last_tok = prefill_single(
             model,
@@ -161,7 +162,10 @@ def main() -> None:
     per_logits = jnp.concatenate(per_logits, axis=0)
     per_last_pos = jnp.concatenate(per_last_pos, axis=0)
 
-    logits_match = jnp.allclose(next_logits, per_logits, atol=1e-5)
+    # bfloat16 attention can differ slightly between batched and single-sample
+    # execution because reductions are grouped differently. This checks semantic
+    # equivalence, not bitwise identity.
+    logits_match = jnp.allclose(next_logits, per_logits, atol=2e-2, rtol=2e-2)
     pos_match = jnp.array_equal(last_pos, per_last_pos)
 
     print("batched logits", next_logits.shape, next_logits.dtype)
@@ -169,6 +173,8 @@ def main() -> None:
     print("logits_match", logits_match)
     print("pos_match", pos_match)
     print(f"prefill_time_s {elapsed:.6f}")
+    assert bool(logits_match), "Batched prefill logits differ from per-sample prefill"
+    assert bool(pos_match), "Batched prefill positions differ from per-sample prefill"
 
 
 if __name__ == "__main__":

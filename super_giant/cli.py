@@ -55,11 +55,13 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
-    cmd = python_cmd("GIANT/v3/model/Generate_chat.py", "--config", args.config)
+    cmd = python_cmd("GIANT/v3/model/Generate_chat.py", "--config", args.config, "--global_config", args.global_config)
     if args.checkpoint:
         cmd += ["--checkpoint", args.checkpoint]
     if args.prompt:
         cmd += ["--prompt", args.prompt]
+    if args.steps is not None:
+        cmd += ["--steps", str(args.steps)]
     if args.greedy:
         cmd.append("--greedy")
     if args.max_context:
@@ -133,8 +135,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat = sub.add_parser("chat")
     chat.add_argument("--config", required=True)
+    chat.add_argument("--global_config", default=DEFAULT_GLOBAL_CONFIG)
     chat.add_argument("--checkpoint", default="latest")
     chat.add_argument("--prompt")
+    chat.add_argument("--steps", type=int)
     chat.add_argument("--greedy", action="store_true")
     chat.add_argument("--max_context", type=int)
     chat.set_defaults(func=cmd_chat)

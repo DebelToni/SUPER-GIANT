@@ -138,7 +138,7 @@ def _render_chat_prompt(tokenizer, messages: List[dict[str, str]]) -> str:
     if hasattr(tokenizer, "apply_chat_template"):
         try:
             return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        except ImportError:
+        except (ImportError, ValueError):
             pass
     parts: List[str] = []
     for message in messages:

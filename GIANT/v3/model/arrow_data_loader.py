@@ -163,6 +163,7 @@ class StageDataLoader:
         seed: int,
         pad_token_id: int,
         max_rows: Optional[int] = None,
+        mask_target_shift: bool = True,
     ) -> None:
         if seq_len < 2:
             raise ValueError("seq_len must be at least 2")
@@ -172,6 +173,8 @@ class StageDataLoader:
         self.shuffle = shuffle
         self.seed = seed
         self.pad_token_id = pad_token_id if pad_token_id is not None else 0
+        # Default mask aligns with causal-LM targets; TiDAR disables this to get raw token masks.
+        self.mask_target_shift = bool(mask_target_shift)
         max_rows = max_rows if max_rows is not None else dataset.total_rows
         self.total_rows = min(max_rows, dataset.total_rows)
         if self.total_rows < batch_size:
@@ -273,6 +276,7 @@ class StageDataLoader:
             "rows_consumed": self._rows_consumed,
             "batch_size": self.batch_size,
             "seq_len": self.seq_len,
+            "mask_target_shift": self.mask_target_shift,
         }
 
     def load_state(self, state: Dict[str, int]) -> None:
@@ -280,6 +284,13 @@ class StageDataLoader:
         if saved_seq_len is not None and int(saved_seq_len) != self.seq_len:
             raise ValueError(
                 f"Saved dataloader seq_len={saved_seq_len} does not match current seq_len={self.seq_len}"
+            )
+
+        saved_mask_target_shift = state.get("mask_target_shift")
+        if saved_mask_target_shift is not None and bool(saved_mask_target_shift) != self.mask_target_shift:
+            raise ValueError(
+                "Saved dataloader mask_target_shift="
+                f"{saved_mask_target_shift} does not match current mask_target_shift={self.mask_target_shift}"
             )
 
         saved_batch_size = state.get("batch_size")
@@ -343,16 +354,22 @@ class StageDataLoader:
         targets = np.concatenate([batch_tokens[:, 1:], pad_col], axis=1)
         eff_lengths = np.clip(batch_lengths, 1, seq_len)
         valid_target_len = np.maximum(eff_lengths - 1, 0)
-        valid_target_len = np.maximum(valid_target_len, 1)
         positions = self._positions
-        length_mask = (positions < valid_target_len[:, None]).astype(np.uint8)
-        if batch_loss_mask is not None:
-            shifted_loss_mask = _shift_loss_mask_to_targets(batch_loss_mask.astype(np.uint8, copy=False))
-            mask = np.bitwise_and(length_mask, shifted_loss_mask)
+        if self.mask_target_shift:
+            length_mask = (positions < valid_target_len[:, None]).astype(np.uint8)
+            if batch_loss_mask is not None:
+                shifted_loss_mask = _shift_loss_mask_to_targets(batch_loss_mask.astype(np.uint8, copy=False))
+                mask = np.bitwise_and(length_mask, shifted_loss_mask)
+            else:
+                mask = length_mask
         else:
-            mask = length_mask
+            token_length_mask = (positions < eff_lengths[:, None]).astype(np.uint8)
+            if batch_loss_mask is not None:
+                mask = np.bitwise_and(token_length_mask, batch_loss_mask.astype(np.uint8, copy=False))
+            else:
+                mask = token_length_mask
 
-        return {"input": inputs, "target": targets, "mask": mask}
+        return {"input": inputs, "target": targets, "mask": mask, "length": batch_lengths}
 
 
 def save_dataloader_state(path: Path, state: Dict) -> None:

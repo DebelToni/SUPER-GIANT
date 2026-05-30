@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Test script to verify that zero-mask sequences cause NaN loss in TiDAR.
+Test script to verify TiDAR's zero-mask defense.
 
 This script:
-1. Loads the corrupted shard (ultrachat_rehearsal_1m-000000.arrow)
-2. Extracts row 455 (all-zero mask) and a normal row
+1. Loads the corrupted shard when available
+2. Extracts an all-zero mask row and a normal row
 3. Tests batch building with and without the Layer 2 fix
-4. Runs forward pass to demonstrate NaN propagation
+4. Confirms all-zero masks become trainable fallback rows
 """
 
 import os
@@ -104,7 +104,7 @@ def build_batch_without_fix(clean, lengths, token_mask, seq_len, block_len=128, 
         valid = valid * token_mask.astype(jnp.float32)
     
     # NO FIX HERE - this is the original code
-    # valid can be all zeros, which causes NaN
+    # valid can be all zeros, which creates invalid all-masked attention rows
     
     if seq_len > 1:
         loss_mask_ntp = loss_mask_ntp.at[:, : seq_len - 1].set(valid[:, 1:])
@@ -131,9 +131,9 @@ def build_batch_without_fix(clean, lengths, token_mask, seq_len, block_len=128, 
 
 
 def test_attention_with_zero_mask():
-    """Test that all-zero mask causes NaN in attention."""
+    """Test that all-zero token masks are converted to safe trainable rows."""
     print("\n" + "="*80)
-    print("TEST: Attention with All-Zero Mask (Proving NaN Theory)")
+    print("TEST: Attention with All-Zero Mask")
     print("="*80)
     
     batch_size = 2
@@ -147,7 +147,7 @@ def test_attention_with_zero_mask():
     # Row 0: all-zero mask (corrupted)
     # Row 1: normal mask
     token_mask = jnp.array([
-        [0.0] * seq_len,  # All zeros - THIS SHOULD CAUSE NaN
+        [0.0] * seq_len,  # All zeros - invalid row without fallback
         [1.0] * seq_len,  # All ones - normal
     ], dtype=jnp.float32)
     
@@ -162,8 +162,9 @@ def test_attention_with_zero_mask():
     # Simulate attention operation
     print("\nSimulating attention softmax with all-masked keys...")
     
-    # For row 0, all keys are masked (bias = -1e10 everywhere)
-    # This causes softmax to produce NaN
+    # For row 0, all keys are masked (bias = -1e10 everywhere).
+    # JAX's finite bias may produce a uniform softmax instead of NaN, but the row
+    # is still semantically invalid and should not reach training unchanged.
     query = jax.random.normal(jax.random.PRNGKey(0), (batch_size, 1, d_model))
     key = jax.random.normal(jax.random.PRNGKey(1), (batch_size, seq_len * 2, d_model))
     
@@ -176,14 +177,14 @@ def test_attention_with_zero_mask():
     print(f"  Row 0 logits before bias: min={logits[0].min():.2f}, max={logits[0].max():.2f}")
     print(f"  Row 0 logits after bias: min={logits_with_bias[0].min():.2e}, max={logits_with_bias[0].max():.2e}")
     
-    # Softmax - this will produce NaN for row 0
     attn_weights = jax.nn.softmax(logits_with_bias, axis=-1)
     
     print(f"  Row 0 attention weights after softmax: {attn_weights[0, 0, :5]}")
     print(f"  Row 0 has NaN: {jnp.isnan(attn_weights[0]).any()}")
     print(f"  Row 1 has NaN: {jnp.isnan(attn_weights[1]).any()}")
+    assert not bool(batch_no_fix['key_padding_mask'][0].any())
     
-    print("\n✓ THEORY CONFIRMED: All-zero mask → all keys masked → softmax(-inf) → NaN")
+    print("\n✓ INVALID CASE CONFIRMED: all-zero mask → no valid attention keys")
     
     # Now test with the fix
     print("\n" + "-"*80)
@@ -208,7 +209,8 @@ def test_attention_with_zero_mask():
     print(f"  Row 0 has NaN: {jnp.isnan(attn_weights_fixed[0]).any()}")
     print(f"  Row 1 has NaN: {jnp.isnan(attn_weights_fixed[1]).any()}")
     
-    print("\n✓ FIX VERIFIED: Layer 2 converts all-zero mask → all-ones → no NaN")
+    assert bool(batch_with_fix['loss_mask_diff'][0].sum() > 0)
+    print("\n✓ FIX VERIFIED: Layer 2 converts all-zero mask → trainable fallback row")
 
 
 def test_with_real_shard():
@@ -218,7 +220,7 @@ def test_with_real_shard():
     if not os.path.exists(shard_path):
         print(f"\n⚠ Shard not found: {shard_path}")
         print("Skipping real shard test")
-        return
+        return False
     
     print("\n" + "="*80)
     print("TEST: Real Corrupted Shard")
@@ -228,7 +230,7 @@ def test_with_real_shard():
     
     if data['corrupted_row']['input_ids'] is None:
         print("\n⚠ No corrupted row found in shard")
-        return
+        return False
     
     # Build a batch with the corrupted row
     batch_size = 2
@@ -267,30 +269,31 @@ def test_with_real_shard():
     print(f"  Attention bias has NaN: {attn_has_nan}")
     
     print("\n✓ Real shard test passed: Corrupted row handled without NaN")
+    return True
 
 
 def main():
-    print("TiDAR NaN Loss Theory Test")
+    print("TiDAR Zero-Mask Defense Test")
     print("="*80)
     print("This script verifies that:")
-    print("1. All-zero loss masks cause NaN in attention (softmax of all -inf)")
-    print("2. Layer 2 fix prevents this by converting zero-masks to all-ones")
+    print("1. All-zero loss masks create invalid all-masked attention rows")
+    print("2. Layer 2 fix prevents this by converting zero-masks to trainable fallback rows")
     print("3. Real corrupted shard data is handled correctly")
     print()
     
-    # Test 1: Prove the theory with synthetic data
+    # Test 1: Prove the invalid row with synthetic data
     test_attention_with_zero_mask()
     
     # Test 2: Test with real corrupted shard
-    test_with_real_shard()
+    real_shard_checked = test_with_real_shard()
     
     print("\n" + "="*80)
     print("ALL TESTS COMPLETED")
     print("="*80)
     print("\nSummary:")
-    print("✓ Theory confirmed: zero-mask → NaN in attention")
-    print("✓ Layer 2 fix prevents NaN by converting zero-masks")
-    print("✓ Real shard data handled correctly")
+    print("✓ Invalid row confirmed: zero-mask → no valid attention keys")
+    print("✓ Layer 2 fix converts zero-masks to trainable fallback rows")
+    print("✓ Real shard data handled correctly" if real_shard_checked else "- Real shard data skipped")
     print("\nThe 3-layer defense is ready for deployment!")
 
 

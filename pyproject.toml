@@ -72,7 +72,7 @@ Repository = "https://github.com/DebelToni/SUPER-GIANT"
 [tool.setuptools.packages.find]
 where = ["."]
 namespaces = true
-include = ["super_giant*", "GIANT.v2*", "GIANT.v3*", "TiDAR*"]
+include = ["super_giant*", "GIANT.v3*", "TiDAR*"]
 exclude = ["*.tests", "*.tests.*"]
 
 [tool.setuptools.package-data]

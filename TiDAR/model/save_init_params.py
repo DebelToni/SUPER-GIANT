@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from TiDAR.model.GiantTiDAR import TiDAR
-from GIANT.v2.model.checkpoint_manager import save_npz
+from GIANT.v3.model.checkpoint_manager import save_npz
 
 
 def _resolve_config_path(value: str | None, default: Path) -> Path:
@@ -72,10 +72,14 @@ def load_configs(
 
 
 def load_tokenizer(cfg):
-    tokenizer = AutoTokenizer.from_pretrained(
-        cfg.tokenizer.name,
-        cache_dir=cfg.tokenizer.cache_dir,
-    )
+    tok_cfg = cfg.tokenizer
+    if tok_cfg.use_custom:
+        tokenizer = AutoTokenizer.from_pretrained(tok_cfg.custom_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tok_cfg.name,
+            cache_dir=tok_cfg.cache_dir,
+        )
     if tokenizer.pad_token is None:
         if tokenizer.eos_token:
             tokenizer.pad_token = tokenizer.eos_token

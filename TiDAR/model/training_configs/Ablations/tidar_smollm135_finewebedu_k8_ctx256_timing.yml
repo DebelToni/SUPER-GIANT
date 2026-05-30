@@ -1,0 +1,80 @@
+# Timing probe: SmolLM-135M -> TiDAR K=8 on FineWeb-Edu/Cosmo2 shards.
+# Clean seq_len=256, TiDAR input length=512.
+
+model:
+  embedding_size: 576
+  num_heads: 9
+  num_kv_heads: 3
+  num_layers: 30
+  feed_forward_size: 1536
+  rope_dim: 64
+  context_length: 256
+  dropout_rate: 0.0
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"
+  use_custom: false
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+
+tidar:
+  draft_length: 8
+  attn_bias_value: -1.0e10
+
+inference:
+  stop_on_eos: true
+  max_decode_steps: 64
+  temperature: 1.0
+  top_k: 0
+  draft_length: 8
+
+optimizer:
+  base_learning_rate: 5.0e-5
+  min_learning_rate: 5.0e-6
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_clip_norm: 0.5
+  weight_decay_exclusions:
+    - bias
+    - scale
+
+training:
+  batch_size: 32
+  gradient_accumulation: 1
+  seed: 20260530
+  dataset_dir: "dataset_artifacts/fineweb_edu_1p5b_cosmo2_ctx512"
+  log_every: 25
+  checkpoint_every: 1000000
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 1
+  scan_chunk: 4
+  prefetch_size: 4
+  loss:
+    alpha: 1.0
+    beta: 1.0
+    rho: 0.0
+    chi: 0.0
+    delta: 0.0
+    delta_masked: 0.0
+    eta: 0.0
+    eta_T: 1.0
+    gamma: 0.0
+    gamma_topk: 0
+
+paths:
+  checkpoints_root: "ablations/timing/tidar_smollm135_finewebedu_k8_ctx256"
+  dataloader_state_root: "ablations/timing/tidar_smollm135_finewebedu_k8_ctx256/dataloader_state"
+  logs_root: "ablations/timing/tidar_smollm135_finewebedu_k8_ctx256/logs"
+
+stages:
+  - name: fineweb_edu_timing_ctx256
+    dataset: fineweb_edu_1p5b_ctx512
+    seq_len: 256
+    epochs: 1
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 1.0
+
+qa_finetune: {}

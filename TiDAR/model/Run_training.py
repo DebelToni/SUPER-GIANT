@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "true")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "1.0")
 
 import jax
 import jax.numpy as jnp
@@ -29,13 +29,13 @@ from TiDAR.model.tokenizer_utils import (
     init_mask_embedding_row,
     resize_embedding_params,
 )
-from GIANT.v2.model.arrow_data_loader import (
+from GIANT.v3.model.arrow_data_loader import (
     ShardedArrowDataset,
     StageDataLoader,
     load_dataloader_state,
     save_dataloader_state,
 )
-from GIANT.v2.model.checkpoint_manager import (
+from GIANT.v3.model.checkpoint_manager import (
     AsyncMiniCheckpointManager,
     latest as latest_ckpt,
     load as load_ckpt,
@@ -44,7 +44,7 @@ from GIANT.v2.model.checkpoint_manager import (
     load_opt_state,
     set_npz_metadata,
 )
-from GIANT.v2.model.optimizer_utils import create_weight_decay_mask
+from GIANT.v3.model.optimizer_utils import create_weight_decay_mask
 
 
 _stop_requested = False
@@ -218,6 +218,8 @@ def build_stage_runtimes(
             seed=seed,
             pad_token_id=pad_token_id,
             max_rows=target_rows,
+            # TiDAR predicts clean tokens directly, so it needs raw token masks.
+            mask_target_shift=False,
         )
         print(
             f"[loader] stage={stage.name} rows={target_rows}/{dataset.total_rows} "
@@ -764,7 +766,7 @@ def main() -> None:
             for batch in batch_list:
                 batch_tokens = jnp.asarray(batch["input"])
                 mask = jnp.asarray(batch["mask"])
-                lengths = jnp.clip((batch_tokens != pad_token_id).sum(axis=1), 1, runtime.config.seq_len)
+                lengths = jnp.asarray(batch["length"], dtype=jnp.int32)
                 train_batch = build_train_batch(
                     batch_tokens,
                     lengths,

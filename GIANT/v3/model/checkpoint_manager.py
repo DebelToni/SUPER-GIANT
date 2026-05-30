@@ -108,7 +108,7 @@ def load_npz(path, *, print_name: bool = True) -> Dict:
         meta = _load_metadata(npz)
         name = meta.get("name")
         if print_name:
-            display = name if name is not None else ""
+            display = name if name else Path(path).name
             print(f'[i/o] Loading "{display}" params.')
         flat = {
             tuple(k.split("/")): v

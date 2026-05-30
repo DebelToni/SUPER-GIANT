@@ -138,7 +138,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dataset_root", default="/proj/giant-data/GIANT/dataset_artifacts/long_records")
     parser.add_argument("--build_corpus", action="store_true")
-    parser.add_argument("--global_config", default="/Users/antonhristov/Documents/ML/SUPER-GIANT/GIANT/v3/Global_Config.yml")
+    parser.add_argument("--global_config", default=str(Path(__file__).resolve().parents[1] / "Global_Config.yml"))
     parser.add_argument("--config_out", default=None)
     args = parser.parse_args()
 

@@ -1,9 +1,10 @@
 # TiDAR Data Pipeline Config (Config.yml)
 
-This document describes the dataset preparation options consumed by `GIANT/v2/data_pipeline/build_corpus.py`, which the TiDAR pipeline calls via `TiDAR/data_pipeline/Run_pipeline.py`. It focuses on the YAML fields used to build Arrow shards for training.
+This document describes the dataset preparation options consumed by `GIANT/v3/data_pipeline/build_corpus.py`, which the TiDAR pipeline calls via `TiDAR/data_pipeline/Run_pipeline.py`. It focuses on the YAML fields used to build Arrow shards for training.
 
 Paths and global defaults
 - The dataset config is merged with `Global_Config.yml`. Relative paths are resolved under `paths.data_root` (from `Global_Config.yml`).
+- Tokenizer config comes from `Global_Config.yml` unless overridden in the dataset config, including `tokenizer.use_custom` and `tokenizer.custom_path` for GIANT/v3-trained custom tokenizers.
 - Output shards, manifest, and stats are written under `outputs.processed_root` (resolved path).
 
 ---

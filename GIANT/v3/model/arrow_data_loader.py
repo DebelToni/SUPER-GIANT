@@ -311,15 +311,20 @@ class StageDataLoader:
         saved_rows_consumed = int(state.get("rows_consumed", 0))
         self.step_in_epoch = int(state.get("step_in_epoch", 0))
         self._prepare_epoch()
-        # _prepare_epoch resets counters; restore consumed rows before loading shard.
-        self._rows_consumed = saved_rows_consumed
         if not self._shard_order:
             raise RuntimeError("Dataset contains no shards")
         target_pos = min(max(shard_pos, 0), len(self._shard_order) - 1)
+        # _load_shard_at uses _rows_consumed to truncate only the dataset tail when max_rows
+        # cuts through a shard. During restore, rows consumed before the current shard and
+        # rows consumed inside it must stay separate; otherwise resuming mid-shard drops the
+        # tail and reaches the next epoch too early.
+        rows_before_current = max(0, saved_rows_consumed - max(row_ptr, 0))
+        self._rows_consumed = min(rows_before_current, self.total_rows)
         if not self._load_shard_at(target_pos):
             raise RuntimeError("Failed to load shard while restoring state")
         limit = self._current_data.shape[0] if self._current_data is not None else 0
         self._row_ptr = min(max(row_ptr, 0), limit)
+        self._rows_consumed = min(rows_before_current + self._row_ptr, self.total_rows)
         if batch_size_changed:
             self.step_in_epoch = min(self._rows_consumed // self.batch_size, self.steps_per_epoch)
 

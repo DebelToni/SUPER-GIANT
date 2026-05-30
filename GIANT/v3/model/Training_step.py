@@ -42,7 +42,10 @@ def loss_and_grad(
         denom = jnp.maximum(mask_sum, 1.0)
         return loss_numer / denom
 
-    return jax.value_and_grad(loss_fn)(params)
+    loss, grads = jax.value_and_grad(loss_fn)(params)
+    if axis_name is not None:
+        grads = jax.lax.pmean(grads, axis_name)
+    return loss, grads
 
 
 @partial(jax.jit, static_argnames=["model", "optimizer"])

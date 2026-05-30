@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import shlex
 import signal
@@ -373,6 +374,7 @@ def save_training_state(
     stage_states: Dict[str, Dict[str, int]],
     runtime: StageRuntime,
     train_loss: float | None = None,
+    loader_state: Optional[Dict[str, int]] = None,
 ):
     """Persist params, optimizer, and dataloader progress atomically."""
     os.makedirs(params_dir, exist_ok=True)
@@ -383,7 +385,9 @@ def save_training_state(
     if train_loss is not None:
         print(f"[metadata] Wrote train_loss={train_loss:.6f} to checkpoint {ckpt_file}")
     save_opt_state(host_opt_state, global_step, training_states_dir)
-    stage_states[runtime.config.name] = runtime.loader.state_dict()
+    stage_states[runtime.config.name] = (
+        copy.deepcopy(loader_state) if loader_state is not None else runtime.loader.state_dict()
+    )
     save_dataloader_state(
         dataloader_state_path(cfg, global_step),
         {
@@ -478,73 +482,41 @@ def _place_batch_on_training_devices(batch, *, chunked: bool):
     return jax.tree_util.tree_map(place_leaf, batch)
 
 
-def _prefetch_training_batches(iterator, size: int, *, per_device_batch: int):
-    if USE_PMAP:
-        source = (_reshape_batch_for_pmap(batch, per_device_batch=per_device_batch) for batch in iterator)
-        if size <= 0:
-            yield from source
-            return
+def _prefetch_training_batches(iterator, size: int, *, per_device_batch: int, state_getter=None):
+    def snapshot_state():
+        return copy.deepcopy(state_getter()) if state_getter is not None else None
 
-        it = iter(source)
-        buf = []
-        try:
-            for _ in range(size):
-                buf.append(next(it))
-        except StopIteration:
-            pass
+    def pack(batch, state):
+        return (batch, state) if state_getter is not None else batch
 
-        while buf:
-            batch = buf.pop(0)
-            yield batch
-            try:
-                buf.append(next(it))
-            except StopIteration:
-                pass
-        return
-
-    if USE_SHARD_MAP:
-        if size <= 0:
-            for batch in iterator:
-                yield batch
-            return
-
-        it = iter(iterator)
-        buf = []
-        try:
-            for _ in range(size):
-                buf.append(next(it))
-        except StopIteration:
-            pass
-
-        while buf:
-            batch = buf.pop(0)
-            yield batch
-            try:
-                buf.append(next(it))
-            except StopIteration:
-                pass
-        return
-
-    if size <= 0:
+    def source_iter():
         for batch in iterator:
-            yield batch
+            state = snapshot_state()
+            if USE_PMAP:
+                batch = _reshape_batch_for_pmap(batch, per_device_batch=per_device_batch)
+            elif not USE_SHARD_MAP:
+                batch = jax.device_put(batch, DEFAULT_DEVICE)
+            yield pack(batch, state)
+
+    source = source_iter()
+    if size <= 0:
+        yield from source
         return
 
-    it = iter(iterator)
     buf = []
     try:
         for _ in range(size):
-            buf.append(jax.device_put(next(it), DEFAULT_DEVICE))
+            buf.append(next(source))
     except StopIteration:
-        buf.clear()
+        pass
 
     while buf:
-        batch = buf.pop(0)
-        yield batch
+        item = buf.pop(0)
+        yield item
         try:
-            buf.append(jax.device_put(next(it), DEFAULT_DEVICE))
+            buf.append(next(source))
         except StopIteration:
-            buf.clear()
+            pass
 
 
 def _startup_marker(label: str):
@@ -760,9 +732,21 @@ def main() -> None:
     dataset_root = Path(cfg.paths.processed_data_root)
     if not dataset_root.is_absolute():
         dataset_root = (base_root / dataset_root).resolve()
-    per_device_batch_size = int(cfg.training.batch_size)
-    global_batch_size = per_device_batch_size * LOCAL_DEVICE_COUNT
+    configured_global_batch_size = cfg.training.get("global_batch_size", None)
+    if configured_global_batch_size is not None:
+        global_batch_size = int(configured_global_batch_size)
+        if global_batch_size <= 0 or global_batch_size % LOCAL_DEVICE_COUNT != 0:
+            raise ValueError(
+                "training.global_batch_size must be positive and divisible by local device count "
+                f"({LOCAL_DEVICE_COUNT})"
+            )
+        per_device_batch_size = global_batch_size // LOCAL_DEVICE_COUNT
+        cfg.training.batch_size = int(per_device_batch_size)
+    else:
+        per_device_batch_size = int(cfg.training.batch_size)
+        global_batch_size = per_device_batch_size * LOCAL_DEVICE_COUNT
     grad_accum = max(1, int(getattr(cfg.training, "gradient_accumulation", 1)))
+    use_grad_accum = grad_accum > 1
     seed = getattr(cfg.training, "seed", None)
     if seed is None:
         seed = global_seed if global_seed is not None else 0
@@ -962,6 +946,8 @@ def main() -> None:
                 print(f"⚠ Failed to restore optimizer state ({exc}); reinitializing.")
         else:
             print("⚠ No optimizer state found; proceeding with fresh AdamW buffers.")
+        if use_grad_accum and global_step % grad_accum != 0:
+            print("⚠ Resuming mid-gradient-accumulation window; partial accumulated gradients are dropped.")
         print(f"▶ Resumed parameters from {ckpt_path} at step {global_step}")
     elif init_checkpoint_request is not None:
         params, _ = load_ckpt(init_checkpoint_request)
@@ -1033,6 +1019,7 @@ def main() -> None:
             "input": P(None, "data", None),
             "target": P(None, "data", None),
             "mask": P(None, "data", None),
+            "length": P(None, "data"),
         }
         _startup_marker("shard_map specs ready")
 
@@ -1069,7 +1056,6 @@ def main() -> None:
         autotune_prefetch_candidates = [prefetch_size] + autotune_prefetch_candidates
     cfg.training.prefetch_size = int(prefetch_size)
 
-    use_grad_accum = grad_accum > 1
     nan_check = bool(getattr(cfg.training, "nan_check", True))
 
     def _init_accum_grads(pytree):
@@ -1085,21 +1071,29 @@ def main() -> None:
     def _stack_batches(batches):
         return jax.tree_util.tree_map(lambda *xs: np.stack(xs, axis=0), *batches)
 
-    def _next_chunk(batch_iter, chunk_len: int):
+    def _next_chunk(batch_iter, chunk_len: int, *, with_state: bool = False):
         batch_list = []
+        last_state = None
         for _ in range(chunk_len):
             try:
-                batch_list.append(next(batch_iter))
+                item = next(batch_iter)
             except StopIteration:
                 break
+            if with_state:
+                batch, last_state = item
+            else:
+                batch = item
+            batch_list.append(batch)
         if not batch_list:
-            return None
+            return (None, None) if with_state else None
         chunk = _stack_batches(batch_list)
         if USE_SHARD_MAP:
-            return _place_batch_on_training_devices(chunk, chunked=True)
-        if USE_PMAP:
-            return jax.tree_util.tree_map(lambda x: np.swapaxes(np.asarray(x), 0, 1), chunk)
-        return jax.device_put(chunk, DEFAULT_DEVICE)
+            chunk = _place_batch_on_training_devices(chunk, chunked=True)
+        elif USE_PMAP:
+            chunk = jax.tree_util.tree_map(lambda x: np.swapaxes(np.asarray(x), 0, 1), chunk)
+        else:
+            chunk = jax.device_put(chunk, DEFAULT_DEVICE)
+        return (chunk, last_state) if with_state else chunk
 
     if USE_SHARD_MAP:
         accum_grads_spec = jax.tree_util.tree_map(lambda _: P(), jax.device_get(_init_accum_grads(params)))
@@ -1601,12 +1595,13 @@ def main() -> None:
             runtime.loader,
             size=prefetch_size,
             per_device_batch=per_device_batch_size,
+            state_getter=runtime.loader.state_dict,
         )
         while completed_in_stage < stage_steps_target:
             _reap_async_uploads(upload_processes)
             remaining_steps = stage_steps_target - completed_in_stage
             request_chunk = min(chunk_size, max(1, remaining_steps))
-            chunk = _next_chunk(batch_iter, request_chunk)
+            chunk, trained_loader_state = _next_chunk(batch_iter, request_chunk, with_state=True)
             if chunk is None:
                 break
             params, opt_state, accum_grads, accum_count, losses = _run_chunk(
@@ -1620,7 +1615,11 @@ def main() -> None:
             global_step += chunk_len
             completed_in_stage += chunk_len
             pbar.update(chunk_len)
-            stage_states[runtime.config.name] = runtime.loader.state_dict()
+            stage_states[runtime.config.name] = (
+                copy.deepcopy(trained_loader_state)
+                if trained_loader_state is not None
+                else runtime.loader.state_dict()
+            )
 
             for offset, loss_val in enumerate(losses, start=0):
                 loss_scalar = float(loss_val)
@@ -1668,6 +1667,7 @@ def main() -> None:
                     stage_states=stage_states,
                     runtime=runtime,
                     train_loss=last_loss,
+                    loader_state=stage_states.get(runtime.config.name),
                 )
                 print(f"💾 checkpoint → {ckpt_file}")
                 if upload_on_checkpoint:

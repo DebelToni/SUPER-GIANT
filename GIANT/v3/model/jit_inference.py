@@ -32,7 +32,7 @@ def init_inference_state(
     We pass a [B, 1] dummy token so the cache structure is created when use_kv_cache=True.
     """
     if use_kv_cache and not bool(getattr(model, "causal", True)):
-        raise ValueError("init_inference_state(use_kv_cache=True) requires a decoder model; encoder mode has no KV cache.")
+        raise ValueError("init_inference_state(use_kv_cache=True) requires a causal decoder model.")
     dummy = jnp.full((batch_size, 1), pad_token_id, dtype=jnp.int32)
     variables = model.init(
         {"params": key_params, "dropout": key_dropout},

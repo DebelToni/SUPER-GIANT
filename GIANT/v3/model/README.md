@@ -14,8 +14,8 @@ This folder contains the v3 model definition, dataloader, training loop, checkpo
 ## Model files
 
 - [GiantGPT.py](GiantGPT.py) - top-level Flax module
-- [Transformer_block.py](Transformer_block.py) - attention, MLP, XSA, encoder/decoder attention behavior
-- [model_mode.py](model_mode.py) - `decoder` vs `encoder` config resolution
+- [Transformer_block.py](Transformer_block.py) - causal attention, MLP, and XSA
+- [model_mode.py](model_mode.py) - compatibility helpers that now accept decoder mode only
 - [jit_inference.py](jit_inference.py) - KV-cache inference state and JIT generation functions
 - [optimizer_utils.py](optimizer_utils.py) - LR schedule and optimizer construction
 
@@ -56,8 +56,7 @@ PYTHONPATH=. /opt/venv/bin/python GIANT/v3/model/Generate_chat.py --config GIANT
 
 ## Rules
 
-- `model.mode: decoder` is causal and supports KV-cache generation.
-- `model.mode: encoder` is full attention and does not support KV cache.
+- GIANT v3 is decoder-only and supports KV-cache generation.
 - `enable_xsa: true` is tested in the current chat-stack configs.
 - `num_kv_heads == num_heads` means full MHA; smaller `num_kv_heads` means GQA.
 - `--init_checkpoint` loads only params and starts step/optimizer fresh.

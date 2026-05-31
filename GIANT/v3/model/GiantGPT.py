@@ -5,7 +5,6 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
 
-from GIANT.v3.model.model_mode import model_mode_is_causal, normalize_model_mode
 from GIANT.v3.model.Transformer_block import TinyTransformerBlock
 
 def _to_dtype(value: jnp.dtype | str) -> jnp.dtype:
@@ -32,18 +31,11 @@ class GiantGPT(nn.Module):
     rotary_dim:     Optional[int] = None
     use_remat:      bool = False
     enable_xsa:     bool = False
-    mode:           str = "decoder"
     causal:         bool = True
-    mask_answer_token_for_encoder: bool = False
 
     def setup(self):
-        self._mode = normalize_model_mode(self.mode)
-        self._resolved_causal = model_mode_is_causal(self._mode)
-        if bool(self.causal) != self._resolved_causal:
-            raise ValueError(
-                f"Inconsistent GiantGPT config: mode={self._mode!r} implies causal={self._resolved_causal}, "
-                f"but causal={self.causal!r} was provided."
-            )
+        if not bool(self.causal):
+            raise ValueError("GIANT v3 only supports causal decoder models")
 
     @nn.compact
     def __call__(
@@ -53,7 +45,6 @@ class GiantGPT(nn.Module):
         deterministic: bool = False,
         use_kv_cache: bool = False,
         cur_index: Optional[jnp.ndarray | int] = None,
-        attention_bias: Optional[jnp.ndarray] = None,
     ):
         compute_dtype = _to_dtype(self.compute_dtype)
         param_dtype = _to_dtype(self.param_dtype)
@@ -82,14 +73,12 @@ class GiantGPT(nn.Module):
                     param_dtype=param_dtype,
                     use_remat=self.use_remat,
                     enable_xsa=self.enable_xsa,
-                    mode=self._mode,
-                    causal=self._resolved_causal,
+                    causal=self.causal,
             )(
                 x,
                 deterministic=deterministic,
-                use_kv_cache=use_kv_cache and self._resolved_causal,
+                use_kv_cache=use_kv_cache,
                 cur_index=cur_index,
-                attention_bias=attention_bias,
             )
 
         x = RMSNorm(name="final_norm", dtype=compute_dtype, epsilon=1e-5)(x)

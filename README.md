@@ -41,7 +41,7 @@ The active implementation is [GIANT v3](GIANT/v3/); v0-v2 are archived reference
 User: What is the capital of France?
 Assitant: The capital of France is sometimes called Paris.<EOS>
 ```
-> (This is a 38 milion param checkpoint trained on 500 milion tokens including a schedule and a circulumn of basetext, wikipedia, webtext and finally chat examples.)
+> (This is a 38 milion param checkpoint trained on 500 milion tokens including a schedule and a circulumn of basetext, wikipedia, webtext and finally chat examples. To talk to a GIANT model trained for 1$ or 20$ you can go to my interactive demo [here](https://debeltoni.github.io/SUPER-GIANT/))
 
 ## [Think in Diffusion, talk in AutoRegression](https://arxiv.org/pdf/2511.08923)
 - NVIDIA's proposed model [TiDAR](TiDAR/) is already implemented (including my Anchor-TiDAR variant), and this is where I run ongoing experiments. It builds on top of the active **GIANT v3** training/data utilities

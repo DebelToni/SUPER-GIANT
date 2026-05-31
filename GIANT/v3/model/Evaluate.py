@@ -14,8 +14,6 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from GIANT.v3.model.GiantGPT import GiantGPT
-from GIANT.v3.model.model_mode import model_mode_is_causal, resolve_model_mode
-from GIANT.v3.model.attention_bias import build_answer_hidden_bias
 from GIANT.v3.model.arrow_data_loader import ShardedArrowDataset, StageDataLoader
 from GIANT.v3.model.checkpoint_manager import latest as latest_ckpt
 from GIANT.v3.model.checkpoint_manager import load as load_ckpt
@@ -114,13 +112,7 @@ def resolve_checkpoint(path_arg: str | None, cfg, base_root: Path) -> Tuple[str,
 
 @partial(jax.jit, static_argnames=("model",))
 def eval_step(params, batch, *, model):
-    attention_bias = build_answer_hidden_bias(
-        batch["mask"],
-        enabled=bool(getattr(model, "mask_answer_token_for_encoder", False)),
-        causal=bool(getattr(model, "causal", True)),
-        dtype=jnp.float32,
-    )
-    logits = model.apply({"params": params}, batch["input"], deterministic=True, attention_bias=attention_bias)
+    logits = model.apply({"params": params}, batch["input"], deterministic=True)
     loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch["target"])
     loss_numer = jnp.sum(loss * batch["mask"])
     loss_denom = jnp.maximum(jnp.sum(batch["mask"]), 1.0)
@@ -166,7 +158,8 @@ def main():
         dataset_root = (base_root / dataset_root).resolve()
 
     max_seq_len = max(int(stage["seq_len"]) for stage in stage_cfgs)
-    model_mode = resolve_model_mode(cfg.model)
+    if str(cfg.model.get("mode", "decoder")).lower() != "decoder" or bool(cfg.model.get("causal", True)) is False:
+        raise ValueError("GIANT v3 only supports causal decoder models")
     model = GiantGPT(
         vocab_size=len(tokenizer),
         context_length=max_seq_len,
@@ -181,9 +174,7 @@ def main():
         compute_dtype=cfg.model.compute_dtype,
         use_remat=bool(cfg.model.use_remat),
         enable_xsa=bool(cfg.model.enable_xsa),
-        mode=model_mode,
-        causal=model_mode_is_causal(model_mode),
-        mask_answer_token_for_encoder=bool(cfg.model.get("mask_answer_token_for_encoder", False)),
+        causal=True,
     )
 
     ckpt_path, _ = resolve_checkpoint(args.checkpoint, cfg, base_root)

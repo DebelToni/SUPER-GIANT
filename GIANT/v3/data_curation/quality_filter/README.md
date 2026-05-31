@@ -1,11 +1,11 @@
 # Bulgarian quality filter
 
-This folder builds a Bulgarian text-quality classifier and uses it to filter `lumees/bulgarian-corpus-33b`. The current practical winner is the fastText-style classifier, not the tiny encoder.
+This folder builds a Bulgarian text-quality classifier and uses it to filter `lumees/bulgarian-corpus-33b`. The active classifier path is fastText-style.
 
 ## Main scripts
 
 - [build_quality_benchmark.py](build_quality_benchmark.py) - build labeled BG quality benchmark
-- [train_quality_filter.py](train_quality_filter.py) - train fastText or tiny encoder classifier
+- [train_quality_filter.py](train_quality_filter.py) - train the fastText classifier
 - [filter_lumees_pretrain_parallel.py](filter_lumees_pretrain_parallel.py) - parallel filtering for the full `pretrain` split
 - [filter_lumees_pretrain.py](filter_lumees_pretrain.py) - simpler streaming filter path
 - [materialize_tier_views.py](materialize_tier_views.py) - split filtered JSONL into `high_quality`, `acceptable`, and `keep_all`
@@ -16,7 +16,6 @@ This folder builds a Bulgarian text-quality classifier and uses it to filter `lu
 
 - full benchmark with BPOS positives: [configs/benchmark_bg_full_with_bpos.yml](configs/benchmark_bg_full_with_bpos.yml)
 - recommended fastText run: [configs/train_fasttext_bg_full_with_bpos.yml](configs/train_fasttext_bg_full_with_bpos.yml)
-- tiny encoder smoke run: [configs/train_encoder_bg_full_with_bpos_smoke.yml](configs/train_encoder_bg_full_with_bpos_smoke.yml)
 - packed filtered BG corpus config: [../../Configs/Data/giant_bg_quality_keep_bpe32k.yml](../../Configs/Data/giant_bg_quality_keep_bpe32k.yml)
 - tokenizer for filtered BG corpus: [../../Configs/Tokenizer/giant_bg_en_bpe32k_quality.yml](../../Configs/Tokenizer/giant_bg_en_bpe32k_quality.yml)
 

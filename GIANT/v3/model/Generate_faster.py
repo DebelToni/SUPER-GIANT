@@ -13,14 +13,12 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from GIANT.v3.model.GiantGPT import GiantGPT
-from GIANT.v3.model.model_mode import model_mode_is_causal, resolve_model_mode
 from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
 from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
 from GIANT.v3.device_utils import select_default_device
 
 @dataclass
 class ModelConfig:
-    mode: str = "decoder"
     causal: Optional[bool] = None
     embedding_size: int = 640
     num_heads: int = 10
@@ -33,7 +31,6 @@ class ModelConfig:
     activation: str = "silu"
     use_remat: bool = False
     enable_xsa: bool = False
-    mask_answer_token_for_encoder: bool = False
     param_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
 
@@ -275,7 +272,8 @@ def load_tokenizer(cfg: GenerateFasterConfig):
 
 def build_model(cfg: GenerateFasterConfig, vocab_size: int, context_length: int) -> GiantGPT:
     model_cfg = cfg.model
-    mode = resolve_model_mode(model_cfg)
+    if str(getattr(model_cfg, "mode", "decoder")).lower() != "decoder" or model_cfg.causal is False:
+        raise ValueError("GIANT v3 only supports causal decoder models")
     return GiantGPT(
         vocab_size=vocab_size,
         context_length=context_length,
@@ -290,8 +288,7 @@ def build_model(cfg: GenerateFasterConfig, vocab_size: int, context_length: int)
         compute_dtype=model_cfg.compute_dtype,
         use_remat=bool(model_cfg.use_remat),
         enable_xsa=bool(model_cfg.enable_xsa),
-        mode=mode,
-        causal=model_mode_is_causal(mode),
+        causal=True,
     )
 
 

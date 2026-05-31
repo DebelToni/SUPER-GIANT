@@ -73,46 +73,6 @@ def main() -> None:
 
     print("num_heads", n_heads, "num_kv", num_kv_heads)
 
-    encoder_block = TinyTransformerBlock(
-        d_model=d_model,
-        n_heads=n_heads,
-        d_ff=d_ff,
-        num_kv_heads=num_kv_heads,
-        rotary_dim=rotary_dim,
-        dropout_rate=0.0,
-        dtype=compute_dtype,
-        param_dtype=param_dtype,
-        mode="encoder",
-        causal=False,
-    )
-    encoder_vars = encoder_block.init(
-        {"params": key},
-        x,
-        deterministic=True,
-        use_kv_cache=False,
-    )
-    encoder_out = encoder_block.apply(
-        encoder_vars,
-        x,
-        deterministic=True,
-        use_kv_cache=False,
-    )
-    print("encoder_out", encoder_out.shape, encoder_out.dtype)
-
-    try:
-        encoder_block.apply(
-            encoder_vars,
-            x1,
-            deterministic=True,
-            use_kv_cache=True,
-            cur_index=0,
-            mutable=["cache"],
-        )
-    except ValueError as exc:
-        print("encoder_cache_error", str(exc))
-    else:
-        raise AssertionError("Encoder block unexpectedly accepted KV cache")
-
 
 if __name__ == "__main__":
     main()

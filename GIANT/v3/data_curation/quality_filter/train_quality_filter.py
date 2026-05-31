@@ -23,16 +23,6 @@ from GIANT.v3.data_curation.quality_filter.common import (
     tokenize_words,
     hash_token,
 )
-from GIANT.v3.model.Transformer_block import TinyTransformerBlock
-
-
-def resolve_dtype(value: str) -> jnp.dtype:
-    try:
-        return getattr(jnp, value)
-    except AttributeError:
-        return jnp.dtype(value)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a Bulgarian text-quality classifier.")
     parser.add_argument("--config", required=True)
@@ -71,58 +61,6 @@ class FastTextClassifier(nn.Module):
         return nn.Dense(self.num_classes)(x)
 
 
-class TinyEncoderClassifier(nn.Module):
-    vocab_size: int
-    embed_dim: int
-    num_heads: int
-    feed_forward_size: int
-    num_layers: int
-    num_classes: int
-    max_tokens: int
-    dropout_rate: float = 0.0
-    enable_xsa: bool = False
-    param_dtype: str = "float32"
-    compute_dtype: str = "bfloat16"
-
-    @nn.compact
-    def __call__(self, token_ids, mask, *, train: bool):
-        param_dtype = resolve_dtype(self.param_dtype)
-        compute_dtype = resolve_dtype(self.compute_dtype)
-        embed = nn.Embed(num_embeddings=self.vocab_size, features=self.embed_dim, param_dtype=param_dtype, dtype=compute_dtype)
-        x = embed(token_ids)
-        pos = self.param("pos_embed", nn.initializers.normal(stddev=0.02), (self.max_tokens, self.embed_dim))
-        x = x + pos[None, :, :].astype(compute_dtype)
-
-        token_mask = jnp.asarray(mask > 0, dtype=jnp.float32)
-        pair_mask = token_mask[:, None, None, :] > 0
-        attention_bias = jnp.where(pair_mask, 0.0, -1e10).astype(jnp.float32)
-        attention_bias = jnp.broadcast_to(attention_bias, (token_ids.shape[0], 1, token_ids.shape[1], token_ids.shape[1]))
-        head_dim = max(self.embed_dim // self.num_heads, 2)
-        rotary_dim = head_dim if head_dim % 2 == 0 else max(head_dim - 1, 2)
-
-        for layer_idx in range(self.num_layers):
-            x = TinyTransformerBlock(
-                d_model=self.embed_dim,
-                n_heads=self.num_heads,
-                d_ff=self.feed_forward_size,
-                dtype=compute_dtype,
-                param_dtype=param_dtype,
-                context_length=self.max_tokens,
-                dropout_rate=self.dropout_rate,
-                num_kv_heads=self.num_heads,
-                rotary_dim=rotary_dim,
-                enable_xsa=self.enable_xsa,
-                mode="encoder",
-                causal=False,
-                name=f"encoder_block_{layer_idx}",
-            )(x, deterministic=not train, use_kv_cache=False, attention_bias=attention_bias)
-
-        mask_f = mask[..., None]
-        pooled = (x * mask_f).sum(axis=1) / jnp.maximum(mask_f.sum(axis=1), 1.0)
-        pooled = nn.Dropout(rate=self.dropout_rate)(pooled, deterministic=not train)
-        return nn.Dense(self.num_classes, param_dtype=param_dtype, dtype=compute_dtype)(pooled)
-
-
 def create_model(cfg: dict, num_classes: int):
     model_type = cfg["model"]["type"]
     vocab_size = int(cfg["features"]["vocab_size"])
@@ -134,22 +72,7 @@ def create_model(cfg: dict, num_classes: int):
             num_classes=num_classes,
             dropout_rate=float(cfg["models"]["fasttext"].get("dropout_rate", 0.0)),
         )
-    if model_type == "tiny_encoder":
-        model_cfg = cfg["models"]["tiny_encoder"]
-        return TinyEncoderClassifier(
-            vocab_size=vocab_size,
-            embed_dim=int(model_cfg["embed_dim"]),
-            num_heads=int(model_cfg["num_heads"]),
-            feed_forward_size=int(model_cfg["feed_forward_size"]),
-            num_layers=int(model_cfg.get("num_layers", 1)),
-            num_classes=num_classes,
-            max_tokens=max_tokens,
-            dropout_rate=float(model_cfg.get("dropout_rate", 0.0)),
-            enable_xsa=bool(model_cfg.get("enable_xsa", False)),
-            param_dtype=str(model_cfg.get("param_dtype", "float32")),
-            compute_dtype=str(model_cfg.get("compute_dtype", "bfloat16")),
-        )
-    raise ValueError(f"Unsupported model.type={model_type!r}")
+    raise ValueError(f"Unsupported model.type={model_type!r}; expected 'fasttext'")
 
 
 def iter_batches(token_ids: np.ndarray, mask: np.ndarray, labels: np.ndarray, batch_size: int, *, shuffle: bool, seed: int):

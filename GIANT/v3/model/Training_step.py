@@ -7,9 +7,6 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from GIANT.v3.model.attention_bias import build_answer_hidden_bias
-
-
 def loss_and_grad(
     params,
     batch,
@@ -19,18 +16,11 @@ def loss_and_grad(
     axis_name: Optional[str] = None,
 ):
     def loss_fn(p):
-        attention_bias = build_answer_hidden_bias(
-            batch["mask"],
-            enabled=bool(getattr(model, "mask_answer_token_for_encoder", False)),
-            causal=bool(getattr(model, "causal", True)),
-            dtype=jnp.float32,
-        )
         logits = model.apply(
             {"params": p},
             batch["input"],
             rngs={"dropout": dropout_rng},
             deterministic=False,
-            attention_bias=attention_bias,
         )
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch["target"])
         mask = batch["mask"].astype(jnp.float32)

@@ -1,6 +1,6 @@
 # GIANT v3
 
-GIANT v3 is the current working version of GIANT. It keeps the v2-style pipeline but is where I am pushing multi-GPU training, better data curation, encoder/decoder mode support, and practical chat experiments.
+GIANT v3 is the current working version of GIANT. It keeps the v2-style pipeline but is where I am pushing multi-GPU training, better data curation, decoder-only modeling, and practical chat experiments.
 
 The main idea of this folder is simple:
 
@@ -83,8 +83,7 @@ When using the Docker/RunPod setup, keep `/proj/giant-data/sync_dirs.txt` small 
 
 ## Current state of v3
 
-- Decoder mode is the main production path.
-- Encoder mode exists through `model.mode: encoder` and is used by classifier/Long experiments, not by chat generation.
+- GIANT v3 is decoder-only; encoder mode was removed from the active model path. It will be re-added with the next TiDAR update.
 - Data parallel training works; more serious model sharding is still future work.
 - XSA is supported in the v3 block and used by the current chat-stack configs.
 - Quality filtering is useful for data triage, not a replacement for human inspection of SFT data.

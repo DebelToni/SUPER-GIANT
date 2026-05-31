@@ -5,6 +5,7 @@ model:
   num_layers: 16
   feed_forward_size: 2560
   rope_dim: 64
+  rope_theta: 10000.0
   context_length: 2048
   dropout_rate: 0.0
   activation: silu

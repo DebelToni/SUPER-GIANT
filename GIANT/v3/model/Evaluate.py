@@ -170,6 +170,7 @@ def main():
         dropout_rate=cfg.model.dropout_rate,
         num_kv_heads=int(cfg.model.num_kv_heads),
         rotary_dim=int(cfg.model.rope_dim),
+        rope_theta=float(cfg.model.get("rope_theta", 10000.0)),
         param_dtype=cfg.model.param_dtype,
         compute_dtype=cfg.model.compute_dtype,
         use_remat=bool(cfg.model.use_remat),

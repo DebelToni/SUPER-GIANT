@@ -9,6 +9,7 @@ model:
   num_layers: 32
   feed_forward_size: 2560
   rope_dim: 64
+  rope_theta: 10000.0
   context_length: 8192
   dropout_rate: 0.0
   use_remat: false

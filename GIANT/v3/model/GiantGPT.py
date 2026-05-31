@@ -29,6 +29,7 @@ class GiantGPT(nn.Module):
     dropout_rate:   float = 0.1
     num_kv_heads:   Optional[int] = None
     rotary_dim:     Optional[int] = None
+    rope_theta:     float = 10000.0
     use_remat:      bool = False
     enable_xsa:     bool = False
     causal:         bool = True
@@ -69,6 +70,7 @@ class GiantGPT(nn.Module):
                     dropout_rate=self.dropout_rate,
                     num_kv_heads=self.num_kv_heads,
                     rotary_dim=self.rotary_dim,
+                    rope_theta=self.rope_theta,
                     dtype=compute_dtype,
                     param_dtype=param_dtype,
                     use_remat=self.use_remat,

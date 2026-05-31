@@ -23,8 +23,8 @@ def apply_partial_rope(x, sin, cos, rot_dim):
     return jnp.concatenate([x_rot, x_pass], axis=-1)
 
 
-def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype):
-    inv_freq = 1.0 / (10000 ** (jnp.arange(0, rotary_dim, 2) / rotary_dim))
+def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype, rope_theta: float = 10000.0):
+    inv_freq = 1.0 / (rope_theta ** (jnp.arange(0, rotary_dim, 2) / rotary_dim))
     positions = jnp.arange(seq_len)
     angles = jnp.einsum("i,j->ij", positions, inv_freq)
     # Duplicate the full frequency matrix (not each element) to form pairs.
@@ -52,6 +52,7 @@ class NativeJaxSelfAttention(nn.Module):
 
     # Rotary positional encoding
     rotary_dim: int = 64
+    rope_theta: float = 10000.0
     draft_len: int = 0
     qkv_features: int
     context_length: int
@@ -60,6 +61,7 @@ class NativeJaxSelfAttention(nn.Module):
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
     rotary_dim: int = 64
+    rope_theta: float = 10000.0
     draft_len: int = 0
 
     def setup(self):
@@ -88,7 +90,7 @@ class NativeJaxSelfAttention(nn.Module):
         self.dropout = nn.Dropout(rate=self.dropout_rate)
         rope_len = int(self.context_length) + (2 * int(self.draft_len))
         self._rope_sin, self._rope_cos = _build_rope_cache(
-            rope_len, self.rotary_dim, self.dtype
+            rope_len, self.rotary_dim, self.dtype, self.rope_theta
         )
 
     def _rope_from_position_ids(self, position_ids: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -271,6 +273,7 @@ class TinyTransformerBlock(nn.Module):
     num_kv_heads: int
     rope_dim: int
     context_length: int
+    rope_theta: float = 10000.0
     dropout_rate: float = 0.1
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
@@ -304,6 +307,7 @@ class TinyTransformerBlock(nn.Module):
                 dtype=module.dtype,
                 param_dtype=module.param_dtype,
                 rotary_dim=module.rope_dim,
+                rope_theta=module.rope_theta,
                 draft_len=module.draft_len,
             )(
                 h_norm,

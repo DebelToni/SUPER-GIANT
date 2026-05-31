@@ -130,6 +130,7 @@ def build_model(cfg: TiDARConfig, vocab_size: int, context_length: int, draft_le
         n_heads=model_cfg.num_heads,
         num_kv_heads=model_cfg.num_kv_heads,
         rope_dim=model_cfg.rope_dim,
+        rope_theta=float(getattr(model_cfg, "rope_theta", 10000.0)),
         d_ff=model_cfg.feed_forward_size,
         n_layers=model_cfg.num_layers,
         dropout_rate=0.0,

@@ -26,6 +26,7 @@ class ModelConfig:
     num_layers: int = 16
     feed_forward_size: int = 2560
     rope_dim: Optional[int] = None
+    rope_theta: float = 10000.0
     context_length: int = 2048
     dropout_rate: float = 0.0
     activation: str = "silu"
@@ -283,6 +284,7 @@ def build_model(cfg: GenerateFasterConfig, vocab_size: int, context_length: int)
         n_layers=model_cfg.num_layers,
         num_kv_heads=model_cfg.num_kv_heads,
         rotary_dim=model_cfg.rope_dim,
+        rope_theta=float(getattr(model_cfg, "rope_theta", 10000.0)),
         dropout_rate=0.0,
         param_dtype=model_cfg.param_dtype,
         compute_dtype=model_cfg.compute_dtype,

@@ -23,6 +23,7 @@ class TiDAR(nn.Module):
     rope_dim:       int
     d_ff:           int
     n_layers:       int
+    rope_theta:     float = 10000.0
     dropout_rate:   float = 0.1
     param_dtype:    str | jnp.dtype = "float32"
     compute_dtype:  str | jnp.dtype = "bfloat16"
@@ -65,6 +66,7 @@ class TiDAR(nn.Module):
                     n_heads=self.n_heads,
                     num_kv_heads=self.num_kv_heads,
                     rope_dim=self.rope_dim,
+                    rope_theta=self.rope_theta,
                     d_ff=self.d_ff,
                     context_length=self.context_length,
                     dropout_rate=self.dropout_rate,

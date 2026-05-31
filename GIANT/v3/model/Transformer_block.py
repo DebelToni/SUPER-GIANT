@@ -23,7 +23,6 @@ def _to_dtype(value: jnp.dtype | str) -> jnp.dtype:
 
 
 IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
-
 def _rotate_every_two(x):
     x1, x2 = jnp.split(x, 2, axis=-1)
     return jnp.concatenate((-x2, x1), axis=-1)
@@ -38,8 +37,8 @@ def apply_partial_rope(x, sin, cos, rot_dim):
     return jnp.concatenate([x_rot, x_pass], axis=-1)
 
 
-def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype):
-    inv_freq = 1.0 / (10000 ** (jnp.arange(0, rotary_dim, 2) / rotary_dim))
+def _build_rope_cache(seq_len: int, rotary_dim: int, dtype: jnp.dtype, rope_theta: float = 10000.0):
+    inv_freq = 1.0 / (rope_theta ** (jnp.arange(0, rotary_dim, 2) / rotary_dim))
     positions = jnp.arange(seq_len)
     angles = jnp.einsum("i,j->ij", positions, inv_freq)
     # Duplicate the full frequency matrix (not each element) to form pairs.
@@ -61,6 +60,7 @@ class NativeJaxSelfAttention(nn.Module):
     num_kv: int = 1
     enable_xsa: bool = False
     rotary_dim: Optional[int] = None
+    rope_theta: float = 10000.0
     causal: bool = True
 
     def setup(self):
@@ -100,7 +100,7 @@ class NativeJaxSelfAttention(nn.Module):
         self.dropout = nn.Dropout(rate=self.dropout_rate)
         # Precompute rotary embeddings once and slice per call.
         self._rope_sin, self._rope_cos = _build_rope_cache(
-            self.context_length, self._rotary_dim, self._compute_dtype
+            self.context_length, self._rotary_dim, self._compute_dtype, self.rope_theta
         )
 
     @nn.compact
@@ -268,6 +268,7 @@ class TinyTransformerBlock(nn.Module):
     dropout_rate: float = 0.1
     num_kv_heads: Optional[int] = None
     rotary_dim: Optional[int] = None
+    rope_theta: float = 10000.0
     use_remat: bool = False
     enable_xsa: bool = False
     causal: bool = True
@@ -297,6 +298,7 @@ class TinyTransformerBlock(nn.Module):
                 dtype=compute_dtype,
                 param_dtype=param_dtype,
                 rotary_dim=module.rotary_dim,
+                rope_theta=module.rope_theta,
                 enable_xsa=module.enable_xsa,
                 causal=module.causal,
             )(

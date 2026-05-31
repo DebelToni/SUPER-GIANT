@@ -30,6 +30,7 @@ class ModelConfig:
     num_layers: int = 30
     feed_forward_size: int = 1536
     rope_dim: int = 64
+    rope_theta: float = 10000.0
     context_length: int = 2048
     dropout_rate: float = 0.0
     use_remat: bool = False

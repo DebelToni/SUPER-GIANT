@@ -387,6 +387,7 @@ def main() -> None:
         n_heads=cfg.model.num_heads,
         num_kv_heads=cfg.model.num_kv_heads,
         rope_dim=cfg.model.rope_dim,
+        rope_theta=float(getattr(cfg.model, "rope_theta", 10000.0)),
         d_ff=cfg.model.feed_forward_size,
         n_layers=cfg.model.num_layers,
         dropout_rate=cfg.model.dropout_rate,

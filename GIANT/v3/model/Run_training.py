@@ -792,6 +792,7 @@ def main() -> None:
     max_seq_len = max(stage.config.seq_len for stage in stage_runtimes)
     num_kv_heads = int(cfg.model.num_kv_heads)
     rotary_dim = int(cfg.model.rope_dim)
+    rope_theta = float(cfg.model.get("rope_theta", 10000.0))
     use_remat = bool(cfg.model.use_remat)
     enable_xsa = bool(cfg.model.enable_xsa)
     if str(cfg.model.get("mode", "decoder")).lower() != "decoder" or bool(cfg.model.get("causal", True)) is False:
@@ -808,6 +809,7 @@ def main() -> None:
         dropout_rate=cfg.model.dropout_rate,
         num_kv_heads=num_kv_heads,
         rotary_dim=rotary_dim,
+        rope_theta=rope_theta,
         param_dtype=param_dtype,
         compute_dtype=compute_dtype,
         use_remat=use_remat,

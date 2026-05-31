@@ -361,6 +361,15 @@ def main() -> None:
     print("final output")
     print(final_text)
 
+    iteration_count = len(trace_records)
+    total_accepted = sum(int(rec["accept"]) for rec in trace_records)
+    avg_accepted = total_accepted / iteration_count if iteration_count else 0.0
+    accept_utilization = avg_accepted / draft_len if draft_len else 0.0
+    print("\naccept metrics")
+    print(f"iterations: {iteration_count}")
+    print(f"accepted tokens in iterations: {total_accepted}")
+    print(f"avg accepted per iteration: {avg_accepted:.3f} / {draft_len} ({accept_utilization:.2%})")
+
 
 if __name__ == "__main__":
     main()

@@ -252,6 +252,7 @@ def loss_and_metrics(
     accept_top_k: int = 64,
     accept_max_positions: int = 256,
     delta_masked: float = 0.0,  # Hard agreement capped to first mismatch (inclusive)
+    adapter_params=None,
 ) -> Tuple:
     """
     Compute TiDAR training loss with 8 configurable terms:
@@ -272,13 +273,19 @@ def loss_and_metrics(
     All AR terms are stopgrad'd to prevent gradients flowing into AR from Diff losses.
     Terms with coefficient == 0 are skipped entirely (no compute).
     """
+    variables = {"params": params}
+    apply_kwargs = {}
+    if adapter_params is not None:
+        variables["adapters"] = adapter_params
+        apply_kwargs["adapter_mask"] = batch["adapter_mask"]
     logits = model.apply(
-        {"params": params},
+        variables,
         batch["input_ids"],
         rngs={"dropout": dropout_rng},
         deterministic=False,
         attn_bias=batch["attn_bias"],
         position_ids=batch["position_ids"],
+        **apply_kwargs,
     )
     labels = jnp.asarray(batch["labels"])
     mask_ntp = jnp.asarray(batch["loss_mask_ntp"])
@@ -454,6 +461,54 @@ def loss_and_grad(
     return jax.value_and_grad(loss_fn, has_aux=True)(params)
 
 
+def adapter_loss_and_grad(
+    adapter_params,
+    base_params,
+    batch,
+    *,
+    model,
+    dropout_rng,
+    alpha: float,
+    beta: float,
+    rho: float,
+    chi: float,
+    delta: float,
+    eta: float,
+    eta_T: float,
+    gamma: float = 0.0,
+    gamma_topk: int = 0,
+    compute_accept=False,
+    accept_top_k: int = 64,
+    accept_max_positions: int = 256,
+    delta_masked: float = 0.0,
+):
+    """Differentiate only TiDAR's adapter collection."""
+
+    def loss_fn(adapters):
+        return loss_and_metrics(
+            base_params,
+            batch,
+            model=model,
+            dropout_rng=dropout_rng,
+            alpha=alpha,
+            beta=beta,
+            rho=rho,
+            chi=chi,
+            delta=delta,
+            delta_masked=delta_masked,
+            eta=eta,
+            eta_T=eta_T,
+            gamma=gamma,
+            gamma_topk=gamma_topk,
+            compute_accept=compute_accept,
+            accept_top_k=accept_top_k,
+            accept_max_positions=accept_max_positions,
+            adapter_params=adapters,
+        )
+
+    return jax.value_and_grad(loss_fn, has_aux=True)(adapter_params)
+
+
 @partial(
     jax.jit,
     static_argnames=[
@@ -545,4 +600,4 @@ def train_step(
     )
 
 
-__all__ = ["loss_and_metrics", "loss_and_grad", "train_step"]
+__all__ = ["adapter_loss_and_grad", "loss_and_metrics", "loss_and_grad", "train_step"]

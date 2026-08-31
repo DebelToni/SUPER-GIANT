@@ -60,6 +60,22 @@ class InferenceConfig:
 
 
 @dataclass
+class LoRASettings:
+    """Frozen-base LoRA configuration."""
+    enabled: bool = False
+    rank: int = 16
+    alpha: float = 32.0
+    dropout: float = 0.0
+    target_modules: List[str] = field(default_factory=lambda: ["o_proj"])
+    routing: str = "token"
+    layer_indices: Optional[List[int]] = None
+    stop_gradient_before_lora: bool = False
+    base_checkpoint: Optional[str] = None
+    adapter_checkpoint: Optional[str] = None
+    separate_mask_embedding: bool = True
+
+
+@dataclass
 class OptimizerConfig:
     """Optimizer configuration."""
     base_learning_rate: float = 1.0e-4
@@ -94,6 +110,7 @@ class LossConfig:
 @dataclass
 class TrainingConfig:
     """Training configuration."""
+    finetune_method: str = "full"
     batch_size: int = 8
     gradient_accumulation: int = 4
     max_epochs: int = 1
@@ -182,6 +199,7 @@ class TiDARConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     tidar: TiDARSpecificConfig = field(default_factory=TiDARSpecificConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
+    lora: LoRASettings = field(default_factory=LoRASettings)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     tokenizer: TokenizerConfig = field(default_factory=TokenizerConfig)

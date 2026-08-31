@@ -406,8 +406,9 @@ Function: `anchor_rejection_sample` in `TiDAR/model/tidar_core.py`
 - The anchor (draft[0]) is not pre-committed and is never verified.
 - Draft positions 1..K-1 are verified using standard speculative acceptance:
   - greedy: accept iff `draft == argmax(verify_logits)`
-  - sampling: accept with `min(1, p/q)` ratio
-- On the first rejection, the resampled token becomes the new anchor.
+  - sampling: accept with `min(1, p/q)` ratio; on rejection sample from the
+    normalized residual `max(p-q, 0)`
+- On the first rejection, the residual-sampled token becomes the new anchor.
 - A bonus token is sampled from `verify_logits[K-1]`.
 - `accepted_count` counts committed prefix length from current_draft, min 1 max K.
 - Next draft is selected from the predraft group corresponding to the accept
@@ -442,6 +443,8 @@ Files: `TiDAR/model/Prepare_mask_token.py`, `TiDAR/model/tokenizer_utils.py`
   rejection sampling, KV cache helpers.
 - `TiDAR/model/config_schema.py`: structured OmegaConf dataclasses +
   `load_typed_config` for typed config access and path resolution.
+- `GIANT/v3/model/lora.py`: shared LoRA primitive and adapter provenance checks;
+  TiDAR supplies per-token routes from training, prefill, and decode layouts.
 
 ---
 
@@ -459,6 +462,9 @@ Files: `TiDAR/model/Prepare_mask_token.py`, `TiDAR/model/tokenizer_utils.py`
 - Inference assumes fixed `draft_len` (templates cached by `lru_cache`).
 - `NativeJaxSelfAttention` supports both standard AR cache updates and
   structured TiDAR decode bias with prefix masking.
+- Frozen-base LoRA stores all trainable state, including the input-only mask
+  vector, outside `params`; see `Implementation_Notes.md` and
+  `GIANT/v3/model/LORA.md`.
 
 If you need to change the decoding strategy, start in
 `TiDAR/model/tidar_core.py` and `TiDAR/model/inference.py`.

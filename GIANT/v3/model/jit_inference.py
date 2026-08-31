@@ -26,6 +26,8 @@ def init_inference_state(
     *,
     pad_token_id: int = 0,
     use_kv_cache: bool = True,
+    params: Optional[PyTree] = None,
+    adapter_params: Optional[PyTree] = None,
 ) -> Tuple[PyTree, PyTree]:
     """
     Initialize model variables (params + nonparam collections).
@@ -34,15 +36,32 @@ def init_inference_state(
     if use_kv_cache and not bool(getattr(model, "causal", True)):
         raise ValueError("init_inference_state(use_kv_cache=True) requires a causal decoder model.")
     dummy = jnp.full((batch_size, 1), pad_token_id, dtype=jnp.int32)
+    if params is not None and use_kv_cache:
+        variables = {"params": params}
+        if adapter_params is not None:
+            variables["adapters"] = adapter_params
+        _, initialized = model.apply(
+            variables,
+            dummy,
+            deterministic=True,
+            use_kv_cache=True,
+            cur_index=0,
+            mutable=["cache"],
+        )
+        return params, {"cache": initialized["cache"]}
+
+    init_rngs = {"params": key_params, "dropout": key_dropout}
+    if bool(getattr(getattr(model, "lora_config", None), "enabled", False)):
+        init_rngs["adapters"] = jax.random.fold_in(key_params, 1)
     variables = model.init(
-        {"params": key_params, "dropout": key_dropout},
+        init_rngs,
         dummy,
         deterministic=True,
         use_kv_cache=use_kv_cache,
         cur_index=0,
     )
     params = variables["params"]
-    nonparam = {k: v for k, v in variables.items() if k != "params"}
+    nonparam = {k: v for k, v in variables.items() if k not in {"params", "adapters"}}
     if use_kv_cache and "cache" not in nonparam:
         raise ValueError(
             "Model did not create a 'cache' collection during init. "
@@ -57,6 +76,7 @@ def _apply_with_cache(
     nonparam: PyTree,
     tokens_1: Array,          # [B, 1]
     cur_idx: Array,           # scalar int32
+    adapter_params: Optional[PyTree] = None,
 ):
     """
     Single step forward with KV cache enabled (deterministic=True).
@@ -64,6 +84,8 @@ def _apply_with_cache(
     Note: intended to be used **inside** a jitted function.
     """
     variables = {"params": params, **nonparam}
+    if adapter_params is not None:
+        variables["adapters"] = adapter_params
     logits, new_vars = model.apply(
         variables,
         tokens_1,
@@ -90,13 +112,21 @@ def make_prefill_and_decode_fns(model: GiantGPT):
         params: PyTree,
         nonparam: PyTree,
         prompt_tokens: Array,           # [B, Lp]
+        adapter_params: Optional[PyTree] = None,
     ):
         B, Lp = prompt_tokens.shape
         t0 = jnp.array(0, jnp.int32)
 
         def prefill_step(carry, tok_t_2d):
             nonparam, t = carry
-            logits, nonparam = _apply_with_cache(model, params, nonparam, tok_t_2d, t)
+            logits, nonparam = _apply_with_cache(
+                model,
+                params,
+                nonparam,
+                tok_t_2d,
+                t,
+                adapter_params,
+            )
             return (nonparam, t + 1), logits
 
         if Lp > 0:
@@ -135,6 +165,7 @@ def make_prefill_and_decode_fns(model: GiantGPT):
         top_k: int = 0,
         temperature: float = 1.0,
         rng_key: Optional[jax.Array] = None,
+        adapter_params: Optional[PyTree] = None,
     ):
         B = last_tok_2d.shape[0]
         # Preallocate output tokens [B, steps]
@@ -142,7 +173,14 @@ def make_prefill_and_decode_fns(model: GiantGPT):
 
         def body(carry, i):
             nonparam, t, tok_prev_2d, rng, out = carry
-            logits, nonparam = _apply_with_cache(model, params, nonparam, tok_prev_2d, t)
+            logits, nonparam = _apply_with_cache(
+                model,
+                params,
+                nonparam,
+                tok_prev_2d,
+                t,
+                adapter_params,
+            )
             step_logits = logits[:, -1, :]
 
             if do_sample:

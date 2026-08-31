@@ -21,7 +21,7 @@ from flax import serialization
 from tqdm.auto import tqdm
 
 from TiDAR.model.GiantTiDAR import TiDAR
-from TiDAR.model.Training_step import loss_and_grad
+from TiDAR.model.Training_step import adapter_loss_and_grad, loss_and_grad
 from TiDAR.model.config_schema import TiDARConfig, load_typed_config
 from TiDAR.model.tidar_utils import build_train_batch
 from TiDAR.model.tokenizer_utils import (
@@ -42,9 +42,14 @@ from GIANT.v3.model.checkpoint_manager import (
     save as save_ckpt,
     save_opt_state,
     load_opt_state,
-    set_npz_metadata,
 )
 from GIANT.v3.model.optimizer_utils import create_weight_decay_mask
+from GIANT.v3.model.lora import (
+    assert_tree_compatible,
+    count_parameters,
+    lora_config_from_mapping,
+    write_adapter_manifest,
+)
 
 
 _stop_requested = False
@@ -304,6 +309,11 @@ def parse_args() -> argparse.Namespace:
     cli.add_argument("--checkpoint_every", type=int, default=None)
     cli.add_argument("--resume", nargs="?", const="latest", default=None)
     cli.add_argument("--init_checkpoint", default=None)
+    cli.add_argument(
+        "--base_checkpoint",
+        default=None,
+        help="Frozen base checkpoint for LoRA training; overrides lora.base_checkpoint.",
+    )
     cli.add_argument("--max_steps", type=int, default=None)
     cli.add_argument(
         "--dataset_dir",
@@ -341,6 +351,19 @@ def main() -> None:
     command_start = time.perf_counter()
     args = parse_args()
     cfg = load_configs(args.config, args.global_config)
+    lora_config = lora_config_from_mapping(cfg.lora)
+    finetune_method = str(getattr(cfg.training, "finetune_method", "full")).strip().lower()
+    if finetune_method not in {"full", "lora"}:
+        raise ValueError("training.finetune_method must be 'full' or 'lora'")
+    adapter_training = finetune_method == "lora"
+    if adapter_training and not lora_config.enabled:
+        raise ValueError("LoRA fine-tuning requires lora.enabled=true")
+    if lora_config.enabled and not adapter_training:
+        raise ValueError("lora.enabled=true requires training.finetune_method=lora")
+    if adapter_training and lora_config.routing != "token":
+        raise ValueError("TiDAR LoRA training requires lora.routing=token")
+    if adapter_training and not bool(cfg.lora.separate_mask_embedding):
+        raise ValueError("Frozen-base TiDAR requires lora.separate_mask_embedding=true")
     jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
     global_seed = cfg.global_seed
     if global_seed is not None:
@@ -380,8 +403,44 @@ def main() -> None:
     total_steps = sum(stage.total_steps for stage in stage_runtimes)
 
     max_seq_len = max(stage.config.seq_len for stage in stage_runtimes)
+    resolved_base_checkpoint: Path | None = None
+    loaded_base_params = None
+    model_vocab_size = len(tokenizer)
+    if adapter_training:
+        base_request = args.base_checkpoint or cfg.lora.base_checkpoint or args.init_checkpoint
+        if not base_request:
+            raise ValueError(
+                "TiDAR LoRA training requires --base_checkpoint, lora.base_checkpoint, or --init_checkpoint"
+            )
+        resolved_base_checkpoint = Path(str(base_request)).expanduser()
+        if not resolved_base_checkpoint.is_absolute():
+            resolved_base_checkpoint = (base_root / resolved_base_checkpoint).resolve()
+        if resolved_base_checkpoint.is_dir():
+            base_params_dir = (
+                resolved_base_checkpoint
+                if resolved_base_checkpoint.name == "params"
+                else resolved_base_checkpoint / "params"
+            )
+            latest_base = latest_ckpt(str(base_params_dir))
+            if latest_base is None:
+                raise FileNotFoundError(f"No base checkpoints found under {base_params_dir}")
+            resolved_base_checkpoint = Path(latest_base)
+        if not resolved_base_checkpoint.exists():
+            raise FileNotFoundError(f"LoRA base checkpoint does not exist: {resolved_base_checkpoint}")
+        loaded_base_params = flax_core.freeze(load_ckpt(str(resolved_base_checkpoint))[0])
+        model_vocab_size = int(loaded_base_params["Embed_0"]["embedding"].shape[0])
+        if mask_token_id < model_vocab_size:
+            raise ValueError(
+                f"TiDAR mask id {mask_token_id} overlaps frozen base vocabulary of size {model_vocab_size}"
+            )
+        if len(tokenizer) != model_vocab_size + 1:
+            raise ValueError(
+                "Frozen-base TiDAR requires tokenizer size to equal base vocabulary plus one input-only mask "
+                f"token; tokenizer={len(tokenizer)}, base_vocab={model_vocab_size}"
+            )
+
     model = TiDAR(
-        vocab_size=len(tokenizer),
+        vocab_size=model_vocab_size,
         context_length=max_seq_len * 2,
         d_model=cfg.model.embedding_size,
         n_heads=cfg.model.num_heads,
@@ -395,29 +454,81 @@ def main() -> None:
         compute_dtype=cfg.model.compute_dtype,
         use_remat=cfg.model.use_remat,
         draft_len=cfg.tidar.draft_length,
+        lora_config=lora_config,
+        mask_token_id=mask_token_id if adapter_training else None,
+        separate_mask_embedding=bool(cfg.lora.separate_mask_embedding) if adapter_training else False,
     )
 
     rng = jax.random.PRNGKey(seed)
-    params = model.init(rng, jnp.zeros((batch_size, max_seq_len * 2), dtype=jnp.int32))[
-        "params"
-    ]
-    if isinstance(params, dict):
-        params = flax_core.freeze(params)
+    dummy_tokens = jnp.zeros((batch_size, max_seq_len * 2), dtype=jnp.int32)
 
-    if args.init_checkpoint:
-        ckpt_path = Path(args.init_checkpoint)
-        if not ckpt_path.is_absolute():
-            ckpt_path = (base_root / ckpt_path).resolve()
-        print(f"[init] loading init checkpoint from {ckpt_path}")
-        params = flax_core.freeze(load_ckpt(str(ckpt_path))[0])
-        rng, resize_key = jax.random.split(rng)
-        params, added = resize_embedding_params(params, len(tokenizer), key=resize_key)
-        if added:
-            print(f"[init] expanded embeddings by {added} rows for TiDAR mask token")
+    if adapter_training:
+        assert loaded_base_params is not None
+        base_params = loaded_base_params
+        adapters_init_rng = jax.random.fold_in(rng, 1)
+        adapter_dummy_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
+        dummy_adapter_mask = jnp.ones(adapter_dummy_tokens.shape, dtype=jnp.bool_)
+        params_template = jax.eval_shape(
+            lambda params_key, adapters_key: model.init(
+                {"params": params_key, "adapters": adapters_key},
+                adapter_dummy_tokens,
+                deterministic=True,
+                adapter_mask=dummy_adapter_mask,
+            )["params"],
+            rng,
+            adapters_init_rng,
+        )
+        assert_tree_compatible(params_template, base_params, label="TiDAR LoRA base checkpoint")
+        _, initialized = model.apply(
+            {"params": base_params},
+            adapter_dummy_tokens,
+            deterministic=True,
+            adapter_mask=dummy_adapter_mask,
+            rngs={"adapters": adapters_init_rng},
+            mutable=["adapters"],
+        )
+        params = flax_core.freeze(initialized["adapters"])
+        print(f"[lora] frozen base: {resolved_base_checkpoint}")
+        layer_label = (
+            "all" if lora_config.layer_indices is None else list(lora_config.layer_indices)
+        )
+        print(
+            f"[lora] rank={lora_config.rank} alpha={lora_config.alpha:g} "
+            f"targets={list(lora_config.target_modules)} layers={layer_label} routing=token"
+        )
+        if lora_config.stop_gradient_before_lora:
+            print(
+                f"[lora] gradient boundary before layer {lora_config.first_adapter_layer()}; "
+                "mask embedding and earlier backbone are fixed"
+            )
+        print(
+            f"[lora] parameters: base={count_parameters(base_params):,} "
+            f"trainable={count_parameters(params):,}"
+        )
     else:
-        rng, mask_key = jax.random.split(rng)
-        params = init_mask_embedding_row(params, mask_token_id, key=mask_key)
+        base_params = jnp.asarray(0, dtype=jnp.uint8)
+        # Preserve the pre-LoRA initialization stream for full TiDAR training.
+        params = flax_core.freeze(model.init(rng, dummy_tokens)["params"])
+        if args.init_checkpoint:
+            ckpt_path = Path(args.init_checkpoint)
+            if not ckpt_path.is_absolute():
+                ckpt_path = (base_root / ckpt_path).resolve()
+            print(f"[init] loading init checkpoint from {ckpt_path}")
+            params = flax_core.freeze(load_ckpt(str(ckpt_path))[0])
+            rng, resize_key = jax.random.split(rng)
+            params, added = resize_embedding_params(params, len(tokenizer), key=resize_key)
+            if added:
+                print(f"[init] expanded embeddings by {added} rows for TiDAR mask token")
+        else:
+            rng, mask_key = jax.random.split(rng)
+            params = init_mask_embedding_row(params, mask_token_id, key=mask_key)
 
+    trainable_template = params
+    if adapter_training and lora_config.stop_gradient_before_lora:
+        exclusions = list(cfg.optimizer.weight_decay_exclusions or [])
+        if "mask_embedding" not in {str(value).lower() for value in exclusions}:
+            exclusions.append("mask_embedding")
+            cfg.optimizer.weight_decay_exclusions = exclusions
     optimizer = build_optimizer(cfg, total_steps, params)
     opt_state = optimizer.init(params)
     global_step = 0
@@ -425,9 +536,9 @@ def main() -> None:
     checkpoint_root = Path(args.checkpoint_dir or cfg.paths.checkpoints_root)
     if not checkpoint_root.is_absolute():
         checkpoint_root = (base_root / checkpoint_root).resolve()
-    if checkpoint_root.name in {"params", "training_states"}:
+    if checkpoint_root.name in {"params", "adapters", "training_states"}:
         checkpoint_root = checkpoint_root.parent
-    params_dir = checkpoint_root / "params"
+    params_dir = checkpoint_root / ("adapters" if adapter_training else "params")
     training_states_dir = checkpoint_root / "training_states"
     cfg.paths.dataloader_state_root = str(training_states_dir / "dataloader_state")
     params_dir_str = str(params_dir)
@@ -435,6 +546,15 @@ def main() -> None:
     checkpoint_every = args.checkpoint_every or cfg.training.checkpoint_every
 
     params_dir.mkdir(parents=True, exist_ok=True)
+    if adapter_training:
+        assert resolved_base_checkpoint is not None
+        write_adapter_manifest(
+            checkpoint_root / "adapter_config.json",
+            base_checkpoint=resolved_base_checkpoint,
+            config=lora_config,
+            base_parameter_count=count_parameters(base_params),
+            adapter_parameter_count=count_parameters(params),
+        )
     log_path = params_dir / "logs.txt"
     log_file = open(log_path, "a", encoding="utf-8")
 
@@ -468,18 +588,35 @@ def main() -> None:
     resumed_from_mini = False
 
     if resume_request == "latest":
-        restored_state, restored_step = mini_ckpt_mgr.restore_latest(mini_state_template)
-        if restored_step:
-            params = restored_state["params"]
-            opt_state = restored_state["opt_state"]
-            global_step = int(restored_state.get("global_step", restored_step))
-            current_stage_idx = int(restored_state.get("stage_index", 0))
-            stage_step_total = int(restored_state.get("stage_step_total", 0))
-            stage_states = restored_state.get("stage_states", {})
-            resumed_from_mini = True
-            print(f"↩ Resumed from mini checkpoint at step {restored_step}")
-        else:
+        latest_full_path = latest_ckpt(params_dir_str)
+        latest_full_step = (
+            int(Path(latest_full_path).stem.rsplit("_", 1)[-1])
+            if latest_full_path is not None
+            else -1
+        )
+        latest_mini_step = mini_ckpt_mgr.latest_step()
+        if latest_full_path is not None and latest_full_step >= int(latest_mini_step or -1):
+            print(
+                f"[resume] latest full checkpoint step {latest_full_step} is not older than "
+                f"mini checkpoint step {latest_mini_step}; using the full checkpoint."
+            )
             resume_request = "latest_full"
+        else:
+            restored_state, restored_step = mini_ckpt_mgr.restore_latest(mini_state_template)
+            if restored_step:
+                params = restored_state["params"]
+                assert_tree_compatible(
+                    trainable_template, params, label="resumed trainable checkpoint"
+                )
+                opt_state = restored_state["opt_state"]
+                global_step = int(restored_state.get("global_step", restored_step))
+                current_stage_idx = int(restored_state.get("stage_index", 0))
+                stage_step_total = int(restored_state.get("stage_step_total", 0))
+                stage_states = restored_state.get("stage_states", {})
+                resumed_from_mini = True
+                print(f"↩ Resumed from mini checkpoint at step {restored_step}")
+            else:
+                resume_request = "latest_full"
     elif resume_request and resume_request != "latest":
         resume_path = Path(resume_request)
         if not resume_path.is_absolute():
@@ -495,6 +632,7 @@ def main() -> None:
         params, global_step = load_ckpt(ckpt_path)
         if isinstance(params, dict):
             params = flax_core.freeze(params)
+        assert_tree_compatible(trainable_template, params, label="resumed trainable checkpoint")
         opt_state = optimizer.init(params)
         opt_bytes = load_opt_state(global_step, training_states_dir_str)
         if opt_bytes is not None:
@@ -505,7 +643,8 @@ def main() -> None:
                 print(f"⚠ Failed to restore optimizer state ({exc}); reinitializing.")
         else:
             print("⚠ No optimizer state found; proceeding with fresh AdamW buffers.")
-        print(f"▶ Resumed parameters from {ckpt_path} at step {global_step}")
+        checkpoint_kind = "adapter" if adapter_training else "parameter"
+        print(f"▶ Resumed {checkpoint_kind} checkpoint from {ckpt_path} at step {global_step}")
 
     loader_state = None
     if not resumed_from_mini:
@@ -520,6 +659,9 @@ def main() -> None:
         state_dict = stage_states.get(runtime.config.name, {"epoch": 0, "step_in_epoch": 0})
         runtime.loader.load_state(state_dict)
 
+    params = jax.device_put(params)
+    base_params = jax.device_put(base_params)
+    opt_state = jax.device_put(opt_state)
     base_rng = jax.random.PRNGKey(seed)
     cfg_chunk = int(getattr(cfg.training, "scan_chunk", 1))
     chunk_size = max(1, int(args.scan_chunk)) if args.scan_chunk is not None else max(1, cfg_chunk)
@@ -564,6 +706,11 @@ def main() -> None:
     def _stack_batches(batches):
         return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *batches)
 
+    def _mode_loss_and_grad(trainable, frozen, batch, **kwargs):
+        if adapter_training:
+            return adapter_loss_and_grad(trainable, frozen, batch, model=model, **kwargs)
+        return loss_and_grad(trainable, batch, model=model, **kwargs)
+
     @partial(
         jax.jit,
         static_argnames=(
@@ -580,6 +727,7 @@ def main() -> None:
         ),
     )
     def _run_chunk(
+        base_params,
         params,
         opt_state,
         batch_chunk,
@@ -618,10 +766,10 @@ def main() -> None:
                     accept_rate,
                     greedy_accept_rate,
                 ),
-            ), grads = loss_and_grad(
+            ), grads = _mode_loss_and_grad(
                 params,
+                base_params,
                 batch,
-                model=model,
                 dropout_rng=dropout_rng,
                 alpha=alpha,
                 beta=beta,
@@ -704,6 +852,7 @@ def main() -> None:
     accum_grads = _init_accum_grads(params)
     accum_count = jnp.asarray(0, dtype=jnp.int32)
     last_loss = None
+    updates_emitted = False
     for stage_idx in range(current_stage_idx, len(stage_runtimes)):
         runtime = stage_runtimes[stage_idx]
         stage_steps_target = runtime.total_steps
@@ -780,6 +929,7 @@ def main() -> None:
 
             chunk = _stack_batches(prepared_batches)
             params, opt_state, accum_grads, accum_count, losses = _run_chunk(
+                base_params,
                 params,
                 opt_state,
                 chunk,
@@ -807,6 +957,7 @@ def main() -> None:
             chunk_len = losses.shape[0]
             if chunk_len == 0:
                 break
+            updates_emitted = True
             chunk_start = global_step + 1
             global_step += chunk_len
             completed_in_stage += chunk_len
@@ -917,6 +1068,21 @@ def main() -> None:
         params, opt_state = _apply_accum(params, opt_state, accum_grads, denom)
         accum_grads = _init_accum_grads(params)
         accum_count = jnp.asarray(0, dtype=jnp.int32)
+    preserved_ckpt = latest_ckpt(params_dir_str) if args.resume is not None else None
+    if not updates_emitted and preserved_ckpt is not None:
+        print(f"[resume] No new updates; preserving checkpoint {preserved_ckpt}")
+        elapsed_seconds = time.perf_counter() - command_start
+        runtime_msg = (
+            f"Command executed in {_format_wall_time(elapsed_seconds)} "
+            f"({elapsed_seconds:.1f}s)"
+        )
+        print(runtime_msg)
+        log_file.write(runtime_msg + "\n")
+        mini_ckpt_mgr.wait_until_finished(timeout=10.0)
+        log_file.flush()
+        log_file.close()
+        return
+
     final_ckpt = save_ckpt(params, global_step, params_dir_str, train_loss=last_loss)
     if last_loss is not None:
         print(f"[metadata] Wrote train_loss={last_loss:.6f} to checkpoint {final_ckpt}")
@@ -929,7 +1095,8 @@ def main() -> None:
             "stage_states": stage_states,
         },
     )
-    print(f"✔ Training complete. Final checkpoint: {final_ckpt}")
+    checkpoint_kind = "adapter" if adapter_training else "parameter"
+    print(f"✔ Training complete. Final {checkpoint_kind} checkpoint: {final_ckpt}")
     elapsed_seconds = time.perf_counter() - command_start
     runtime_msg = (
         f"Command executed in {_format_wall_time(elapsed_seconds)} "

@@ -1,0 +1,79 @@
+# Ten-minute general-LoRA smoke over a frozen 31.5M TinyStories checkpoint.
+# The frozen smoke base removes the TiDAR-only mask row from step_0090000 so
+# its vocabulary exactly matches Tiny_tokenizer; all remaining weights are unchanged.
+model:
+  embedding_size: 384
+  num_heads: 6
+  num_kv_heads: 2
+  num_layers: 18
+  feed_forward_size: 1024
+  rope_dim: 64
+  rope_theta: 10000.0
+  context_length: 512
+  dropout_rate: 0.0
+  activation: silu
+  use_remat: false
+  enable_xsa: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  dropout: 0.0
+  target_modules: [o_proj]
+  routing: global
+  base_checkpoint: "/proj/giant-data/TiDAR/checkpoints/TinyStories_exp/giant_lora_smoke_assets/base_tinystories_31m_vocab8192.npz"
+  adapter_checkpoint: null
+
+tokenizer:
+  use_custom: true
+  custom_path: "/proj/giant-data/TiDAR/Tiny_tokenizer"
+  name: unused
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+  pad_token_override: null
+
+optimizer:
+  base_learning_rate: 1.0e-3
+  min_learning_rate: 1.0e-4
+  warmup_steps: 20
+  weight_decay: 0.0
+  gradient_clip_norm: 1.0
+  weight_decay_exclusions: [bias, scale, embedding]
+
+training:
+  finetune_method: lora
+  batch_size: 16               # per device; global batch scales with GPU count
+  gradient_accumulation: 1
+  seed: 42
+  log_every: 10
+  checkpoint_every: 50
+  mini_checkpoint_every: 25
+  mini_max_to_keep: 2
+  scan_chunk: 2
+  autotune_scan_chunk: false
+  prefetch_size: 4
+  autotune_prefetch: false
+  nan_check: true
+
+stages:
+  - name: tinystories_lora_smoke
+    dataset: tinystories_512
+    seq_len: 512
+    epochs: 10              # timeout controls the smoke duration
+    shuffle: true
+    fraction: 1.0
+
+qa_finetune: {}
+
+paths:
+  data_root: "/proj/giant-data/TiDAR"
+  processed_data_root: "dataset_artifacts/TinyStories_lora_smoke"
+  dataloader_state_root: "checkpoints/TinyStories_exp/giant_lora_smoke/training_states/dataloader_state"
+  logs_root: "checkpoints/TinyStories_exp/giant_lora_smoke/logs"
+  checkpoints_root: "checkpoints/TinyStories_exp/giant_lora_smoke"
+  hf_cache_root: "/proj/giant-data/hf_cache"
+
+inference:
+  stop_on_eos: true

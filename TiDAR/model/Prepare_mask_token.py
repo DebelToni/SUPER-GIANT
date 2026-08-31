@@ -104,13 +104,14 @@ def ensure_tidar_mask_token(
     *,
     base_token: str = "[MASK]",
     alt_prefix: str = "[TIDAR_MASK]",
+    force_new: bool = False,
 ) -> Tuple[str, int, int]:
     vocab = tokenizer.get_vocab()
-    if tokenizer.mask_token and tokenizer.mask_token in vocab:
+    if not force_new and tokenizer.mask_token and tokenizer.mask_token in vocab:
         token_id = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
         return tokenizer.mask_token, int(token_id), 0
 
-    if base_token in vocab:
+    if not force_new and base_token in vocab:
         try:
             tokenizer.add_special_tokens({"mask_token": base_token})
         except Exception:
@@ -119,7 +120,7 @@ def ensure_tidar_mask_token(
         return base_token, int(token_id), 0
 
     alt_candidates = sorted(token for token in vocab if token.startswith(alt_prefix))
-    if alt_candidates:
+    if not force_new and alt_candidates:
         candidate = alt_candidates[0]
         try:
             tokenizer.add_special_tokens({"mask_token": candidate})
@@ -129,6 +130,12 @@ def ensure_tidar_mask_token(
         return candidate, int(token_id), 0
 
     candidate = base_token
+    if candidate in vocab:
+        candidate = alt_prefix
+        suffix = 1
+        while candidate in vocab:
+            candidate = f"{alt_prefix}_{suffix}"
+            suffix += 1
     old_size = len(tokenizer)
     tokenizer.add_special_tokens({"additional_special_tokens": [candidate]})
     try:

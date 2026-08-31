@@ -1,7 +1,7 @@
 # GIANT TiDAR
 
 This folder is my attempt at replicating and extending the results from the [Think in Diffusion, Talk in Autoregression](https://arxiv.org/pdf/2511.08923) paper by ![NVIDIA](https://img.shields.io/badge/-NVIDIA-76B900?style=flat&logo=nvidia&logoColor=white). <br><br>
-TiDAR uses the active `GIANT/v3` data loader, checkpoint, optimizer, and corpus-build utilities.
+TiDAR uses the active `GIANT/v3` data loader, checkpoint, optimizer, corpus-build, and shared LoRA utilities. Frozen-base token routing is documented in [`Docs/Implementation_Notes.md`](Docs/Implementation_Notes.md); general LoRA configuration is in [`GIANT/v3/model/LORA.md`](../GIANT/v3/model/LORA.md).
 
 I am currently investigating:
 - How KL divergence in the loss affects diffusion draft performance (testing both forward and reverse).

@@ -1,9 +1,11 @@
 from typing import Optional
+import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
 
 from TiDAR.model.Transformer_block import TinyTransformerBlock
+from GIANT.v3.model.lora import LoRAConfig, validate_adapter_mask
 
 
 def _resolve_dtype(value: str | jnp.dtype) -> jnp.dtype:
@@ -29,6 +31,23 @@ class TiDAR(nn.Module):
     compute_dtype:  str | jnp.dtype = "bfloat16"
     use_remat:      bool = False
     draft_len:      int = 0
+    lora_config:    LoRAConfig = LoRAConfig()
+    mask_token_id:  Optional[int] = None
+    separate_mask_embedding: bool = False
+
+    def setup(self):
+        self.lora_config.validate_layer_count(self.n_layers)
+        if self.separate_mask_embedding:
+            if self.mask_token_id is None:
+                raise ValueError("separate_mask_embedding requires mask_token_id")
+            if int(self.mask_token_id) < int(self.vocab_size):
+                raise ValueError("The input-only TiDAR mask must be outside the base vocabulary")
+        elif (
+            self.lora_config.enabled
+            and self.mask_token_id is not None
+            and int(self.mask_token_id) >= int(self.vocab_size)
+        ):
+            raise ValueError("An out-of-vocabulary TiDAR mask requires separate_mask_embedding")
 
     @nn.compact
     def __call__(
@@ -45,7 +64,9 @@ class TiDAR(nn.Module):
         cache_write_len: Optional[int] = None,
         kv_cache_len: Optional[int] = None,
         return_hidden: bool = False,
+        adapter_mask: Optional[jnp.ndarray] = None,
     ):
+        validate_adapter_mask(self.lora_config, adapter_mask, tuple(tokens.shape))
         param_dtype = _resolve_dtype(self.param_dtype)
         compute_dtype = _resolve_dtype(self.compute_dtype)
 
@@ -56,11 +77,38 @@ class TiDAR(nn.Module):
             dtype=compute_dtype,
             param_dtype=param_dtype,
         )
-        x = embed(tokens)
+        if self.separate_mask_embedding:
+            is_mask = tokens == int(self.mask_token_id)
+            safe_tokens = jnp.where(is_mask, 0, tokens)
+            x = embed(safe_tokens)
+            mask_init = nn.initializers.normal(stddev=0.02)
+            mask_embedding = self.variable(
+                "adapters",
+                "mask_embedding",
+                lambda: mask_init(
+                    self.make_rng("adapters"),
+                    (self.d_model,),
+                    param_dtype,
+                ),
+            ).value
+            x = jnp.where(is_mask[..., None], mask_embedding.astype(compute_dtype), x)
+        else:
+            x = embed(tokens)
 
         x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
 
-        for _ in range(self.n_layers):
+        for layer_index in range(self.n_layers):
+            if (
+                self.lora_config.enabled
+                and self.lora_config.stop_gradient_before_lora
+                and layer_index == self.lora_config.first_adapter_layer()
+            ):
+                x = jax.lax.stop_gradient(x)
+            layer_lora_config = (
+                self.lora_config
+                if self.lora_config.applies_to_layer(layer_index)
+                else LoRAConfig()
+            )
             x = TinyTransformerBlock(
                     d_model=self.d_model,
                     n_heads=self.n_heads,
@@ -74,6 +122,7 @@ class TiDAR(nn.Module):
                     param_dtype=param_dtype,
                     use_remat=self.use_remat,
                     draft_len=self.draft_len,
+                    lora_config=layer_lora_config,
             )(
                 x,
                 deterministic=deterministic,
@@ -85,6 +134,7 @@ class TiDAR(nn.Module):
                 prefix_len=prefix_len,
                 cache_write_len=cache_write_len,
                 kv_cache_len=kv_cache_len,
+                adapter_mask=adapter_mask,
             )
 
 

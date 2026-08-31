@@ -22,9 +22,15 @@ from GIANT.v3.model.Generate_faster import (
     normalize_buckets,
     parse_bool_flag,
     parse_int_list,
+    resolve_adapter_checkpoint_path,
     resolve_checkpoint_path,
 )
 from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
+from GIANT.v3.model.lora import (
+    assert_tree_compatible,
+    count_parameters,
+    validate_adapter_checkpoint_manifest,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--global_config", type=str, default=None)
     parser.add_argument("--checkpoint", type=str, default="latest")
     parser.add_argument("--checkpoint_dir", type=str, default=None)
+    parser.add_argument("--adapter", type=str, default=None)
     parser.add_argument("--system", type=str, default=None)
     parser.add_argument("--prompt", type=str, default=None, help="Optional first user turn.")
     parser.add_argument("--user", type=str, action="append", default=[])
@@ -972,6 +979,7 @@ def main() -> None:
     has_non_system_seed = any(message.get("role") != "system" for message in messages)
     interactive = bool(args.window or args.interactive or not has_non_system_seed)
     checkpoint_path = resolve_checkpoint_path(cfg, args.checkpoint, args.checkpoint_dir)
+    adapter_checkpoint_path = resolve_adapter_checkpoint_path(cfg, args.adapter)
     if not args.window:
         print(f"Using checkpoint: {checkpoint_path}")
 
@@ -984,7 +992,11 @@ def main() -> None:
     params = load_params(checkpoint_path)
     rng = jax.random.PRNGKey(args.seed)
     rng, vocab_align_key = jax.random.split(rng)
-    tokenizer, params, _, _ = align_tokenizer_and_params_vocab(tokenizer, params, rng_key=vocab_align_key)
+    tokenizer, params, added_token_rows, added_param_rows = align_tokenizer_and_params_vocab(
+        tokenizer, params, rng_key=vocab_align_key
+    )
+    if adapter_checkpoint_path is not None and (added_token_rows or added_param_rows):
+        raise ValueError("LoRA inference requires tokenizer and frozen-base vocabulary to match exactly")
 
     model = build_model(cfg, len(tokenizer), context_length)
     pad_token_id = tokenizer.pad_token_id
@@ -993,6 +1005,45 @@ def main() -> None:
 
     device = jax.devices()[0]
     key_params, key_dropout, sample_key = jax.random.split(rng, 3)
+    key_adapters = jax.random.fold_in(key_params, 1)
+    dummy = jnp.full((1, 1), pad_token_id, dtype=jnp.int32)
+    params_template = jax.eval_shape(
+        lambda params_key, adapters_key: model.init(
+            {"params": params_key, "adapters": adapters_key},
+            dummy,
+            deterministic=True,
+        )["params"],
+        key_params,
+        key_adapters,
+    )
+    assert_tree_compatible(params_template, params, label="base checkpoint")
+
+    adapter_params = None
+    if adapter_checkpoint_path is not None:
+        _, initialized = model.apply(
+            {"params": params},
+            dummy,
+            deterministic=True,
+            rngs={"adapters": key_adapters},
+            mutable=["adapters"],
+        )
+        adapter_params = load_params(adapter_checkpoint_path)
+        assert_tree_compatible(
+            initialized["adapters"], adapter_params, label="LoRA adapter checkpoint"
+        )
+        validate_adapter_checkpoint_manifest(
+            adapter_checkpoint_path,
+            base_checkpoint=checkpoint_path,
+            config=model.lora_config,
+            base_parameter_count=count_parameters(params),
+            adapter_parameter_count=count_parameters(adapter_params),
+        )
+        if not args.window:
+            print(f"Using adapter: {adapter_checkpoint_path}")
+
+    params = jax.device_put(params, device)
+    if adapter_params is not None:
+        adapter_params = jax.device_put(adapter_params, device)
     _, nonparam = init_inference_state(
         model,
         key_params,
@@ -1000,10 +1051,24 @@ def main() -> None:
         batch_size=1,
         pad_token_id=pad_token_id,
         use_kv_cache=True,
+        params=params,
+        adapter_params=adapter_params,
     )
-    params = jax.device_put(params, device)
     base_state = jax.device_put(nonparam, device)
-    prefill_fn, decode_fn = make_prefill_and_decode_fns(model)
+    raw_prefill_fn, raw_decode_fn = make_prefill_and_decode_fns(model)
+
+    def prefill_fn(params, state, prompt):
+        return raw_prefill_fn(params, state, prompt, adapter_params)
+
+    def decode_fn(params, state, last_token, position, **kwargs):
+        return raw_decode_fn(
+            params,
+            state,
+            last_token,
+            position,
+            adapter_params=adapter_params,
+            **kwargs,
+        )
 
     def print_response(response_text: str, prefill_time: float, decode_time: float) -> None:
         print(f"GIANT: {response_text}\n")

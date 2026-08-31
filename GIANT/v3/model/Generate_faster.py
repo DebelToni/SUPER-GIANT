@@ -15,6 +15,12 @@ from transformers import AutoTokenizer
 from GIANT.v3.model.GiantGPT import GiantGPT
 from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
 from GIANT.v3.model.jit_inference import init_inference_state, make_prefill_and_decode_fns
+from GIANT.v3.model.lora import (
+    assert_tree_compatible,
+    count_parameters,
+    lora_config_from_mapping,
+    validate_adapter_checkpoint_manifest,
+)
 from GIANT.v3.device_utils import select_default_device
 
 @dataclass
@@ -82,6 +88,7 @@ def clone_state(tree):
 def generate_tokens(
     *,
     params,
+    adapter_params,
     base_state,
     prefill_fn,
     decode_fn,
@@ -96,7 +103,7 @@ def generate_tokens(
     prompt = jnp.asarray(prompt_ids[None, :], dtype=jnp.int32)
 
     prefill_start = time.perf_counter()
-    nonparam, t_cur, last_tok = prefill_fn(params, state, prompt)
+    nonparam, t_cur, last_tok = prefill_fn(params, state, prompt, adapter_params)
     for leaf in jax.tree_util.tree_leaves((nonparam, last_tok)):
         if isinstance(leaf, jax.Array):
             leaf.block_until_ready()
@@ -118,6 +125,7 @@ def generate_tokens(
         top_k=top_k,
         temperature=temperature,
         rng_key=rng,
+        adapter_params=adapter_params,
     )
     tokens_new.block_until_ready()
     decode_time = time.perf_counter() - decode_start
@@ -249,6 +257,36 @@ def resolve_checkpoint_path(cfg: GenerateFasterConfig, checkpoint: Optional[str]
     return Path(latest)
 
 
+def resolve_adapter_checkpoint_path(
+    cfg: GenerateFasterConfig,
+    adapter: Optional[str],
+) -> Optional[Path]:
+    lora_cfg = getattr(cfg, "lora", None)
+    lora_config = lora_config_from_mapping(lora_cfg)
+    if not lora_config.enabled:
+        if adapter is not None:
+            raise ValueError("--adapter requires lora.enabled=true in the model config")
+        return None
+
+    configured = lora_cfg.get("adapter_checkpoint", None) if lora_cfg is not None else None
+    request = adapter or configured
+    if not request:
+        raise ValueError("LoRA inference requires --adapter or lora.adapter_checkpoint")
+
+    base_root = Path(str(cfg.paths.data_root))
+    path = Path(str(request)).expanduser()
+    if not path.is_absolute():
+        path = (base_root / path).resolve()
+    if path.is_file():
+        return path
+
+    adapters_dir = path if path.name == "adapters" else path / "adapters"
+    latest = latest_ckpt(str(adapters_dir))
+    if latest is None:
+        raise FileNotFoundError(f"No adapter checkpoints found under {adapters_dir}")
+    return Path(latest)
+
+
 def load_tokenizer(cfg: GenerateFasterConfig):
     tok_cfg = cfg.tokenizer
     if tok_cfg.use_custom:
@@ -291,6 +329,7 @@ def build_model(cfg: GenerateFasterConfig, vocab_size: int, context_length: int)
         use_remat=bool(model_cfg.use_remat),
         enable_xsa=bool(model_cfg.enable_xsa),
         causal=True,
+        lora_config=lora_config_from_mapping(getattr(cfg, "lora", None)),
     )
 
 
@@ -423,6 +462,8 @@ def parse_args() -> argparse.Namespace:
                         help="Path to a checkpoint (.npz). Defaults to the newest file in --checkpoint_dir.")
     parser.add_argument("--checkpoint_dir", type=str, default=None,
                         help="Directory (relative to data_root) used when --checkpoint is omitted or set to 'latest'.")
+    parser.add_argument("--adapter", type=str, default=None,
+                        help="LoRA adapter checkpoint or run directory; defaults to lora.adapter_checkpoint.")
     parser.add_argument("--prompt", type=str, default="Once upon",
                         help="Prompt to feed the model.")
     parser.add_argument("--steps", type=int, default=None,
@@ -535,11 +576,52 @@ def main():
     )
 
     model = build_model(cfg, len(tokenizer), context_length)
+    adapter_checkpoint_path = resolve_adapter_checkpoint_path(cfg, args.adapter)
+    if adapter_checkpoint_path is not None and (added_token_rows or added_param_rows):
+        raise ValueError("LoRA inference requires tokenizer and frozen-base vocabulary to match exactly")
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
 
     key_params, key_dropout, key_sample = jax.random.split(rng, 3)
+    key_adapters = jax.random.fold_in(key_params, 1)
+    dummy = jnp.full((1, 1), pad_token_id, dtype=jnp.int32)
+    params_template = jax.eval_shape(
+        lambda params_key, adapters_key: model.init(
+            {"params": params_key, "adapters": adapters_key},
+            dummy,
+            deterministic=True,
+        )["params"],
+        key_params,
+        key_adapters,
+    )
+    assert_tree_compatible(params_template, params, label="base checkpoint")
+
+    adapter_params = None
+    if adapter_checkpoint_path is not None:
+        _, initialized = model.apply(
+            {"params": params},
+            dummy,
+            deterministic=True,
+            rngs={"adapters": key_adapters},
+            mutable=["adapters"],
+        )
+        adapter_params = load_params(adapter_checkpoint_path)
+        assert_tree_compatible(
+            initialized["adapters"], adapter_params, label="LoRA adapter checkpoint"
+        )
+        validate_adapter_checkpoint_manifest(
+            adapter_checkpoint_path,
+            base_checkpoint=checkpoint_path,
+            config=model.lora_config,
+            base_parameter_count=count_parameters(params),
+            adapter_parameter_count=count_parameters(adapter_params),
+        )
+        print(f"Using adapter: {adapter_checkpoint_path}")
+
+    params = jax.device_put(params, device)
+    if adapter_params is not None:
+        adapter_params = jax.device_put(adapter_params, device)
     _, nonparam = init_inference_state(
         model,
         key_params,
@@ -547,15 +629,16 @@ def main():
         batch_size=1,
         pad_token_id=pad_token_id,
         use_kv_cache=True,
+        params=params,
+        adapter_params=adapter_params,
     )
-
-    params = jax.device_put(params, device)
     nonparam = jax.device_put(nonparam, device)
 
     base_state = nonparam
     prefill_fn, decode_fn = make_prefill_and_decode_fns(model)
     tokens_new, prefill_time, decode_time, key_sample = generate_tokens(
         params=params,
+        adapter_params=adapter_params,
         base_state=base_state,
         prefill_fn=prefill_fn,
         decode_fn=decode_fn,

@@ -25,6 +25,13 @@ def build_train_batch(
     diff = jnp.full_like(clean, mask_id)
 
     input_ids = jnp.concatenate([clean, diff], axis=1)
+    adapter_mask = jnp.concatenate(
+        [
+            jnp.zeros_like(clean, dtype=jnp.bool_),
+            jnp.ones_like(diff, dtype=jnp.bool_),
+        ],
+        axis=1,
+    )
 
     pos = jnp.arange(seq_len, dtype=jnp.int32)
     position_ids = jnp.broadcast_to(pos[None, :], (batch_size, seq_len))
@@ -73,6 +80,7 @@ def build_train_batch(
 
     return {
         "input_ids": input_ids,
+        "adapter_mask": adapter_mask,
         "position_ids": position_ids,
         "labels": labels,
         "loss_mask_ntp": loss_mask_ntp,

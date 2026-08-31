@@ -1,0 +1,91 @@
+# Timed frozen SmolLM-135M validation with token-routed o_proj LoRA.
+# The clean/AR rows stay adapter-off; only diffusion rows train the adapter.
+model:
+  embedding_size: 576
+  num_heads: 9
+  num_kv_heads: 3
+  num_layers: 30
+  feed_forward_size: 1536
+  rope_dim: 64
+  context_length: 256
+  dropout_rate: 0.0
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  dropout: 0.0
+  target_modules: [o_proj]
+  routing: token
+  base_checkpoint: "/proj/giant-data/TiDAR/smol/smollm-135m.npz"
+  adapter_checkpoint: null
+  separate_mask_embedding: true
+
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"
+  use_custom: true
+  custom_path: "/proj/giant-data/TiDAR/tokenizers/cosmo2_tidar_lora_smoke"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+
+tidar:
+  draft_length: 8
+  attn_bias_value: -1.0e10
+  decode_predraft_sampling_mode: staged
+
+inference:
+  stop_on_eos: true
+  max_decode_steps: 64
+  temperature: 1.0
+  top_k: 0
+  draft_length: 8
+
+optimizer:
+  base_learning_rate: 1.0e-3
+  min_learning_rate: 1.0e-4
+  warmup_steps: 50
+  weight_decay: 0.0
+  gradient_clip_norm: 0.5
+  weight_decay_exclusions: [bias, scale]
+
+training:
+  finetune_method: lora
+  batch_size: 1
+  gradient_accumulation: 1
+  seed: 20260720
+  dataset_dir: "dataset_artifacts/fineweb_edu_tidar_lora_smoke"
+  log_every: 10
+  checkpoint_every: 25
+  mini_checkpoint_every: 10
+  mini_max_to_keep: 2
+  scan_chunk: 1
+  prefetch_size: 2
+  loss:
+    alpha: 0.0
+    beta: 1.0
+    rho: 0.0
+    chi: 0.0
+    delta: 0.0
+    delta_masked: 0.0
+    eta: 0.0
+    eta_T: 1.0
+    gamma: 0.0
+    gamma_topk: 0
+
+paths:
+  checkpoints_root: "ablations/tidar_smollm135_frozen_lora_o_proj_smoke"
+  dataloader_state_root: "ablations/tidar_smollm135_frozen_lora_o_proj_smoke/training_states/dataloader_state"
+  logs_root: "ablations/tidar_smollm135_frozen_lora_o_proj_smoke/logs"
+
+stages:
+  - name: fineweb_edu_lora_smoke_ctx256
+    dataset: fineweb_edu_ctx512
+    seq_len: 256
+    epochs: 100             # external timeout controls the validation duration
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 1.0
+
+qa_finetune: {}

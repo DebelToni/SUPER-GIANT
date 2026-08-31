@@ -70,7 +70,8 @@ Important behavior:
   equals `argmax(verify_logits)` for that position.
 - **Sampling mode** (`temperature > 0`): uses standard speculative decoding
   acceptance ratio `min(1, p/q)` with `p` and `q` derived from temperature/top‑k
-  logits.
+  logits. The first rejection samples from normalized `max(p-q, 0)`, not from
+  `p`; `test_speculative_sampling.py` verifies recovery of the target distribution.
 
 ## `inference.py` (Anchor-TiDAR decode loop)
 
@@ -121,6 +122,96 @@ M2   .  .  .  .  .  .  .  .  . |  .  .  .
 - When `stop_on_eos` is enabled, acceptance is truncated at the first EOS
   within the committed window.
 
+## Frozen-base, token-routed LoRA
+
+The reusable implementation lives in `GIANT/v3/model/lora.py`; TiDAR wires it
+into its own transformer because TiDAR does not import GIANT's causal-only
+`GiantGPT` implementation.
+
+Runtime routes are explicit boolean arrays:
+
+```text
+training [clean | diffusion]:          [off * S | on * S]
+prefill [prompt | initial masks]:      [off * P | on * K]
+decode [verify | predraft]:            [off * K | on * K²]
+```
+
+`GiantTiDAR.__call__` requires `adapter_mask` whenever `lora.routing=token`.
+The same route reaches every configured projection in the layers selected by
+`lora.layer_indices` (`null` selects all layers). Optional
+`stop_gradient_before_lora` detaches the prefix before the first selected layer;
+TiDAR training also fixes the separate mask embedding in that mode. Verifier queries cannot attend predraft positions, and only the first K
+adapter-off KVs are optimistically written by a decode step.
+
+Frozen weights stay under `params`; LoRA and the mask input embedding stay under
+`adapters`. The mask ID is one position beyond the original tokenizer/model
+vocabulary, but the tied embedding/LM-head matrix retains its original row
+count. Mask inputs are replaced with the separate adapter-owned vector before
+the transformer, so verifier softmax normalization still covers exactly the
+base vocabulary.
+
+LoRA TiDAR checkpoints are adapter-only NPZs under `adapters/`. Inference loads
+the original base with `--checkpoint` and the adapter with `--adapter`:
+
+```bash
+/opt/venv/bin/python TiDAR/model/inference.py \
+  --config /path/to/token_routed_lora.yml \
+  --checkpoint /path/to/base.npz \
+  --adapter /path/to/adapter.npz \
+  --prompt "Once upon"
+```
+
+See `GIANT/v3/model/LORA.md` for shared configuration, checkpoint, and test
+details. The RTX 5090 last-quarter benchmark and its quality caveat are recorded
+in `Docs/LoRA_Last_Quarter_Speed_Experiment.md`.
+
+## Validated frozen-base TiDAR LoRA pod run
+
+`model/training_configs/Ablations/tidar_smollm135_frozen_lora_o_proj_smoke.yml`
+was validated on one RTX A6000 using real FineWeb-Edu rows at clean context 256
+(the model input is the doubled 512-token clean/diffusion layout). The run used
+rank-16, alpha-32 `o_proj` LoRA, an adapter-owned mask input, `alpha=0`, and
+`beta=1`.
+
+```text
+frozen base parameters:      134,515,008
+trainable adapter values:        553,536 (0.412%)
+timed training:                    600 s
+steps at timed stop:                 5,450
+steps after resume check:             5,475
+clean tokens after resume:         1,401,600
+observed peak GPU memory:              2,378 MiB
+first logged loss:                      8.9651
+last timed loss:                         4.7394
+first/last 100-log mean loss:     6.0819 / 5.7068
+```
+
+The batch size was deliberately one for a correctness run, so the 18.7% mean
+sampled GPU utilization is not a throughput target. Frozen LoRA removes base
+gradients and optimizer state; it does not imply a proportional reduction in
+backbone forward/backward FLOPs.
+
+At `K=8`, the production 30-layer BF16 mixed pass had bit-exact verifier logits
+and committed KVs relative to an all-off route (both maximum absolute
+differences were zero), while the 64 predraft rows changed. Greedy cached
+inference generated 48 tokens in 32 iterations with deployed acceptance 1.50
+tokens/iteration (maximum 3) and 480.5 tokens/s after compilation. These are
+deployed measurements; training `accept` and `greedy_acc` remain overlap
+proxies.
+
+The 100,000-sample analytic residual-sampling test passed. In an adapter-backed
+256-sample-per-arm distribution check, position 0 was pathwise identical and
+position 1 had L1 0.1797. A 100,000-draw pooled-null simulation expected mean
+L1 0.1958, with p=0.626 for a difference at least as large, so this run found no
+statistical evidence of a sampling-distribution mismatch.
+
+Artifacts, exact config, source diff, logs, GPU samples, adapter checkpoints,
+and optimizer state are stored at:
+
+```text
+s3://giant-data/TiDAR/ablations/tidar_smollm135_frozen_lora_o_proj_smoke/
+```
+
 ## `distributional_invariance_test.py`
 
 This script checks that **non‑greedy sampling** from Anchor‑TiDAR matches a
@@ -131,6 +222,8 @@ What it does:
 - Builds histograms for the first `num_tokens` positions.
 - Reports L1/KL vs AR, plus per‑token deltas and a summary block.
 - Optionally writes a JSON file to `cfg.paths.data_root`.
+- Accepts `--config`, `--global_config`, and `--adapter`; in LoRA mode the AR
+  baseline runs the loaded adapter collection with an all-off route.
 
 Example (large N):
 

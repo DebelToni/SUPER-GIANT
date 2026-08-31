@@ -26,6 +26,10 @@ English 100M reference stack:
 - data: [Data/giant_chat_pretraining_4b.yml](Data/giant_chat_pretraining_4b.yml), [Data/giant_chat_curated_booster_strong56.yml](Data/giant_chat_curated_booster_strong56.yml), [Data/giant_chat_sft_4x.yml](Data/giant_chat_sft_4x.yml)
 - training: [Training/1_pretraining_100m_ctx256_4b.yml](Training/1_pretraining_100m_ctx256_4b.yml), [Training/2_curated_booster_100m_ctx256.yml](Training/2_curated_booster_100m_ctx256.yml), [Training/3_sft_100m_ctx256_4x.yml](Training/3_sft_100m_ctx256_4x.yml)
 
+LoRA smoke test:
+
+- [Training/lora_tinystories_30m_smoke.yml](Training/lora_tinystories_30m_smoke.yml) adapts the existing TinyStories AR checkpoint while saving only adapter state. See [../model/LORA.md](../model/LORA.md).
+
 ## Rules
 
 - `Tokenizer/*.yml` produces a tokenizer directory.

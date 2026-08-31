@@ -1,0 +1,88 @@
+# RTX 5090 control: rank-16 o_proj LoRA in all 30 layers.
+# The mask embedding is fixed by a gradient boundary before layer 0.
+# 8,192 clean ctx2048 rows -> 2,048 microbatches at batch 4.
+
+model:
+  embedding_size: 576
+  num_heads: 9
+  num_kv_heads: 3
+  num_layers: 30
+  feed_forward_size: 1536
+  rope_dim: 64
+  context_length: 2048
+  dropout_rate: 0.0
+  use_remat: false
+  param_dtype: float32
+  compute_dtype: bfloat16
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  dropout: 0.0
+  target_modules: [o_proj]
+  routing: token
+  layer_indices: null
+  stop_gradient_before_lora: true
+  base_checkpoint: "/proj/giant-data/TiDAR/smol/smollm-135m.npz"
+  adapter_checkpoint: null
+  separate_mask_embedding: true
+
+training:
+  finetune_method: lora
+  batch_size: 4
+  gradient_accumulation: 4
+  seed: 7777
+  dataset_dir: "dataset_artifacts/Greedy_exp_500m"
+  log_every: 25
+  checkpoint_every: 1000000
+  mini_checkpoint_every: 0
+  mini_max_to_keep: 1
+  scan_chunk: 1
+  prefetch_size: 2
+  loss:
+    alpha: 1.0
+    beta: 1.0
+    rho: 0.0
+    chi: 0.0
+    delta: 3.0
+    delta_masked: 0.0
+    eta: 0.0
+    eta_T: 1.0
+    gamma: 0.0
+    gamma_topk: 0
+
+optimizer:
+  base_learning_rate: 5.0e-5
+  min_learning_rate: 5.0e-6
+  warmup_steps: 2048
+  weight_decay: 0.01
+  gradient_clip_norm: 0.5
+  weight_decay_exclusions: [bias, scale, mask_embedding]
+
+tokenizer:
+  name: "HuggingFaceTB/cosmo2-tokenizer"
+  use_custom: true
+  custom_path: "/proj/giant-data/TiDAR/tokenizers/cosmo2_tidar_lora_smoke"
+  cache_dir: "/proj/giant-data/hf_cache/tokenizer_cache"
+
+tidar:
+  draft_length: 8
+  attn_bias_value: -1.0e10
+  decode_predraft_sampling_mode: staged
+
+paths:
+  checkpoints_root: "benchmarks/lora_last_quarter_smollm135_5090_ctx2048/all_layers"
+  dataloader_state_root: "benchmarks/lora_last_quarter_smollm135_5090_ctx2048/all_layers/training_states/dataloader_state"
+  logs_root: "benchmarks/lora_last_quarter_smollm135_5090_ctx2048/all_layers/logs"
+
+stages:
+  - name: fineweb_edu_ctx2048_speed
+    dataset: fw_edu_500m
+    seq_len: 2048
+    epochs: 1
+    end_ratio: 1.0
+    shuffle: true
+    fraction: 0.0335544
+
+qa_finetune: {}

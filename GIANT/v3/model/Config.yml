@@ -14,6 +14,16 @@ model:
   param_dtype: float32
   compute_dtype: bfloat16 ###
 
+lora:
+  enabled: false
+  rank: 16
+  alpha: 32.0
+  dropout: 0.0
+  target_modules: [qkv_proj, o_proj, fc1, fc2]
+  routing: global
+  base_checkpoint: null
+  adapter_checkpoint: null
+
 optimizer:
   base_learning_rate: 3.0e-4
   min_learning_rate: 3.0e-5
@@ -27,6 +37,7 @@ optimizer:
     - embedding
 
 training:
+  finetune_method: full
   batch_size: 4 ####
   gradient_accumulation: 1
   max_epochs: 3

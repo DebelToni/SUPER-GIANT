@@ -16,6 +16,19 @@ model:
   param_dtype: float32
   compute_dtype: bfloat16
 
+lora:
+  enabled: false
+  rank: 16
+  alpha: 32.0
+  dropout: 0.0
+  target_modules: [o_proj]
+  routing: token
+  layer_indices: null
+  stop_gradient_before_lora: false
+  base_checkpoint: null
+  adapter_checkpoint: null
+  separate_mask_embedding: true
+
 tidar:
   draft_length: 8
   attn_bias_value: -1.0e10
@@ -40,6 +53,7 @@ optimizer:
     # - embedding
 
 training:
+  finetune_method: full
   batch_size: 8
   gradient_accumulation: 4
   max_epochs: 1

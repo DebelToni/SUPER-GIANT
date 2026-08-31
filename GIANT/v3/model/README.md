@@ -18,6 +18,7 @@ This folder contains the v3 model definition, dataloader, training loop, checkpo
 - [model_mode.py](model_mode.py) - compatibility helpers that now accept decoder mode only
 - [jit_inference.py](jit_inference.py) - KV-cache inference state and JIT generation functions
 - [optimizer_utils.py](optimizer_utils.py) - LR schedule and optimizer construction
+- [lora.py](lora.py) / [LORA.md](LORA.md) - checkpoint-compatible global and token-routed LoRA
 
 ## Training configs to look at first
 
@@ -48,6 +49,12 @@ Resume only an interrupted same-stage run:
 PYTHONPATH=. /opt/venv/bin/python GIANT/v3/model/Run_training.py --config GIANT/v3/Configs/Training/1_pretraining_100m_bg_en_ctx256_32k_1p8b.yml --resume latest
 ```
 
+Run a short adapter-only TinyStories fine-tune:
+
+```bash
+PYTHONPATH=. /opt/venv/bin/python GIANT/v3/model/Run_training.py --config GIANT/v3/Configs/Training/lora_tinystories_30m_smoke.yml
+```
+
 Run chat inference:
 
 ```bash
@@ -61,4 +68,5 @@ PYTHONPATH=. /opt/venv/bin/python GIANT/v3/model/Generate_chat.py --config GIANT
 - `num_kv_heads == num_heads` means full MHA; smaller `num_kv_heads` means GQA.
 - `--init_checkpoint` loads only params and starts step/optimizer fresh.
 - `--resume` loads optimizer/dataloader state and should not be used for stage transitions.
+- LoRA runs keep the frozen checkpoint in `params` and save only trainable state under `adapters/`.
 - Final generated checkpoint paths live under the config's `paths.checkpoints_root`.

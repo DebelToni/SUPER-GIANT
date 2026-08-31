@@ -355,6 +355,8 @@ def anchor_rejection_sample_meta(
 
         p_log = jax.nn.log_softmax(p_logits, axis=-1)
         q_log = jax.nn.log_softmax(q_logits, axis=-1)
+        p_prob = jnp.exp(p_log)
+        q_prob = jnp.exp(q_log)
 
         idx = jnp.arange(k_minus_1, dtype=jnp.int32)
         p_log_tok = p_log[idx, draft_tokens]
@@ -363,7 +365,16 @@ def anchor_rejection_sample_meta(
 
         key, key_u, key_resample = jax.random.split(key, 3)
         u = jax.random.uniform(key_u, (k_minus_1,), dtype=jnp.float32)
-        resampled = jax.random.categorical(key_resample, p_logits, axis=-1).astype(jnp.int32)
+        residual = jnp.maximum(p_prob - q_prob, 0.0)
+        residual_sum = residual.sum(axis=-1, keepdims=True)
+        residual_prob = residual / jnp.maximum(residual_sum, jnp.finfo(jnp.float32).tiny)
+        # A zero residual is unreachable on a true rejection; p is a stable
+        # fallback for degenerate low-precision rounding.
+        residual_prob = jnp.where(residual_sum > 0.0, residual_prob, p_prob)
+        residual_logits = jnp.where(residual_prob > 0.0, jnp.log(residual_prob), -jnp.inf)
+        resampled = jax.random.categorical(
+            key_resample, residual_logits, axis=-1
+        ).astype(jnp.int32)
 
         def step_fn(carry, inputs):
             stopped, accept_count = carry
@@ -464,18 +475,48 @@ def anchor_rejection_sample(
 # KV Cache Utilities  
 # =============================================================================
 
-def init_kv_cache(model, *, batch_size: int, pad_token_id: int):
-    """Initialize empty KV cache by running model with dummy input."""
+def init_kv_cache(
+    model,
+    *,
+    batch_size: int,
+    pad_token_id: int,
+    params=None,
+    adapter_params=None,
+):
+    """Initialize an empty KV cache without duplicating a loaded base tree."""
     dummy = jnp.full((batch_size, 1), pad_token_id, dtype=jnp.int32)
-    variables = model.init(
-        {"params": jax.random.PRNGKey(0)},
+    adapter_mask = None
+    if params is None:
+        init_rngs = {"params": jax.random.PRNGKey(0)}
+        if bool(getattr(getattr(model, "lora_config", None), "enabled", False)):
+            init_rngs["adapters"] = jax.random.PRNGKey(1)
+            adapter_mask = jnp.zeros(dummy.shape, dtype=jnp.bool_)
+        variables = model.init(
+            init_rngs,
+            dummy,
+            deterministic=True,
+            use_kv_cache=True,
+            cur_index=0,
+            write_to_cache=True,
+            adapter_mask=adapter_mask,
+        )
+        return variables["cache"]
+
+    variables = {"params": params}
+    if adapter_params is not None:
+        variables["adapters"] = adapter_params
+        adapter_mask = jnp.zeros(dummy.shape, dtype=jnp.bool_)
+    _, initialized = model.apply(
+        variables,
         dummy,
         deterministic=True,
         use_kv_cache=True,
         cur_index=0,
         write_to_cache=True,
+        adapter_mask=adapter_mask,
+        mutable=["cache"],
     )
-    return variables["cache"]
+    return initialized["cache"]
 
 
 def prefill_prompt(
@@ -485,6 +526,7 @@ def prefill_prompt(
     prompt_ids: jnp.ndarray,
     *,
     kv_cache_len: int,
+    adapter_params=None,
 ):
     """
     Prefill prompt into KV cache.
@@ -504,8 +546,13 @@ def prefill_prompt(
     position_ids = jnp.arange(prompt_len, dtype=jnp.int32)[None, :]
     position_ids = jnp.broadcast_to(position_ids, (batch_size, prompt_len))
     
+    variables = {"params": params, "cache": cache_vars}
+    adapter_mask = None
+    if adapter_params is not None:
+        variables["adapters"] = adapter_params
+        adapter_mask = jnp.zeros(prompt_ids.shape, dtype=jnp.bool_)
     logits, mutated = model.apply(
-        {"params": params, "cache": cache_vars},
+        variables,
         prompt_ids,
         deterministic=True,
         use_kv_cache=True,
@@ -513,6 +560,7 @@ def prefill_prompt(
         cur_index=0,
         position_ids=position_ids,
         kv_cache_len=kv_cache_len,
+        adapter_mask=adapter_mask,
         mutable=["cache"],
     )
     
@@ -530,6 +578,7 @@ def prefill_prompt_with_draft(
     mask_id: int,
     kv_cache_len: int,
     bias_value: float = -1.0e10,
+    adapter_params=None,
 ):
     """
     Prefill prompt and compute initial draft in a single forward pass.
@@ -561,8 +610,19 @@ def prefill_prompt_with_draft(
         bias_value=bias_value,
     )
 
+    variables = {"params": params, "cache": cache_vars}
+    adapter_mask = None
+    if adapter_params is not None:
+        variables["adapters"] = adapter_params
+        adapter_mask = jnp.concatenate(
+            [
+                jnp.zeros((batch_size, prompt_len), dtype=jnp.bool_),
+                jnp.ones((batch_size, draft_len), dtype=jnp.bool_),
+            ],
+            axis=1,
+        )
     logits, mutated = model.apply(
-        {"params": params, "cache": cache_vars},
+        variables,
         step_tokens,
         deterministic=True,
         use_kv_cache=True,
@@ -572,6 +632,7 @@ def prefill_prompt_with_draft(
         attn_bias=attn_bias,
         position_ids=position_ids,
         kv_cache_len=kv_cache_len,
+        adapter_mask=adapter_mask,
         mutable=["cache"],
     )
 

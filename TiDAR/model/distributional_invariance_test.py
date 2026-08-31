@@ -41,6 +41,7 @@ from TiDAR.model.inference import (
     load_params,
     load_tokenizer,
     make_anchor_tidar_generate_fn,
+    resolve_adapter_checkpoint_path,
     resolve_checkpoint_path,
     tokenize_prompt,
 )
@@ -50,6 +51,12 @@ from TiDAR.model.tidar_core import (
     sample_tokens,
 )
 from TiDAR.model.Prepare_mask_token import ensure_tidar_mask_token, resize_embedding_params
+from GIANT.v3.model.lora import (
+    assert_tree_compatible,
+    count_parameters,
+    lora_config_from_mapping,
+    validate_adapter_checkpoint_manifest,
+)
 
 
 def parse_draft_lens(value: str) -> List[int]:
@@ -64,8 +71,11 @@ def parse_draft_lens(value: str) -> List[int]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("Distributional invariance test")
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--global_config", type=str, default=None)
     parser.add_argument("--checkpoint", type=str, default="latest")
     parser.add_argument("--checkpoint_dir", type=str, default=None)
+    parser.add_argument("--adapter", type=str, default=None)
     parser.add_argument("--prompt", type=str, default="Hello")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_k", type=int, default=0)
@@ -132,6 +142,7 @@ def collect_histograms(
     prefix_len,
     prev_logit,
     initial_draft_logits,
+    adapter_params,
     prompt_len: int,
     num_tokens: int,
     seed: int,
@@ -149,6 +160,7 @@ def collect_histograms(
             prev_logit,
             rng,
             initial_draft_logits,
+            adapter_params,
         )
         out_ids_final.block_until_ready()
         generated_count = int(np.asarray(generated))
@@ -166,6 +178,7 @@ def collect_histograms_ar(
     *,
     model,
     params,
+    adapter_params,
     cache_vars,
     prefix_len,
     prev_logit,
@@ -196,8 +209,13 @@ def collect_histograms_ar(
                 break
 
             token_pos = jnp.array([cur_prefix_len], dtype=jnp.int32)
+            variables = {"params": params, "cache": cache}
+            adapter_mask = None
+            if adapter_params is not None:
+                variables["adapters"] = adapter_params
+                adapter_mask = jnp.zeros((1, 1), dtype=jnp.bool_)
             logits, mutated = model.apply(
-                {"params": params, "cache": cache},
+                variables,
                 token[None, None],
                 deterministic=True,
                 use_kv_cache=True,
@@ -205,6 +223,7 @@ def collect_histograms_ar(
                 cur_index=cur_prefix_len,
                 position_ids=token_pos[None, :],
                 kv_cache_len=kv_cache_len,
+                adapter_mask=adapter_mask,
                 mutable=["cache"],
             )
             cache = mutated["cache"]
@@ -236,10 +255,17 @@ def main() -> None:
     draft_lens = parse_draft_lens(args.draft_lens)
     baseline_label = "ar"
 
-    cfg = load_configs()
+    cfg = load_configs(args.config, args.global_config)
     jax.config.update("jax_default_matmul_precision", cfg.model.compute_dtype)
 
-    checkpoint_path = resolve_checkpoint_path(cfg, args.checkpoint, args.checkpoint_dir)
+    lora_config = lora_config_from_mapping(cfg.lora)
+    if lora_config.enabled and not bool(cfg.lora.separate_mask_embedding):
+        raise ValueError("Frozen-base TiDAR testing requires lora.separate_mask_embedding=true")
+    checkpoint_request = args.checkpoint
+    if lora_config.enabled and checkpoint_request == "latest" and cfg.lora.base_checkpoint:
+        checkpoint_request = str(cfg.lora.base_checkpoint)
+    checkpoint_path = resolve_checkpoint_path(cfg, checkpoint_request, args.checkpoint_dir)
+    adapter_checkpoint_path = resolve_adapter_checkpoint_path(cfg, args.adapter, args.checkpoint_dir)
     tokenizer = load_tokenizer(cfg)
 
     context_length = args.context_length if args.context_length is not None else int(cfg.model.context_length)
@@ -257,22 +283,81 @@ def main() -> None:
 
     # Setup mask token (match inference.py behavior)
     base_token = getattr(cfg.tokenizer, "mask_token_override", None) or "[MASK]"
-    mask_token, mask_id, added_tokens = ensure_tidar_mask_token(tokenizer, base_token=base_token)
+    mask_token, mask_id, added_tokens = ensure_tidar_mask_token(
+        tokenizer, base_token=base_token, force_new=lora_config.enabled
+    )
     if added_tokens:
         print(f"Added mask token '{mask_token}' (id={mask_id})")
     else:
         print(f"Using mask token '{mask_token}' (id={mask_id})")
 
-    model = build_model(cfg, len(tokenizer), context_length, max_draft_len)
     params = load_params(checkpoint_path)
+    base_vocab_size = int(params["Embed_0"]["embedding"].shape[0])
+    if lora_config.enabled:
+        if mask_id < base_vocab_size or len(tokenizer) != base_vocab_size + 1:
+            raise ValueError(
+                "Frozen-base TiDAR requires one input-only mask outside the original vocabulary"
+            )
+        if prompt_ids.size and int(prompt_ids.max()) >= base_vocab_size:
+            raise ValueError("Prompt contains a token outside the frozen base vocabulary")
+        model_vocab_size = base_vocab_size
+    else:
+        model_vocab_size = len(tokenizer)
+
+    model = build_model(
+        cfg,
+        model_vocab_size,
+        context_length,
+        max_draft_len,
+        mask_token_id=int(mask_id) if lora_config.enabled else None,
+    )
 
     rng = jax.random.PRNGKey(args.seed)
     rng, resize_key = jax.random.split(rng)
-    params, added_rows = resize_embedding_params(params, len(tokenizer), key=resize_key)
-    if added_rows:
-        print(f"Expanded embeddings by {added_rows} rows")
+    adapter_params = None
+    if lora_config.enabled:
+        adapters_init_key = jax.random.fold_in(resize_key, 2)
+        dummy = jnp.zeros((1, 2), dtype=jnp.int32)
+        dummy_route = jnp.zeros(dummy.shape, dtype=jnp.bool_)
+        params_template = jax.eval_shape(
+            lambda params_key, adapters_key: model.init(
+                {"params": params_key, "adapters": adapters_key},
+                dummy,
+                deterministic=True,
+                adapter_mask=dummy_route,
+            )["params"],
+            resize_key,
+            adapters_init_key,
+        )
+        assert_tree_compatible(params_template, params, label="TiDAR base checkpoint")
+        _, initialized = model.apply(
+            {"params": params},
+            dummy,
+            deterministic=True,
+            adapter_mask=dummy_route,
+            rngs={"adapters": adapters_init_key},
+            mutable=["adapters"],
+        )
+        assert adapter_checkpoint_path is not None
+        adapter_params = load_params(adapter_checkpoint_path)
+        assert_tree_compatible(
+            initialized["adapters"], adapter_params, label="TiDAR adapter checkpoint"
+        )
+        validate_adapter_checkpoint_manifest(
+            adapter_checkpoint_path,
+            base_checkpoint=checkpoint_path,
+            config=lora_config,
+            base_parameter_count=count_parameters(params),
+            adapter_parameter_count=count_parameters(adapter_params),
+        )
+    else:
+        params, added_rows = resize_embedding_params(params, len(tokenizer), key=resize_key)
+        if added_rows:
+            print(f"Expanded embeddings by {added_rows} rows")
 
     params = jax.device_put(params)
+    if adapter_params is not None:
+        adapter_params = jax.device_put(adapter_params)
 
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
@@ -282,7 +367,13 @@ def main() -> None:
     eos_id_for_jit = int(eos_id) if eos_id is not None else -1
 
     # Prefill prompt + initial draft once for the AR baseline.
-    empty_cache = init_kv_cache(model, batch_size=1, pad_token_id=pad_token_id)
+    empty_cache = init_kv_cache(
+        model,
+        batch_size=1,
+        pad_token_id=pad_token_id,
+        params=params,
+        adapter_params=adapter_params,
+    )
     empty_cache = jax.device_put(empty_cache)
     cache_vars, prefix_len, prev_logit, _ = prefill_prompt_with_draft(
         model,
@@ -293,6 +384,7 @@ def main() -> None:
         mask_id=int(mask_id),
         kv_cache_len=context_length,
         bias_value=float(cfg.tidar.attn_bias_value),
+        adapter_params=adapter_params,
     )
 
     buffer_len = required_len
@@ -306,6 +398,7 @@ def main() -> None:
     ar_counters = collect_histograms_ar(
         model=model,
         params=params,
+        adapter_params=adapter_params,
         cache_vars=cache_vars,
         prefix_len=prefix_len,
         prev_logit=prev_logit,
@@ -331,6 +424,7 @@ def main() -> None:
             mask_id=int(mask_id),
             kv_cache_len=context_length,
             bias_value=float(cfg.tidar.attn_bias_value),
+            adapter_params=adapter_params,
         )
         generate_fn = make_anchor_tidar_generate_fn(
             model,
@@ -354,6 +448,7 @@ def main() -> None:
             prefix_len=prefix_len,
             prev_logit=prev_logit,
             initial_draft_logits=initial_draft_logits,
+            adapter_params=adapter_params,
             prompt_len=prompt_len,
             num_tokens=args.num_tokens,
             seed=args.seed,

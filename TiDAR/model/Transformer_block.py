@@ -7,6 +7,8 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import RMSNorm
 
+from GIANT.v3.model.lora import LoRAConfig, LoRAUpdate
+
 IS_GPU = any(dev.platform == "gpu" for dev in jax.local_devices())
 
 def _rotate_every_two(x):
@@ -63,6 +65,7 @@ class NativeJaxSelfAttention(nn.Module):
     rotary_dim: int = 64
     rope_theta: float = 10000.0
     draft_len: int = 0
+    lora_config: LoRAConfig = LoRAConfig()
 
     def setup(self):
         assert self.qkv_features % self.num_heads == 0, "qkv_features must be divisible by num_heads"
@@ -86,6 +89,26 @@ class NativeJaxSelfAttention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
         )
+        if self.lora_config.targets("qkv_proj"):
+            self.qkv_lora = LoRAUpdate(
+                out_features=total_out,
+                rank=self.lora_config.rank,
+                alpha=self.lora_config.alpha,
+                dropout_rate=self.lora_config.dropout,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                name="qkv_proj_lora",
+            )
+        if self.lora_config.targets("o_proj"):
+            self.o_lora = LoRAUpdate(
+                out_features=self.qkv_features,
+                rank=self.lora_config.rank,
+                alpha=self.lora_config.alpha,
+                dropout_rate=self.lora_config.dropout,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                name="o_proj_lora",
+            )
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
         rope_len = int(self.context_length) + (2 * int(self.draft_len))
@@ -117,6 +140,7 @@ class NativeJaxSelfAttention(nn.Module):
         prefix_len: Optional[int] = None,
         cache_write_len: Optional[int] = None,
         kv_cache_len: Optional[int] = None,
+        adapter_mask: Optional[jax.Array] = None,
     ):
         b, l, _ = x.shape
         impl = "cudnn" if IS_GPU else "xla"
@@ -126,6 +150,13 @@ class NativeJaxSelfAttention(nn.Module):
         kv_size = self.num_kv * head_dim
 
         qkv = self.qkv_proj(x)
+        if self.lora_config.targets("qkv_proj"):
+            qkv = self.qkv_lora(
+                x,
+                qkv,
+                adapter_mask=adapter_mask,
+                deterministic=deterministic,
+            )
         q_chunk, k_chunk, v_chunk = jnp.split(qkv, [q_size, q_size + kv_size], axis=-1)
         q = q_chunk.reshape(b, l, self.num_heads, head_dim)
         k = k_chunk.reshape(b, l, self.num_kv, head_dim)
@@ -259,7 +290,15 @@ class NativeJaxSelfAttention(nn.Module):
                 )
             y = y.reshape(b, l, self.qkv_features)
 
-        y = self.o_proj(y)
+        o_input = y
+        y = self.o_proj(o_input)
+        if self.lora_config.targets("o_proj"):
+            y = self.o_lora(
+                o_input,
+                y,
+                adapter_mask=adapter_mask,
+                deterministic=deterministic,
+            )
         y = self.dropout(y, deterministic=deterministic)
         return y
 
@@ -279,6 +318,7 @@ class TinyTransformerBlock(nn.Module):
     param_dtype: jnp.dtype = jnp.float32
     draft_len: int = 0
     use_remat: bool = False
+    lora_config: LoRAConfig = LoRAConfig()
 
     @nn.compact
     def __call__(
@@ -294,8 +334,13 @@ class TinyTransformerBlock(nn.Module):
         prefix_len: Optional[int] = None,
         cache_write_len: Optional[int] = None,
         kv_cache_len: Optional[int] = None,
+        adapter_mask: Optional[jax.Array] = None,
     ):
-        def _block(module: "TinyTransformerBlock", h: jnp.ndarray) -> jnp.ndarray:
+        def _block(
+            module: "TinyTransformerBlock",
+            h: jnp.ndarray,
+            route: Optional[jax.Array],
+        ) -> jnp.ndarray:
             residual = h
             h_norm = RMSNorm(name="rms1", dtype=self.dtype, epsilon=1e-5)(h)
             h_attn = NativeJaxSelfAttention(
@@ -309,6 +354,7 @@ class TinyTransformerBlock(nn.Module):
                 rotary_dim=module.rope_dim,
                 rope_theta=module.rope_theta,
                 draft_len=module.draft_len,
+                lora_config=module.lora_config,
             )(
                 h_norm,
                 deterministic=deterministic,
@@ -320,6 +366,7 @@ class TinyTransformerBlock(nn.Module):
                 prefix_len=prefix_len,
                 cache_write_len=cache_write_len,
                 kv_cache_len=kv_cache_len,
+                adapter_mask=route,
             )
             h = residual + h_attn
 
@@ -329,27 +376,59 @@ class TinyTransformerBlock(nn.Module):
             gate_dim = module.d_ff
             proj_dim = gate_dim * 2
 
+            fc1_input = h_norm
             h_proj = nn.Dense(
                 proj_dim,
                 name="fc1",
                 dtype=module.dtype,
                 param_dtype=module.param_dtype,
                 use_bias=False,
-            )(h_norm)
+            )(fc1_input)
+            if module.lora_config.targets("fc1"):
+                h_proj = LoRAUpdate(
+                    out_features=proj_dim,
+                    rank=module.lora_config.rank,
+                    alpha=module.lora_config.alpha,
+                    dropout_rate=module.lora_config.dropout,
+                    dtype=module.dtype,
+                    param_dtype=module.param_dtype,
+                    name="fc1_lora",
+                )(
+                    fc1_input,
+                    h_proj,
+                    adapter_mask=route,
+                    deterministic=deterministic,
+                )
 
             u, v = jnp.split(h_proj, 2, axis=-1)
             h_gate = nn.silu(u)
             h_ffn = h_gate * v
 
+            fc2_input = h_ffn
             h_ffn = nn.Dense(
                 module.d_model,
                 name="fc2",
                 dtype=module.dtype,
                 param_dtype=module.param_dtype,
                 use_bias=False,
-            )(h_ffn)
+            )(fc2_input)
+            if module.lora_config.targets("fc2"):
+                h_ffn = LoRAUpdate(
+                    out_features=module.d_model,
+                    rank=module.lora_config.rank,
+                    alpha=module.lora_config.alpha,
+                    dropout_rate=module.lora_config.dropout,
+                    dtype=module.dtype,
+                    param_dtype=module.param_dtype,
+                    name="fc2_lora",
+                )(
+                    fc2_input,
+                    h_ffn,
+                    adapter_mask=route,
+                    deterministic=deterministic,
+                )
             h_ffn = nn.Dropout(rate=module.dropout_rate)(h_ffn, deterministic=deterministic)
             return residual + h_ffn
 
         block_fn = nn.remat(_block) if self.use_remat else _block
-        return block_fn(self, x)
+        return block_fn(self, x, adapter_mask)

@@ -23,8 +23,8 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "true")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "1.0")
 
 import jax
 import jax.numpy as jnp
@@ -47,6 +47,12 @@ from TiDAR.model.tidar_core import (
     anchor_rejection_sample_meta,
 )
 from GIANT.v3.model.checkpoint_manager import load_npz, latest as latest_ckpt
+from GIANT.v3.model.lora import (
+    assert_tree_compatible,
+    count_parameters,
+    lora_config_from_mapping,
+    validate_adapter_checkpoint_manifest,
+)
 
 _VALID_DECODE_PREDRAFT_SAMPLING_MODES = {"staged", "single_pass"}
 
@@ -103,6 +109,37 @@ def resolve_checkpoint_path(cfg: TiDARConfig, checkpoint: Optional[str], checkpo
     return Path(latest)
 
 
+def resolve_adapter_checkpoint_path(
+    cfg: TiDARConfig,
+    adapter: Optional[str],
+    checkpoint_dir: Optional[str],
+) -> Optional[Path]:
+    lora_config = lora_config_from_mapping(cfg.lora)
+    if not lora_config.enabled:
+        if adapter is not None:
+            raise ValueError("--adapter requires lora.enabled=true")
+        return None
+
+    request = adapter or cfg.lora.adapter_checkpoint
+    base_root = Path(str(cfg.paths.data_root))
+    if request:
+        path = Path(str(request)).expanduser()
+        if not path.is_absolute():
+            path = (base_root / path).resolve()
+        if path.is_file():
+            return path
+    else:
+        path = Path(checkpoint_dir or cfg.paths.checkpoints_root)
+        if not path.is_absolute():
+            path = (base_root / path).resolve()
+
+    adapters_dir = path if path.name == "adapters" else path / "adapters"
+    latest = latest_ckpt(str(adapters_dir))
+    if latest is None:
+        raise FileNotFoundError(f"No adapter checkpoints found under {adapters_dir}")
+    return Path(latest)
+
+
 def load_tokenizer(cfg: TiDARConfig):
     tok_cfg = cfg.tokenizer
     if tok_cfg.use_custom:
@@ -121,7 +158,14 @@ def load_tokenizer(cfg: TiDARConfig):
     return tokenizer
 
 
-def build_model(cfg: TiDARConfig, vocab_size: int, context_length: int, draft_len: int) -> TiDAR:
+def build_model(
+    cfg: TiDARConfig,
+    vocab_size: int,
+    context_length: int,
+    draft_len: int,
+    *,
+    mask_token_id: Optional[int] = None,
+) -> TiDAR:
     model_cfg = cfg.model
     return TiDAR(
         vocab_size=vocab_size,
@@ -138,6 +182,9 @@ def build_model(cfg: TiDARConfig, vocab_size: int, context_length: int, draft_le
         compute_dtype=model_cfg.compute_dtype,
         use_remat=model_cfg.use_remat,
         draft_len=int(draft_len),
+        lora_config=lora_config_from_mapping(cfg.lora),
+        mask_token_id=mask_token_id,
+        separate_mask_embedding=bool(cfg.lora.separate_mask_embedding) if cfg.lora.enabled else False,
     )
 
 
@@ -201,6 +248,15 @@ def make_anchor_tidar_generate_fn(
     # Pre-build templates
     decode_bias = jax.device_put(build_decode_bias_template(cache_len, draft_len, bias_value))
     position_template = jax.device_put(build_decode_position_template(draft_len))
+    decode_adapter_mask = jax.device_put(
+        jnp.concatenate(
+            [
+                jnp.zeros((1, draft_len), dtype=jnp.bool_),
+                jnp.ones((1, draft_len * draft_len), dtype=jnp.bool_),
+            ],
+            axis=1,
+        )
+    )
     
     # Pre-build mask token arrays
     predraft_masks = jnp.full((draft_len * draft_len,), mask_id, dtype=jnp.int32)
@@ -208,7 +264,7 @@ def make_anchor_tidar_generate_fn(
     
     idx_k = jax.device_put(jnp.arange(draft_len, dtype=jnp.int32))
     
-    def decode_apply(params, cache_vars, step_tokens, pos_ids, prefix_len):
+    def decode_apply(params, adapter_params, cache_vars, step_tokens, pos_ids, prefix_len):
         """
         Forward pass for decode step with optimistic KV write for current draft.
 
@@ -217,8 +273,13 @@ def make_anchor_tidar_generate_fn(
         is still masked by the same `prefix_len`. Future steps commit/rollback by
         moving the prefix pointer only.
         """
+        variables = {"params": params, "cache": cache_vars}
+        adapter_mask = None
+        if adapter_params is not None:
+            variables["adapters"] = adapter_params
+            adapter_mask = decode_adapter_mask
         logits, mutated = model.apply(
-            {"params": params, "cache": cache_vars},
+            variables,
             step_tokens[None, :],  # [1, q_len]
             deterministic=True,
             use_kv_cache=True,
@@ -228,6 +289,7 @@ def make_anchor_tidar_generate_fn(
             attn_bias=decode_bias,
             position_ids=pos_ids[None, :],
             kv_cache_len=cache_len,
+            adapter_mask=adapter_mask,
             mutable=["cache"],
         )
         return logits[0], mutated["cache"]  # [q_len, V], cache
@@ -244,6 +306,7 @@ def make_anchor_tidar_generate_fn(
         prev_logit: jnp.ndarray,       # [V] logit for first anchor
         rng_key: jax.Array,
         initial_draft_logits: jnp.ndarray,  # [K, V] logits for initial draft
+        adapter_params=None,
     ):
         """
         Main Anchor-TiDAR generation loop.
@@ -287,7 +350,14 @@ def make_anchor_tidar_generate_fn(
             
             # === Forward pass + optimistic KV write ===
             # Optimistically writes current_draft KVs at [prefix_len, ..., prefix_len+K-1].
-            logits, cache = decode_apply(params, cache, step_tokens, step_pos_ids, prefix_len)
+            logits, cache = decode_apply(
+                params,
+                adapter_params,
+                cache,
+                step_tokens,
+                step_pos_ids,
+                prefix_len,
+            )
             
             # Extract verify logits: positions 0..K-1 predict tokens at 1..K
             verify_logits = logits[:draft_len]  # [K, V]
@@ -428,6 +498,15 @@ def make_anchor_tidar_component_profile_fns(
     decode_bias = jax.device_put(build_decode_bias_template(cache_len, draft_len, bias_value))
     position_template = jax.device_put(build_decode_position_template(draft_len))
     predraft_masks = jax.device_put(jnp.full((draft_len * draft_len,), mask_id, dtype=jnp.int32))
+    decode_adapter_mask = jax.device_put(
+        jnp.concatenate(
+            [
+                jnp.zeros((1, draft_len), dtype=jnp.bool_),
+                jnp.ones((1, draft_len * draft_len), dtype=jnp.bool_),
+            ],
+            axis=1,
+        )
+    )
     use_single_pass_predraft_sampling = decode_predraft_sampling_mode == "single_pass"
 
     @jax.jit
@@ -436,11 +515,17 @@ def make_anchor_tidar_component_profile_fns(
         cache_vars,
         current_draft: jnp.ndarray,   # [K]
         prefix_len: jnp.ndarray,      # scalar
+        adapter_params=None,
     ):
         step_tokens = jnp.concatenate([current_draft, predraft_masks])  # [K + K*K]
         step_pos_ids = (prefix_len + position_template).astype(jnp.int32)
+        variables = {"params": params, "cache": cache_vars}
+        adapter_mask = None
+        if adapter_params is not None:
+            variables["adapters"] = adapter_params
+            adapter_mask = decode_adapter_mask
         logits, mutated = model.apply(
-            {"params": params, "cache": cache_vars},
+            variables,
             step_tokens[None, :],
             deterministic=True,
             use_kv_cache=True,
@@ -450,6 +535,7 @@ def make_anchor_tidar_component_profile_fns(
             attn_bias=decode_bias,
             position_ids=step_pos_ids[None, :],
             kv_cache_len=cache_len,
+            adapter_mask=adapter_mask,
             mutable=["cache"],
         )
         return logits[0], mutated["cache"]
@@ -502,6 +588,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--global_config", type=str, default=None)
     parser.add_argument("--checkpoint", type=str, default="latest")
     parser.add_argument("--checkpoint_dir", type=str, default=None)
+    parser.add_argument("--adapter", type=str, default=None)
     parser.add_argument("--prompt", type=str, default="Once upon a time")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=None)
@@ -560,9 +647,18 @@ def main():
     if args.component_breakdown_iters < 0:
         raise ValueError("component_breakdown_iters must be >= 0")
     
-    # Load checkpoint
-    checkpoint_path = resolve_checkpoint_path(cfg, args.checkpoint, args.checkpoint_dir)
+    # Load frozen base and optional adapter checkpoints.
+    lora_config = lora_config_from_mapping(cfg.lora)
+    if lora_config.enabled and not bool(cfg.lora.separate_mask_embedding):
+        raise ValueError("Frozen-base TiDAR inference requires lora.separate_mask_embedding=true")
+    checkpoint_request = args.checkpoint
+    if lora_config.enabled and checkpoint_request == "latest" and cfg.lora.base_checkpoint:
+        checkpoint_request = str(cfg.lora.base_checkpoint)
+    checkpoint_path = resolve_checkpoint_path(cfg, checkpoint_request, args.checkpoint_dir)
+    adapter_checkpoint_path = resolve_adapter_checkpoint_path(cfg, args.adapter, args.checkpoint_dir)
     print(f"Checkpoint: {checkpoint_path}")
+    if adapter_checkpoint_path is not None:
+        print(f"Adapter: {adapter_checkpoint_path}")
     
     # Load tokenizer
     tokenizer = load_tokenizer(cfg)
@@ -583,23 +679,85 @@ def main():
     
     # Setup mask token
     base_token = getattr(cfg.tokenizer, "mask_token_override", None) or "[MASK]"
-    mask_token, mask_id, added_tokens = ensure_tidar_mask_token(tokenizer, base_token=base_token)
+    mask_token, mask_id, added_tokens = ensure_tidar_mask_token(
+        tokenizer, base_token=base_token, force_new=lora_config.enabled
+    )
     if added_tokens:
         print(f"Added mask token '{mask_token}' (id={mask_id})")
     else:
         print(f"Using mask token '{mask_token}' (id={mask_id})")
     
-    # Build model and load params
-    model = build_model(cfg, len(tokenizer), context_length, draft_len)
+    # Build model and load params.
     params = load_params(checkpoint_path)
-    
+    base_vocab_size = int(params["Embed_0"]["embedding"].shape[0])
+    if lora_config.enabled:
+        if mask_id < base_vocab_size or len(tokenizer) != base_vocab_size + 1:
+            raise ValueError(
+                "Frozen-base TiDAR requires one input-only mask outside the original vocabulary: "
+                f"mask_id={mask_id}, tokenizer={len(tokenizer)}, base_vocab={base_vocab_size}"
+            )
+        if prompt_ids.size and int(prompt_ids.max()) >= base_vocab_size:
+            raise ValueError("Prompt contains a token outside the frozen base vocabulary")
+        model_vocab_size = base_vocab_size
+    else:
+        model_vocab_size = len(tokenizer)
+
+    model = build_model(
+        cfg,
+        model_vocab_size,
+        context_length,
+        draft_len,
+        mask_token_id=int(mask_id) if lora_config.enabled else None,
+    )
+
     rng = jax.random.PRNGKey(args.seed)
     rng, resize_key = jax.random.split(rng)
-    params, added_rows = resize_embedding_params(params, len(tokenizer), key=resize_key)
-    if added_rows:
-        print(f"Expanded embeddings by {added_rows} rows")
-    
+    adapters_init_key = jax.random.fold_in(resize_key, 2)
+    adapter_params = None
+    if lora_config.enabled:
+        dummy = jnp.zeros((1, 2), dtype=jnp.int32)
+        dummy_route = jnp.zeros(dummy.shape, dtype=jnp.bool_)
+        params_template = jax.eval_shape(
+            lambda params_key, adapters_key: model.init(
+                {"params": params_key, "adapters": adapters_key},
+                dummy,
+                deterministic=True,
+                adapter_mask=dummy_route,
+            )["params"],
+            resize_key,
+            adapters_init_key,
+        )
+        assert_tree_compatible(params_template, params, label="TiDAR base checkpoint")
+        _, initialized = model.apply(
+            {"params": params},
+            dummy,
+            deterministic=True,
+            adapter_mask=dummy_route,
+            rngs={"adapters": adapters_init_key},
+            mutable=["adapters"],
+        )
+        assert adapter_checkpoint_path is not None
+        adapter_params = load_params(adapter_checkpoint_path)
+        assert_tree_compatible(
+            initialized["adapters"],
+            adapter_params,
+            label="TiDAR adapter checkpoint",
+        )
+        validate_adapter_checkpoint_manifest(
+            adapter_checkpoint_path,
+            base_checkpoint=checkpoint_path,
+            config=lora_config,
+            base_parameter_count=count_parameters(params),
+            adapter_parameter_count=count_parameters(adapter_params),
+        )
+    else:
+        params, added_rows = resize_embedding_params(params, len(tokenizer), key=resize_key)
+        if added_rows:
+            print(f"Expanded embeddings by {added_rows} rows")
+
     params = jax.device_put(params)
+    if adapter_params is not None:
+        adapter_params = jax.device_put(adapter_params)
     
     # Get pad/eos tokens
     pad_token_id = tokenizer.pad_token_id
@@ -610,7 +768,13 @@ def main():
     eos_id_for_jit = int(eos_id) if eos_id is not None else -1
     
     # Initialize KV cache
-    cache_vars = init_kv_cache(model, batch_size=1, pad_token_id=pad_token_id)
+    cache_vars = init_kv_cache(
+        model,
+        batch_size=1,
+        pad_token_id=pad_token_id,
+        params=params,
+        adapter_params=adapter_params,
+    )
     cache_vars = jax.device_put(cache_vars)
     
     # Prefill prompt + initial draft (single pass)
@@ -624,6 +788,7 @@ def main():
         mask_id=int(mask_id),
         kv_cache_len=cache_len,
         bias_value=bias_value,
+        adapter_params=adapter_params,
     )
     
     # Prepare output buffer
@@ -664,6 +829,7 @@ def main():
         prev_logit,
         rng,
         initial_draft_logits,
+        adapter_params,
     )
 
     def run_generate_once():
@@ -777,7 +943,11 @@ def main():
         # Warmup compile and stabilize.
         for _ in range(2):
             warm_logits, profile_cache = decode_forward_fn(
-                params, profile_cache, profile_current_draft, profile_prefix_len
+                params,
+                profile_cache,
+                profile_current_draft,
+                profile_prefix_len,
+                adapter_params,
             )
             (
                 profile_rng,
@@ -796,7 +966,11 @@ def main():
         t0 = time.perf_counter()
         for _ in range(comp_iters):
             warm_logits, profile_cache = decode_forward_fn(
-                params, profile_cache, profile_current_draft, profile_prefix_len
+                params,
+                profile_cache,
+                profile_current_draft,
+                profile_prefix_len,
+                adapter_params,
             )
         warm_logits.block_until_ready()
         decode_forward_s = time.perf_counter() - t0
